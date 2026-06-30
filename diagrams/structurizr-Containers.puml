@@ -1,0 +1,41 @@
+@startuml
+title <size:24>Container View: Autonomous Maintenance Platform</size>\n<size:24>C1 — inside the Autonomous Maintenance Platform</size>
+
+set separator none
+left to right direction
+
+<style>
+  root {
+    BackgroundColor: #ffffff
+    FontColor: #444444
+  }
+</style>
+
+!include <C4/C4>
+!include <C4/C4_Context>
+!include <C4/C4_Container>
+
+System(GitHub, "GitHub", $descr="Issues, PRs, branch protection, CI/CD — the integration substrate / source of truth.", $tags="", $link="")
+System(ClaudeAnthropicAPI, "Claude (Anthropic API)", $descr="LLM engine behind the dev agent & monitor.", $tags="", $link="")
+System(Codex, "Codex", $descr="Independent pre-PR code reviewer (runs in-container).", $tags="", $link="")
+System(ProductTelemetry, "Product Telemetry", $descr="Logs, metrics & Alertmanager signals from the live bot.", $tags="", $link="")
+
+System_Boundary("AutonomousMaintenancePlatform_boundary", "Autonomous Maintenance Platform", $tags="") {
+  Container(AutonomousMaintenancePlatform.ControlPlaneScheduler, "Control Plane / Scheduler", $techn="Python service", $descr="Triages and assigns ready issues, spawns burst containers, enforces budgets & kill-switch, owns sessions.", $tags="", $link="")
+  Container(AutonomousMaintenancePlatform.DevAgentburstworker, "Dev Agent (burst worker)", $techn="Docker + claude-agent-sdk", $descr="Per-burst: clone, branch, code, test, self-review, open PR; resumes its session.", $tags="", $link="")
+  Container(AutonomousMaintenancePlatform.Monitor, "Monitor", $techn="Python service / separate repo", $descr="Watches telemetry and files structured issues (auto provenance).", $tags="", $link="")
+  ContainerDb(AutonomousMaintenancePlatform.SessionRunStore, "Session & Run Store", $techn="S3 / Postgres", $descr="Resumable Claude sessions + run telemetry / violations ledger, keyed by issue.", $tags="", $link="")
+}
+
+Rel(AutonomousMaintenancePlatform.ControlPlaneScheduler, GitHub, "Polls ready issues, assigns, tracks PRs", $techn="API", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.ControlPlaneScheduler, AutonomousMaintenancePlatform.DevAgentburstworker, "Spawns burst, injects task + session", $techn="Docker", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.ControlPlaneScheduler, AutonomousMaintenancePlatform.SessionRunStore, "Loads/saves sessions & run telemetry", $techn="", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.DevAgentburstworker, GitHub, "Clone, push branch, open PR", $techn="git / API", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.DevAgentburstworker, ClaudeAnthropicAPI, "Drives the agent loop", $techn="API", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.DevAgentburstworker, Codex, "Pre-PR self-review", $techn="", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.Monitor, ProductTelemetry, "Watches", $techn="read-only", $tags="", $link="")
+Rel(AutonomousMaintenancePlatform.Monitor, GitHub, "Files issues (auto provenance)", $techn="", $tags="", $link="")
+
+SHOW_LEGEND(true)
+hide stereotypes
+@enduml

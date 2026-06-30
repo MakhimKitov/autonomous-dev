@@ -1,0 +1,34 @@
+{
+  "title": "Autonomous Maintenance Platform — Containers (C1)",
+  "rankdir": "LR",
+  "nodes": [
+    { "id": "controlPlane", "type": "container", "name": "Control Plane / Scheduler", "tech": "[Python service]", "desc": "Triages→assigns ready issues, spawns burst containers, enforces budgets & kill-switch, owns sessions" },
+    { "id": "devAgent", "type": "container", "name": "Dev Agent (burst worker)", "tech": "[Docker + claude-agent-sdk]", "desc": "Per-burst: clone, branch, code, test, self-review, open PR; resumes session" },
+    { "id": "monitor", "type": "container", "name": "Monitor", "tech": "[Python service · separate repo]", "desc": "Watches telemetry, files structured issues (auto provenance)" },
+    { "id": "store", "type": "database", "name": "Session & Run Store", "tech": "[S3 / Postgres]", "desc": "Resumable Claude sessions + run telemetry / violations ledger, keyed by issue" },
+
+    { "id": "humanOwner", "type": "person", "name": "Human Owner", "tech": "[Person]", "desc": "Approves `ready` label, reviews & merges PRs" },
+    { "id": "discordUsers", "type": "person", "name": "Discord Users", "tech": "[Person]", "desc": "Untrusted message source" },
+    { "id": "bot", "type": "external", "name": "Discord Bot — Product", "tech": "[Software System]", "desc": "Maintained product, live in prod" },
+    { "id": "github", "type": "external", "name": "GitHub", "tech": "[Issues · PRs · branch protection · CI/CD]", "desc": "Integration substrate / source of truth" },
+    { "id": "claude", "type": "external", "name": "Claude (Anthropic API)", "tech": "[LLM]", "desc": "Agent engine" },
+    { "id": "codex", "type": "external", "name": "Codex", "tech": "[AI reviewer]", "desc": "Pre-PR review (in-container)" },
+    { "id": "copilot", "type": "external", "name": "GitHub Copilot", "tech": "[AI reviewer]", "desc": "Post-PR review on the PR" },
+    { "id": "telemetry", "type": "external", "name": "Product Telemetry", "tech": "[Logs / Metrics / Alertmanager]", "desc": "Signals from the live bot" }
+  ],
+  "edges": [
+    { "from": "discordUsers", "to": "bot", "label": "Messages [Discord]" },
+    { "from": "bot", "to": "telemetry", "label": "Emits logs/metrics", "dashed": true },
+    { "from": "monitor", "to": "telemetry", "label": "Watches [read-only]" },
+    { "from": "monitor", "to": "github", "label": "Files issues (auto)" },
+    { "from": "humanOwner", "to": "github", "label": "Triage (ready label), review & merge PRs" },
+    { "from": "controlPlane", "to": "github", "label": "Polls ready issues, assigns, tracks PRs [API]" },
+    { "from": "controlPlane", "to": "devAgent", "label": "Spawns burst, injects task + session [Docker]" },
+    { "from": "controlPlane", "to": "store", "label": "Loads/saves sessions & telemetry" },
+    { "from": "devAgent", "to": "github", "label": "Clone, push branch, open PR [git/API]" },
+    { "from": "devAgent", "to": "claude", "label": "Agent loop [API]" },
+    { "from": "devAgent", "to": "codex", "label": "Pre-PR self-review" },
+    { "from": "copilot", "to": "github", "label": "Reviews PR" },
+    { "from": "github", "to": "bot", "label": "CI tests & deploys on merge" }
+  ]
+}
