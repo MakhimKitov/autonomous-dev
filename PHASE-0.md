@@ -47,8 +47,10 @@ Per `GITHUB-INTERFACE.md`:
   merge/admin/secrets.
 - **Branch protection** on the target's default branch: PR required, human approval,
   required checks, dev App cannot merge.
-- **Secrets**: Anthropic key + GitHub App key live in the **control plane** env only; the
-  container gets the scoped GitHub token and nothing else (no prod creds exist anywhere).
+- **Secrets**: the subscription OAuth token (`claude setup-token` →
+  `CLAUDE_CODE_OAUTH_TOKEN`) + GitHub App key live in the **control plane** env only;
+  the container gets the OAuth token + scoped GitHub token per burst and nothing else
+  (no prod creds exist anywhere).
 - Minimal **commitlint** + **release-please** workflows in the target (Copilot reviewer
   can wait until PRs actually flow).
 
