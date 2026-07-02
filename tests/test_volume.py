@@ -24,7 +24,13 @@ def test_full_cycle_burst_then_resume(tmp_path):
     (volume1 / "projects" / "sess.jsonl").write_text('{"turn":1}\n', encoding="utf-8")
     (volume1 / BURST_RESULT_FILENAME).write_text(
         json.dumps(
-            {"session_id": "sess-1", "total_cost_usd": 0.42, "num_turns": 7, "is_error": False}
+            {
+                "session_id": "sess-1",
+                "model": "claude-sonnet-5-20260203",
+                "total_cost_usd": 0.42,
+                "num_turns": 7,
+                "is_error": False,
+            }
         ),
         encoding="utf-8",
     )
@@ -33,10 +39,11 @@ def test_full_cycle_burst_then_resume(tmp_path):
         encoding="utf-8",
     )
 
-    burst = BurstRecord(burst_id="b1", task_id="42")
+    burst = BurstRecord(burst_id="b1", task_id="42", model="claude-sonnet-5")
     outcome = harvest_volume(volume1, burst, archive, ledger)
 
     assert burst.session_id == "sess-1"
+    assert burst.model == "claude-sonnet-5-20260203"  # resolved beats requested
     assert burst.cost_usd == 0.42
     assert burst.num_turns == 7
     assert outcome.violation_count == 1

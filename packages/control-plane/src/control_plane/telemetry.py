@@ -45,17 +45,17 @@ def traceparent_of(span: trace.Span) -> str:
 
 @contextmanager
 def burst_span(
-    task_id: str, burst_id: str, role: str, kind: str
+    task_id: str, burst_id: str, role: str, kind: str, model: str | None = None
 ) -> Iterator[tuple[trace.Span, str]]:
     """Open the burst's root span; yields (span, traceparent-for-the-container)."""
     tracer = trace.get_tracer(SERVICE_NAME)
-    with tracer.start_as_current_span(
-        "burst",
-        attributes={
-            "task.id": task_id,
-            "burst.id": burst_id,
-            "burst.role": role,
-            "burst.kind": kind,
-        },
-    ) as span:
+    attributes = {
+        "task.id": task_id,
+        "burst.id": burst_id,
+        "burst.role": role,
+        "burst.kind": kind,
+    }
+    if model:
+        attributes["burst.model"] = model
+    with tracer.start_as_current_span("burst", attributes=attributes) as span:
         yield span, traceparent_of(span)

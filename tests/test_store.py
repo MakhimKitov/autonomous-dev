@@ -64,14 +64,46 @@ def test_ledger_task_and_burst_roundtrip(tmp_path):
     ledger.upsert_task(task)
     assert ledger.get_task("42").session_id == "sess-1"
 
-    burst = BurstRecord(burst_id="b1", task_id="42", trace_id="0" * 32)
+    burst = BurstRecord(burst_id="b1", task_id="42", trace_id="0" * 32, model="claude-sonnet-5")
     ledger.record_burst(burst)
     burst.status = BurstStatus.SUCCEEDED
     burst.exit_code = 0
     burst.cost_usd = 0.5
+    burst.model = "claude-sonnet-5-20260203"  # harvest overwrote requested with resolved
     ledger.finish_burst(burst)
+    row = ledger._conn.execute("SELECT model FROM bursts WHERE burst_id='b1'").fetchone()
+    assert row["model"] == "claude-sonnet-5-20260203"
 
     ledger.record_violation(Violation(task_id="42", burst_id="b1", tool="Read", reason="WALL"))
     found = ledger.violations("42")
     assert len(found) == 1 and found[0].tool == "Read"
     assert ledger.violations("other") == []
+
+
+def test_ledger_migrates_pre_model_schema(tmp_path):
+    """A ledger created before the model column existed gains it on open."""
+    import sqlite3
+
+    db = tmp_path / "ledger.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE bursts (burst_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, "
+        "kind TEXT NOT NULL, role TEXT NOT NULL, status TEXT NOT NULL, "
+        "trace_id TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, finished_at TEXT, "
+        "exit_code INTEGER, cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER, "
+        "num_turns INTEGER, session_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO bursts (burst_id, task_id, kind, role, status, started_at) "
+        "VALUES ('old', '42', 'work', 'dev', 'succeeded', 'then')"
+    )
+    conn.commit()
+    conn.close()
+
+    ledger = SqliteLedger(db)  # opening migrates
+    ledger.record_burst(BurstRecord(burst_id="new", task_id="42", model="claude-sonnet-5"))
+    rows = {
+        r["burst_id"]: r["model"]
+        for r in ledger._conn.execute("SELECT burst_id, model FROM bursts")
+    }
+    assert rows == {"old": None, "new": "claude-sonnet-5"}

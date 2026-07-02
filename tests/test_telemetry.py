@@ -16,6 +16,14 @@ def test_burst_span_mints_valid_traceparent():
         assert f"{ctx.span_id:016x}" in traceparent
 
 
+def test_burst_span_carries_the_model():
+    init_telemetry()
+    with burst_span("42", "b1", "dev", "work", model="claude-sonnet-5") as (span, _):
+        assert span.attributes.get("burst.model") == "claude-sonnet-5"
+    with burst_span("42", "b2", "dev", "work") as (span, _):
+        assert "burst.model" not in span.attributes
+
+
 def test_each_burst_gets_its_own_trace():
     init_telemetry()
     with burst_span("42", "b1", "dev", "work") as (_, tp1):

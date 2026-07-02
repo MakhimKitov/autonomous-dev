@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS bursts (
     started_at TEXT NOT NULL,
     finished_at TEXT,
     exit_code INTEGER,
+    model TEXT,
     cost_usd REAL,
     input_tokens INTEGER,
     output_tokens INTEGER,
@@ -133,7 +134,15 @@ class SqliteLedger:
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        # Phase-0 migration: additive columns only (CREATE IF NOT EXISTS won't
+        # touch a ledger created before the column existed).
+        self._ensure_column("bursts", "model", "TEXT")
         self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, decl: str) -> None:
+        cols = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def upsert_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()
@@ -162,7 +171,7 @@ class SqliteLedger:
     def finish_burst(self, burst: BurstRecord) -> None:
         self._conn.execute(
             "UPDATE bursts SET status=:status, finished_at=:finished_at, exit_code=:exit_code, "
-            "cost_usd=:cost_usd, input_tokens=:input_tokens, output_tokens=:output_tokens, "
+            "model=:model, cost_usd=:cost_usd, input_tokens=:input_tokens, output_tokens=:output_tokens, "
             "num_turns=:num_turns, session_id=:session_id "
             "WHERE burst_id=:burst_id",
             asdict(burst),

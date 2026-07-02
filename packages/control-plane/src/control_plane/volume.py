@@ -47,6 +47,7 @@ def harvest_volume(
     if result_path.is_file():
         result = json.loads(result_path.read_text(encoding="utf-8"))
         burst.session_id = result.get("session_id") or burst.session_id
+        burst.model = result.get("model") or burst.model  # resolved beats requested
         burst.cost_usd = result.get("total_cost_usd")
         burst.input_tokens = result.get("input_tokens")
         burst.output_tokens = result.get("output_tokens")

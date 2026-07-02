@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     HookMatcher,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     query,
 )
@@ -44,6 +45,7 @@ class BurstResult:
     role: str
     burst_kind: str
     session_id: str | None = None
+    model: str | None = None  # resolved by the CLI (init message), not what we requested
     num_turns: int | None = None
     total_cost_usd: float | None = None  # advisory under subscription billing
     input_tokens: int | None = None
@@ -111,6 +113,8 @@ async def run_burst(env: BurstEnv) -> BurstResult:
                 if isinstance(block, TextBlock):
                     print(block.text, flush=True)
                     chunks.append(block.text)
+        elif isinstance(message, SystemMessage) and message.subtype == "init":
+            result.model = message.data.get("model") or result.model
         elif isinstance(message, ResultMessage):
             result.session_id = message.session_id
             result.num_turns = getattr(message, "num_turns", None)

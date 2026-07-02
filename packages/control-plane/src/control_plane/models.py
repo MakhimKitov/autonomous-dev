@@ -62,6 +62,7 @@ class BurstRecord:
     started_at: str = field(default_factory=utc_now)
     finished_at: str | None = None
     exit_code: int | None = None
+    model: str | None = None  # requested at spawn, overwritten by the resolved model on harvest
     cost_usd: float | None = None  # advisory under subscription billing
     input_tokens: int | None = None
     output_tokens: int | None = None

@@ -21,7 +21,7 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
-from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner
+from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, resolve_model
 from control_plane.store import LocalSessionArchive, SqliteLedger
 from control_plane.telemetry import burst_span, init_telemetry
 from control_plane.volume import harvest_volume, prepare_volume
@@ -42,7 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     burst.add_argument("--fresh", action="store_true", help="ignore any stored session (no resume)")
     burst.add_argument("--budget", type=float, default=None, help="max_budget_usd for the burst")
     burst.add_argument("--max-turns", type=int, default=None)
-    burst.add_argument("--model", default=None)
+    burst.add_argument(
+        "--model",
+        default=None,
+        help="model for this burst (default: $DEV_AGENT_MODEL, else the pinned platform default)",
+    )
 
     sub.add_parser(
         "github-check",
@@ -89,9 +93,11 @@ def _run_burst(args: argparse.Namespace) -> int:
     archive = LocalSessionArchive(data_dir / "sessions")
     ledger = SqliteLedger(data_dir / "ledger.sqlite3")
 
+    model = resolve_model(args.model)
     codex_auth = Path.home() / ".codex"
     codex_auth_dir = codex_auth if (codex_auth / "auth.json").is_file() else None
     if args.mode == "run":
+        print(f"[model] {model}")
         print(f"[codex] {'auth mounted' if codex_auth_dir else 'no auth — pre-PR review unavailable'}")
 
     github_token = git_name = git_email = None
@@ -112,8 +118,11 @@ def _run_burst(args: argparse.Namespace) -> int:
     volume = prepare_volume(data_dir / "volumes", burst_id, args.task_id, archive)
     resume = None if args.fresh else task.session_id
 
-    burst = BurstRecord(burst_id=burst_id, task_id=args.task_id)
-    with burst_span(args.task_id, burst_id, burst.role, burst.kind) as (span, traceparent):
+    burst = BurstRecord(burst_id=burst_id, task_id=args.task_id, model=model)
+    with burst_span(args.task_id, burst_id, burst.role, burst.kind, model=model) as (
+        span,
+        traceparent,
+    ):
         burst.trace_id = f"{span.get_span_context().trace_id:032x}"
         ledger.record_burst(burst)
         spec = BurstSpec(
@@ -127,7 +136,7 @@ def _run_burst(args: argparse.Namespace) -> int:
             resume_session_id=resume,
             max_budget_usd=args.budget,
             max_turns=args.max_turns,
-            model=args.model,
+            model=model,
             traceparent=traceparent,
             github_token=github_token,
             git_user_name=git_name,
@@ -142,6 +151,8 @@ def _run_burst(args: argparse.Namespace) -> int:
         span.set_attribute("burst.exit_code", exit_code)
 
         outcome = harvest_volume(volume, burst, archive, ledger)
+        if burst.model:
+            span.set_attribute("burst.model", burst.model)  # resolved beats requested
         ledger.finish_burst(burst)
         task.session_id = burst.session_id or task.session_id
         task.transcript_key = outcome.transcript_key
@@ -150,7 +161,7 @@ def _run_burst(args: argparse.Namespace) -> int:
 
     print(
         f"[burst {burst_id}] exit={exit_code} status={burst.status} "
-        f"session={burst.session_id} violations={outcome.violation_count} "
+        f"model={burst.model} session={burst.session_id} violations={outcome.violation_count} "
         f"transcript={outcome.transcript_key} log={log_path}"
     )
     trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]

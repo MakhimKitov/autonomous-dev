@@ -17,6 +17,17 @@ from dev_agent import env as agentenv
 
 DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
 
+# The platform pins the burst model explicitly — "unset" must mean *our* pinned
+# default, never whatever `claude` the image happens to ship with (that default
+# drifts across CLI releases, silently changing the experiment's key variable).
+DEFAULT_MODEL = "claude-sonnet-5"
+MODEL_ENV = "DEV_AGENT_MODEL"  # control-plane-side override (.env), not a container var
+
+
+def resolve_model(explicit: str | None = None) -> str:
+    """Burst model policy: explicit (--model) > DEV_AGENT_MODEL > pinned default."""
+    return explicit or os.environ.get(MODEL_ENV) or DEFAULT_MODEL
+
 
 @dataclass(slots=True)
 class BurstSpec:

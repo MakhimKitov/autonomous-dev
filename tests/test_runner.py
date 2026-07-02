@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from control_plane.runner import BurstSpec, DockerRunner
+from control_plane.runner import DEFAULT_MODEL, MODEL_ENV, BurstSpec, DockerRunner, resolve_model
 from dev_agent import env as agentenv
 
 
@@ -98,6 +98,21 @@ def test_codex_auth_mounted_only_for_run_bursts(monkeypatch):
     spec_check = _spec(codex_auth_dir=Path("/host/.codex"), command="check")
     assert "/host/.codex:/home/agent/.codex" in DockerRunner().build_command(spec_run)
     assert "/host/.codex:/home/agent/.codex" not in DockerRunner().build_command(spec_check)
+
+
+def test_model_env_var_and_spec_passthrough(monkeypatch):
+    monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
+    cmd = " ".join(DockerRunner().build_command(_spec(model="claude-opus-4-8")))
+    assert f"{agentenv.MODEL}=claude-opus-4-8" in cmd
+
+
+def test_model_policy_precedence(monkeypatch):
+    """--model beats DEV_AGENT_MODEL beats the pinned default; never the CLI's whim."""
+    monkeypatch.delenv(MODEL_ENV, raising=False)
+    assert resolve_model(None) == DEFAULT_MODEL
+    monkeypatch.setenv(MODEL_ENV, "claude-haiku-4-5-20251001")
+    assert resolve_model(None) == "claude-haiku-4-5-20251001"
+    assert resolve_model("claude-opus-4-8") == "claude-opus-4-8"
 
 
 def test_optional_env_only_when_set(monkeypatch):
