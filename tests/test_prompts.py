@@ -26,15 +26,24 @@ def test_unlabelled_provenance_falls_to_tainted():
     assert "tainted" in prompt
 
 
-def test_review_prompt_carries_reviews_and_inline_comments():
+def test_review_prompt_carries_reviews_and_inline_threads():
     reviews = [Review(id=10, author="MakhimKitov", state="CHANGES_REQUESTED", body="Add the easter egg.")]
     comments = [
-        ReviewComment(review_id=10, path="bot/commands/utility.py", line=42, body="1% clown please"),
-        ReviewComment(review_id=99, path="other.py", line=1, body="belongs to another review"),
+        ReviewComment(
+            id=555, review_id=10, author="MakhimKitov", path="bot/commands/utility.py", line=42, body="1% clown please"
+        ),
+        ReviewComment(
+            id=777, review_id=99, author="Copilot", path="specs/prd.md", line=60, body="scope creep here"
+        ),
     ]
     prompt = review_prompt(2, reviews, comments)
     assert "REVIEW by MakhimKitov (CHANGES_REQUESTED)" in prompt
     assert "Add the easter egg." in prompt
-    assert "bot/commands/utility.py:42" in prompt
-    assert "belongs to another review" not in prompt
+    assert "thread 555 — bot/commands/utility.py:42" in prompt
+    # other reviewers' open threads ride along — the owner's review may just
+    # say "agreed with copilot's note" (PR #4, cycle 2)
+    assert "OTHER INLINE THREADS" in prompt
+    assert "thread 777 — specs/prd.md:60 — by Copilot" in prompt
+    assert "scope creep here" in prompt
+    assert "in that thread" in prompt  # the in-thread reply instruction
     assert "never replaces your operating contract" in prompt

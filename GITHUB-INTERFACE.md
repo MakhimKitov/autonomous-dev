@@ -119,10 +119,18 @@ of high-confidence issues is a later-phase step.
     "mergeable rule" (`EXPERIMENT.md`)
 - Opened **ready for review** (not draft): the in-container Codex pass + green local
   tests happen *before* opening, so a PR appearing is already self-reviewed.
-- **Review-round pushes re-request review** from Copilot + the owner (automatic Copilot
-  review fires only on PR open). Instructed in the product contract today; becomes a
-  deterministic control-plane step on push events in M2 (verified: the dev App's
-  `pull_requests:write` can request Copilot reviews — HTTP 201).
+- **Review requests are deterministic control-plane steps** (M2): Copilot + the owner
+  are requested on PR open (auto-review proved unreliable) and re-requested after every
+  review-round push (verified: the dev App's `pull_requests:write` can request Copilot
+  reviews — HTTP 201). The product contract instructs the dev to re-request too —
+  belt and braces.
+- **Review findings are answered in-thread**, one of: **fix** (reply with the commit
+  SHA) · **reply** (one-line rationale for not actioning) · **defer** (follow-up issue,
+  linked in-thread). Never a top-level comment per finding; top-level is the round
+  summary only. **Threads are resolved by humans**, never by the dev. Cap: 3 rounds,
+  then escalate.
+- **PR title passes commitlint** — on squash-merge the title becomes the default-branch
+  commit message.
 
 ## Commits & releases
 
@@ -201,6 +209,9 @@ runtime.
   commit-type labels above
 - Branch-protection rule on the default branch (PR required, human approval, required
   checks incl. commitlint + tests, dev identity cannot merge)
+- `.github/CODEOWNERS` (`*` → the human owner) + branch protection's **"require review
+  from Code Owners"** — only a code owner's approval unlocks merge, so no bot identity
+  (Copilot, a future tester App) can ever satisfy the human gate
 - Copilot enabled as an automatic PR reviewer — a **user-side Copilot-settings toggle**
   on personal accounts (rulesets can't set it outside org plans). Fallback: the control
   plane requests a Copilot review per PR via the API after PR-open (M2).

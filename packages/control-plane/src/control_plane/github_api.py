@@ -59,7 +59,9 @@ class Review:
 
 @dataclass(slots=True)
 class ReviewComment:
+    id: int  # the thread id the dev replies to (pulls/<n>/comments/<id>/replies)
     review_id: int | None
+    author: str
     path: str
     line: int | None
     body: str
@@ -187,7 +189,9 @@ class GitHubApi:
         )
         return [
             ReviewComment(
+                id=item["id"],
                 review_id=item.get("pull_request_review_id"),
+                author=(item.get("user") or {}).get("login", ""),
                 path=item.get("path", ""),
                 line=item.get("line"),
                 body=item.get("body") or "",
