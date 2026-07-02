@@ -23,6 +23,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
+# uv — the product's env/deps tool (warm base: the burst just runs `uv sync`).
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 # Codex CLI — the pre-PR reviewer. Auth is a control-plane-mounted ~/.codex
 # (ChatGPT subscription); nothing is baked in.
 RUN arch="$(dpkg --print-architecture)" \
