@@ -91,6 +91,9 @@ def setup_git(env: BurstEnv) -> None:
         ("user.name", env.git_user_name or "dev-agent"),
         ("user.email", env.git_user_email or "dev-agent@invalid"),
         ("credential.helper", "!gh auth git-credential"),
+        # No ssh in the container (no keys, by design) — an SSH-origin clone
+        # must reach GitHub over HTTPS through the credential helper.
+        ("url.https://github.com/.insteadOf", "git@github.com:"),
     ]
     for key, value in settings:
         subprocess.run(

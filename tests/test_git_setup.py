@@ -30,6 +30,8 @@ def test_configures_identity_and_helper(tmp_path):
     assert "auto-dev[bot]" in config
     assert "gh auth git-credential" in config
     assert "ghs_x" not in config  # the token never touches disk
+    # SSH origins must be rewritten — the container has no ssh (no keys, by design)
+    assert 'insteadOf = git@github.com:' in config
 
 
 def test_noop_without_token(tmp_path):

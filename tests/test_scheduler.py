@@ -125,6 +125,8 @@ def test_work_burst_to_awaiting_review(rig):
     assert task.pr_number == 2 and task.next_burst_kind is None
     assert spawned[0]["kind"] == "work"
     assert "trusted intent" in spawned[0]["prompt"]  # human provenance framing
+    # deterministic on PR open — Copilot auto-review observed not firing (PR #4)
+    assert api.rerequests == [(2, (COPILOT_REVIEWER, OWNER))]
 
 
 def test_failed_bursts_retry_then_block(rig):

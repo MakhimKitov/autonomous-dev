@@ -292,6 +292,7 @@ class Scheduler:
                 return
             task.pr_number = pr.number
             print(f"[scheduler] task #{task.task_id}: PR #{pr.number} open")
+            self._request_re_review(task)  # Copilot auto-review is not reliable on open
         else:
             task.last_review_id = max(review.id for review in pending)
             self._request_re_review(task)
@@ -300,7 +301,8 @@ class Scheduler:
         self.stores.ledger.upsert_task(task)
 
     def _request_re_review(self, task: TaskRecord) -> None:
-        """The deterministic step that closes the M1 gap — never fatal."""
+        """Deterministic review request: on PR open (auto-review observed not
+        firing) and after review-round pushes (the M1 gap). Never fatal."""
         try:
             self.api.request_reviewers(task.pr_number, [COPILOT_REVIEWER, self.owner])
             print(f"[scheduler] re-requested review on PR #{task.pr_number}: Copilot + {self.owner}")
