@@ -211,7 +211,11 @@ operational DB — consistent with the walls (§8).
 ### Review — two independent stages
 
 1. **Pre-PR — Codex, in-container.** Before opening the PR the agent runs Codex on
-   its own diff and addresses findings (bounded rounds — no infinite loop).
+   its own diff and addresses findings (bounded rounds — no infinite loop). The
+   procedure ships as an **image-baked skill** (root-owned plugin; the agent invokes
+   it, can't edit it): pinned safe invocation — credential-scrubbed env, read-only
+   sandbox — plus the rounds cap and verbatim-verdict rule. Burst prompts carry the
+   task; procedures live in the image.
 2. **Post-PR — GitHub Copilot, on the PR.** Copilot is configured as an automatic
    reviewer on the product repo, so it reviews the diff and posts findings on PR
    creation — independently of platform compute (the burst container is already torn

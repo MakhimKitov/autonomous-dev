@@ -1,0 +1,5 @@
+{
+  "name": "dev-agent-toolkit",
+  "description": "Image-baked procedures for the autonomous dev burst worker. Root-owned: the agent can use these, never edit them.",
+  "version": "0.1.0"
+}

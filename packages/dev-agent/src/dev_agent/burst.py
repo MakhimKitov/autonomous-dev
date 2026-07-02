@@ -13,6 +13,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -28,6 +29,10 @@ from dev_agent.env import BurstEnv
 from dev_agent.walls import make_pre_tool_use_hook
 
 TEXT_TAIL_CHARS = 4000
+
+# Image-baked procedures (codex-review, …). Root-owned in the image so the
+# agent can invoke but never edit them; absent in local dev runs.
+TOOLKIT_PLUGIN_PATH = Path("/opt/dev-agent-toolkit")
 
 
 @dataclass(slots=True)
@@ -50,6 +55,11 @@ class BurstResult:
 
 
 def _to_options(env: BurstEnv) -> ClaudeAgentOptions:
+    plugins = (
+        [{"type": "local", "path": str(TOOLKIT_PLUGIN_PATH)}]
+        if TOOLKIT_PLUGIN_PATH.is_dir()
+        else []
+    )
     return ClaudeAgentOptions(
         cwd=str(env.repo_dir),
         system_prompt=build_system_prompt(env.role, env.repo_dir),
@@ -58,6 +68,7 @@ def _to_options(env: BurstEnv) -> ClaudeAgentOptions:
         max_budget_usd=env.max_budget_usd,
         permission_mode=env.permission_mode,  # type: ignore[arg-type]
         model=env.model,
+        plugins=plugins,  # type: ignore[arg-type]
         hooks={
             "PreToolUse": [
                 HookMatcher(hooks=[make_pre_tool_use_hook(env.repo_dir, env.violations_path)])

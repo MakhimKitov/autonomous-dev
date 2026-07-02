@@ -58,6 +58,10 @@ RUN useradd --create-home --uid 1000 agent \
 COPY --from=build /wheels /wheels
 RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 
+# The toolkit plugin: image-baked procedures (e.g. the codex-review skill).
+# Root-owned on purpose — the agent can use these, never edit them.
+COPY docker/dev-agent/toolkit /opt/dev-agent-toolkit
+
 USER agent
 ENV HOME=/home/agent \
     PATH="/home/agent/.local/bin:${PATH}" \
