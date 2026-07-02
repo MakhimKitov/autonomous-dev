@@ -2,8 +2,9 @@
 
 This repo is the **platform** in the autonomous-maintenance experiment: the **control
 plane** (scheduler) plus the **dev-agent** image it runs. The dev agent maintains a
-*product* repo (initially the sibling Discord bot) by working like an engineer — branch,
-code, test, open a PR — through GitHub.
+*product* repo — any codebase, passed as a parameter (the experiment's first instance
+is the sibling `discord-bot`) — by working like an engineer — branch, code, test, open
+a PR — through GitHub.
 
 ## Engine
 
@@ -16,13 +17,28 @@ than reinvent them. Requires the `claude` CLI on PATH.
 
 ```bash
 uv sync                      # create the venv, install deps
-cp .env.example .env         # add ANTHROPIC_API_KEY, or run `claude login`
+cp .env.example .env         # add CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
 ```
 
-## Run (current PoC)
+## Layout
+
+Two workspace packages behind the §12 seam — `packages/control-plane` (scheduler,
+owns all persistence + telemetry) and `packages/dev-agent` (the burst worker; ships
+alone in the image and **must never import control-plane**). The env-var contract
+lives in `dev_agent.env`; control-plane imports it, never the reverse.
+
+## Run
 
 ```bash
-uv run autonomous-dev "Summarize the repo layout" --repo ../discord-bot
+# Build the dev-agent image
+docker build -f docker/dev-agent/Dockerfile -t autonomous-dev/dev-agent:latest .
+
+# Boot smoke (no network, no key): container check in a clone
+uv run control-plane burst --task-id t1 --repo ../discord-bot --mode check --data-dir data
+
+# One real burst (needs CLAUDE_CODE_OAUTH_TOKEN in the control-plane env)
+uv run control-plane burst --task-id t1 --repo ../discord-bot \
+  --prompt "Summarize the repo layout" --budget 1.0
 ```
 
 ## Test

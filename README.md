@@ -1,8 +1,9 @@
 # autonomous-dev
 
 The **platform** in an autonomous-maintenance experiment: a control plane plus a
-dev-agent image that maintains a *product* repo (the sibling `discord-bot`) by working
-like an engineer — branch, code, test, open a PR — through GitHub. Built on
+dev-agent image that maintains a *product* repo — any codebase, passed as a parameter
+(first instance: the sibling `discord-bot`) — by working like an engineer — branch,
+code, test, open a PR — through GitHub. Built on
 [`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python).
 
 Design docs live here: **`ARCHITECTURE.md`** (the full design), **`GITHUB-INTERFACE.md`**
@@ -12,16 +13,20 @@ Design docs live here: **`ARCHITECTURE.md`** (the full design), **`GITHUB-INTERF
 
 ```bash
 uv sync
-cp .env.example .env   # add ANTHROPIC_API_KEY, or run `claude login`
+cp .env.example .env   # add CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
 
-# Current PoC: run one task against the product repo (defaults to read-only 'plan' mode):
-uv run autonomous-dev "Summarize the repo layout" --repo ../discord-bot
+# Build the dev-agent image, then drive one burst by hand:
+docker build -f docker/dev-agent/Dockerfile -t autonomous-dev/dev-agent:latest .
+uv run control-plane burst --task-id t1 --repo ../discord-bot --mode check --data-dir data
 
-uv run pytest          # tests
+uv run pytest          # structural tests, no network
 ```
 
 ## Status
 
-**PoC scaffold** — proves `claude-agent-sdk` can drive the Claude Code CLI (config → agent
-loop → streamed result + cost). To be reworked into the control-plane / dev-agent split
-described in `ARCHITECTURE.md`. Requires the `claude` CLI on PATH.
+**Phase 0, M0 done** — the `control-plane` / `dev-agent` workspace seam
+(`packages/`), the warm dev-agent image (claude CLI + burst worker, no platform
+code inside), and the manual burst choreography: prepare session volume → burst
+span (`TRACEPARENT` into the container) → `docker run` → harvest (result +
+violations → SQLite ledger, session volume → local archive). Next: M1 — one real
+issue → PR burst with the walls verified. Build plan: `PHASE-0.md`.

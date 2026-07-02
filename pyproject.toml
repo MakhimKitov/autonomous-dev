@@ -1,22 +1,23 @@
 [project]
 name = "autonomous-dev"
 version = "0.1.0"
-description = "An autonomous AI developer that maintains a target codebase via the Claude agent loop."
+description = "Autonomous maintenance platform: control plane + the dev-agent image it runs."
 readme = "README.md"
 authors = [
     { name = "MakhimKitov", email = "titov.ms.msu@yandex.ru" }
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.2.110",
+    "control-plane",
+    "dev-agent",
 ]
 
-[project.scripts]
-autonomous-dev = "autonomous_dev:main"
+[tool.uv.workspace]
+members = ["packages/*"]
 
-[build-system]
-requires = ["uv_build>=0.9.21,<0.10.0"]
-build-backend = "uv_build"
+[tool.uv.sources]
+control-plane = { workspace = true }
+dev-agent = { workspace = true }
 
 [dependency-groups]
 dev = [
