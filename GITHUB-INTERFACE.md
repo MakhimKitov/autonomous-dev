@@ -119,6 +119,10 @@ of high-confidence issues is a later-phase step.
     "mergeable rule" (`EXPERIMENT.md`)
 - Opened **ready for review** (not draft): the in-container Codex pass + green local
   tests happen *before* opening, so a PR appearing is already self-reviewed.
+- **Review-round pushes re-request review** from Copilot + the owner (automatic Copilot
+  review fires only on PR open). Instructed in the product contract today; becomes a
+  deterministic control-plane step on push events in M2 (verified: the dev App's
+  `pull_requests:write` can request Copilot reviews — HTTP 201).
 
 ## Commits & releases
 
