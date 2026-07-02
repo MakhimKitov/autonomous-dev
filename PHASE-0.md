@@ -73,6 +73,7 @@ deny `private/` + secrets.
 Poll `human`+`ready` issues → claim via internal lease → spawn container → pass the issue →
 track to PR-open → tear down. Budget caps (`max_budget_usd`, wall-clock, daily ceiling) +
 kill-switch (`STOP` flag / SIGTERM) + crash recovery (dead burst releases its lease).
+Design: `SCHEDULER.md` (state machine, reconciler loop, rails) + `diagrams/seq-scheduler-loop`.
 → *Exit:* drop a `ready` issue, walk away, a PR appears; killing mid-run is clean.
 
 **M3 — Session persistence + review-round burst.**

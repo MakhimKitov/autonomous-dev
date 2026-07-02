@@ -1,0 +1,35 @@
+{
+  "title": "M2 scheduler — unattended loop: ready issue → PR → review round → merge",
+  "participants": [
+    { "id": "owner", "name": "Human owner", "type": "actor" },
+    { "id": "github", "name": "GitHub", "type": "external" },
+    { "id": "sched", "name": "Scheduler (control plane)" },
+    { "id": "ledger", "name": "Ledger + archive", "type": "database" },
+    { "id": "burst", "name": "Burst container" }
+  ],
+  "messages": [
+    { "from": "owner", "to": "github", "label": "Label issue #N 'ready' (gate 1)" },
+    { "from": "sched", "to": "sched", "label": "tick: STOP check + reconcile", "note": "ledger 'running' burst with no container → killed, task rolled back, attempts+1" },
+    { "from": "sched", "to": "github", "label": "Poll issues with 'ready'" },
+    { "from": "github", "to": "sched", "label": "issue #N ('human')", "return": true },
+    { "from": "sched", "to": "ledger", "label": "Claim: task row (claimed, next=work)" },
+    { "from": "sched", "to": "github", "label": "Labels: -'ready' +'in-progress'" },
+    { "from": "sched", "to": "burst", "label": "Spawn work burst (issue prompt + provenance framing)", "note": "serial: one burst globally; resume if the task has a session" },
+    { "from": "burst", "to": "github", "label": "Branch dev/N-slug, commits, open PR 'Closes #N'", "note": "Copilot auto-review fires on PR open" },
+    { "from": "burst", "to": "sched", "label": "exit 0 (result on volume)", "return": true },
+    { "from": "sched", "to": "ledger", "label": "Harvest: session, model, PR #P → awaiting_review" },
+    { "from": "owner", "to": "github", "label": "Review PR #P: changes requested" },
+    { "from": "sched", "to": "github", "label": "Poll PR #P: reviews above last_review_id" },
+    { "from": "github", "to": "sched", "label": "changes-requested review (unseen)", "return": true },
+    { "from": "sched", "to": "ledger", "label": "review_rounds+1 → claimed (next=review)" },
+    { "from": "sched", "to": "burst", "label": "Spawn review burst (review verbatim, session resumes)" },
+    { "from": "burst", "to": "github", "label": "Push fixes to the PR branch" },
+    { "from": "burst", "to": "sched", "label": "exit 0", "return": true },
+    { "from": "sched", "to": "github", "label": "Re-request review: Copilot + owner", "note": "deterministic control-plane step now — was instruction-only (the M1 gap)" },
+    { "from": "sched", "to": "ledger", "label": "Harvest → awaiting_review" },
+    { "from": "owner", "to": "github", "label": "Approve + merge (gate 2); issue auto-closes" },
+    { "from": "sched", "to": "github", "label": "Poll PR #P: merged" },
+    { "from": "sched", "to": "github", "label": "Clear 'in-progress'" },
+    { "from": "sched", "to": "ledger", "label": "Task → done" }
+  ]
+}
