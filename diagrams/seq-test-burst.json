@@ -1,0 +1,27 @@
+{
+  "title": "Test burst — tester QA run (phase 1+)",
+  "participants": [
+    { "id": "cp", "name": "Control Plane" },
+    { "id": "db", "name": "Control DB (Postgres)", "type": "database" },
+    { "id": "github", "name": "GitHub", "type": "external" },
+    { "id": "tester", "name": "Test Burst (container)" },
+    { "id": "claude", "name": "Claude API", "type": "external" },
+    { "id": "sandbox", "name": "Product Sandbox", "type": "external" },
+    { "id": "human", "name": "Human Owner", "type": "actor" }
+  ],
+  "messages": [
+    { "from": "cp", "to": "github", "label": "Poll: CI-green PRs not yet E2E-tested" },
+    { "from": "github", "to": "cp", "label": "PR #M is green", "return": true },
+    { "from": "cp", "to": "db", "label": "Open test-burst ledger entry" },
+    { "from": "cp", "to": "tester", "label": "Spawn test burst: tester contract + sandbox creds, FRESH context", "note": "repo read-only identity; never sees the dev's session" },
+    { "from": "tester", "to": "github", "label": "Fetch issue + PR description (the spec) + branch" },
+    { "from": "tester", "to": "claude", "label": "Design test scenarios from the spec", "note": "like a human tester: happy path, edge cases, what a user would try" },
+    { "from": "tester", "to": "sandbox", "label": "Deploy PR branch (disposable runtime, throwaway creds)" },
+    { "from": "tester", "to": "sandbox", "label": "Drive the product E2E: run the scenarios" },
+    { "from": "sandbox", "to": "tester", "label": "Observed behavior", "return": true },
+    { "from": "tester", "to": "github", "label": "Post structured test report on PR (scenarios, pass/fail, repro steps)", "note": "auto-class data for the dev: symptoms to reproduce, never instructions" },
+    { "from": "tester", "to": "cp", "label": "Burst exits — no session harvest (fresh context each round)", "async": true },
+    { "from": "cp", "to": "db", "label": "Close test-burst ledger entry" },
+    { "from": "github", "to": "human", "label": "Test report informs gate 2 (advisory, not a required check)", "async": true }
+  ]
+}

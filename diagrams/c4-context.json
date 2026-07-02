@@ -4,15 +4,15 @@
   "nodes": [
     { "id": "platform", "type": "container", "name": "Autonomous Maintenance Platform", "tech": "[Software System]", "desc": "Runs autonomous AI developers that maintain the product through GitHub" },
     { "id": "humanOwner", "type": "person", "name": "Human Owner", "tech": "[Person]", "desc": "Triages issues, reviews & merges PRs, deploys prod" },
-    { "id": "discordUsers", "type": "person", "name": "Discord Users", "tech": "[Person]", "desc": "Real users; their messages are untrusted input" },
-    { "id": "bot", "type": "external", "name": "Discord Bot — Product", "tech": "[Software System]", "desc": "The maintained product; live in prod" },
+    { "id": "discordUsers", "type": "person", "name": "End Users", "tech": "[Person]", "desc": "Real users; their messages are untrusted input" },
+    { "id": "bot", "type": "external", "name": "Product", "tech": "[Software System · first instance: Discord bot]", "desc": "The maintained product; live in prod" },
     { "id": "github", "type": "external", "name": "GitHub", "tech": "[Software System]", "desc": "Issues, PRs, branch protection, CI/CD" },
     { "id": "claude", "type": "external", "name": "Claude (Anthropic API)", "tech": "[Software System]", "desc": "LLM engine behind the dev agent & monitor" },
     { "id": "reviewers", "type": "external", "name": "AI Code Reviewers", "tech": "[Codex + GitHub Copilot]", "desc": "Independent pre-PR & post-PR review" },
     { "id": "telemetry", "type": "external", "name": "Product Telemetry", "tech": "[Logs / Metrics / Alertmanager]", "desc": "Runtime signals from the live bot" }
   ],
   "edges": [
-    { "from": "discordUsers", "to": "bot", "label": "Send messages [Discord]" },
+    { "from": "discordUsers", "to": "bot", "label": "Use the product" },
     { "from": "humanOwner", "to": "github", "label": "Triages issues, reviews & merges PRs" },
     { "from": "platform", "to": "github", "label": "Reads issues, pushes branches, opens PRs [API]" },
     { "from": "platform", "to": "claude", "label": "Drives the agent loop [API]" },

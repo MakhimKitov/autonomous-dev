@@ -1,0 +1,30 @@
+{
+  "title": "Review round — new burst, resumed session (phase 0)",
+  "participants": [
+    { "id": "human", "name": "Human Owner", "type": "actor" },
+    { "id": "github", "name": "GitHub", "type": "external" },
+    { "id": "cp", "name": "Control Plane" },
+    { "id": "db", "name": "Control DB (Postgres)", "type": "database" },
+    { "id": "obj", "name": "Object Store (SeaweedFS)", "type": "database" },
+    { "id": "dev", "name": "Dev Burst (NEW container)" },
+    { "id": "claude", "name": "Claude API", "type": "external" }
+  ],
+  "messages": [
+    { "from": "human", "to": "github", "label": "Review PR: request changes", "note": "gate 2 — not passed yet" },
+    { "from": "cp", "to": "github", "label": "Poll: PRs with actionable feedback" },
+    { "from": "github", "to": "cp", "label": "changes-requested on PR #M", "return": true },
+    { "from": "cp", "to": "db", "label": "Lookup task → session_id + transcript key" },
+    { "from": "cp", "to": "obj", "label": "GET transcript, verify checksum" },
+    { "from": "cp", "to": "cp", "label": "Materialize JSONL into fresh volume", "note": "possibly days later, any host — state = branch + session + PR thread" },
+    { "from": "cp", "to": "dev", "label": "Spawn NEW burst (resume = session_id)" },
+    { "from": "dev", "to": "github", "label": "Fetch branch + PR review thread" },
+    { "from": "dev", "to": "claude", "label": "Resume session → full task context; address feedback", "note": "one persistent Claude session per task, across bursts" },
+    { "from": "dev", "to": "github", "label": "Push fixes, reply on PR thread" },
+    { "from": "dev", "to": "cp", "label": "Burst exits", "async": true },
+    { "from": "cp", "to": "obj", "label": "Harvest updated transcript" },
+    { "from": "cp", "to": "db", "label": "Append burst to ledger" },
+    { "from": "human", "to": "github", "label": "Approve + merge", "note": "gate 2 passed — dev identity cannot do this" },
+    { "from": "github", "to": "github", "label": "CI: tests + deploy on merge; issue auto-closes" },
+    { "from": "cp", "to": "db", "label": "Task done, release lease" }
+  ]
+}

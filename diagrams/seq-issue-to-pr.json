@@ -1,0 +1,32 @@
+{
+  "title": "Issue → PR — first work burst (phase 0)",
+  "participants": [
+    { "id": "human", "name": "Human Owner", "type": "actor" },
+    { "id": "github", "name": "GitHub", "type": "external" },
+    { "id": "cp", "name": "Control Plane" },
+    { "id": "db", "name": "Control DB (Postgres)", "type": "database" },
+    { "id": "obj", "name": "Object Store (SeaweedFS)", "type": "database" },
+    { "id": "dev", "name": "Dev Burst (container)" },
+    { "id": "claude", "name": "Claude API", "type": "external" },
+    { "id": "codex", "name": "Codex", "type": "external" },
+    { "id": "copilot", "name": "Copilot", "type": "external" }
+  ],
+  "messages": [
+    { "from": "human", "to": "github", "label": "File issue (provenance: human)" },
+    { "from": "human", "to": "github", "label": "Add `ready` label", "note": "gate 1 — intake" },
+    { "from": "cp", "to": "github", "label": "Poll: ready + unassigned issues" },
+    { "from": "github", "to": "cp", "label": "issue #N", "return": true },
+    { "from": "cp", "to": "db", "label": "Create task, claim lease (assignment is internal)" },
+    { "from": "cp", "to": "cp", "label": "Prepare fresh volume (CLAUDE_CONFIG_DIR)", "note": "new task → no session to materialize" },
+    { "from": "cp", "to": "dev", "label": "Spawn burst [Docker]: task + scoped GitHub token + budget/wall-clock caps" },
+    { "from": "dev", "to": "github", "label": "Clone product repo, create branch" },
+    { "from": "dev", "to": "claude", "label": "Agent loop: reproduce → code → test", "note": "session JSONL lands on the mounted volume — agent holds no storage creds" },
+    { "from": "dev", "to": "codex", "label": "Pre-PR review of own diff (bounded rounds)" },
+    { "from": "dev", "to": "github", "label": "Push branch, open PR (Closes #N)" },
+    { "from": "dev", "to": "cp", "label": "Burst exits — container dies", "async": true },
+    { "from": "cp", "to": "obj", "label": "Harvest volume → PUT transcript (JSONL)" },
+    { "from": "cp", "to": "db", "label": "Index: issue↔session_id↔branch + burst ledger (cost, checksum)" },
+    { "from": "copilot", "to": "github", "label": "Auto-review: findings on the PR", "async": true },
+    { "from": "github", "to": "human", "label": "PR ready for review", "async": true, "note": "gate 2 begins — human-paced; no container idles" }
+  ]
+}
