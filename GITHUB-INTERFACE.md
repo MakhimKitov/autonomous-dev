@@ -197,7 +197,11 @@ runtime.
   commit-type labels above
 - Branch-protection rule on the default branch (PR required, human approval, required
   checks incl. commitlint + tests, dev identity cannot merge)
-- Copilot enabled as an automatic PR reviewer
+- Copilot enabled as an automatic PR reviewer — a **user-side Copilot-settings toggle**
+  on personal accounts (rulesets can't set it outside org plans). Fallback: the control
+  plane requests a Copilot review per PR via the API after PR-open (M2).
+- `.github/copilot-instructions.md` — the reviewer's contract-first checklist (FR
+  coverage, scope boundaries/forbidden changes, containment, conventions)
 - The two GitHub Apps with the scopes above
 
 ## Open items
