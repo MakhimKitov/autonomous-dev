@@ -10,6 +10,7 @@ dependencies = [
     "pyjwt>=2.8",
     "cryptography>=42",
     "requests>=2.31",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]

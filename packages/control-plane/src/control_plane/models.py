@@ -31,6 +31,17 @@ class BurstStatus(StrEnum):
     KILLED = "killed"
 
 
+class TaskStatus(StrEnum):
+    """The scheduler's state machine (SCHEDULER.md)."""
+
+    OPEN = "open"  # manual driver (M0/M1) — outside the scheduler's machine
+    CLAIMED = "claimed"  # ours; a burst is queued (see next_burst_kind)
+    WORKING = "working"  # the burst container is running
+    AWAITING_REVIEW = "awaiting_review"  # PR open; humans/Copilot have the ball
+    BLOCKED = "blocked"  # needs a human
+    DONE = "done"  # PR merged; issue auto-closed
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -41,10 +52,16 @@ class TaskRecord:
 
     task_id: str
     repo: str
-    status: str = "open"
+    status: str = TaskStatus.OPEN
     session_id: str | None = None
     transcript_key: str | None = None
     transcript_checksum: str | None = None
+    pr_number: int | None = None
+    attempts: int = 0
+    review_rounds: int = 0
+    next_burst_kind: str | None = None  # work | review, while claimed/working
+    last_review_id: int | None = None  # advanced only after a review burst succeeds
+    last_burst_at: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 

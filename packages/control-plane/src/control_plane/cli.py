@@ -1,37 +1,43 @@
-"""Manual burst driver — the M0/M1 way to run the choreography end to end.
+"""The control-plane CLI.
 
-``control-plane burst`` does exactly what the scheduler (M2) will do per event:
-prepare volume → open burst span → docker run → harvest → ledger. Driving it by
-hand first keeps every seam honest before the loop automates it.
+``burst`` — the M0/M1 manual driver: one burst, by hand. ``run`` — the M2
+scheduler: the same choreography, driven unattended by the reconciler loop
+(SCHEDULER.md). ``stop`` — the kill switch. ``github-check`` — App preflight.
 """
 
 from __future__ import annotations
 
 import argparse
+import signal
+import subprocess
 import sys
-import uuid
+import time
 from pathlib import Path
 
+from dotenv import load_dotenv
 from opentelemetry import trace
 
+from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.github_api import GitHubApi, GitHubApiError, slug_from_origin
 from control_plane.github_auth import (
     AppCredentials,
     GitHubAuthError,
+    InstallationTokenCache,
     bot_git_identity,
     mint_installation_token,
 )
-from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
-from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, resolve_model
-from control_plane.store import LocalSessionArchive, SqliteLedger
-from control_plane.telemetry import burst_span, init_telemetry
-from control_plane.volume import harvest_volume, prepare_volume
+from control_plane.models import TaskRecord
+from control_plane.runner import DEFAULT_IMAGE
+from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
+from control_plane.store import SqliteLedger
+from control_plane.telemetry import init_telemetry
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="control-plane")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    burst = sub.add_parser("burst", help="run one burst container against a task")
+    burst = sub.add_parser("burst", help="run one burst container against a task, by hand")
     burst.add_argument("--task-id", required=True, help="the issue id this burst works")
     burst.add_argument("--repo", type=Path, required=True, help="path to the product clone to mount")
     burst.add_argument("--prompt", default="", help="the task text (M0/M1: injected directly)")
@@ -47,6 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="model for this burst (default: $DEV_AGENT_MODEL, else the pinned platform default)",
     )
+
+    run = sub.add_parser("run", help="the M2 scheduler: reconcile GitHub ↔ ledger, spawn bursts")
+    run.add_argument("--repo", type=Path, required=True, help="path to the product clone to mount")
+    run.add_argument("--github", default=None, help="owner/name (default: parsed from the clone's origin)")
+    run.add_argument("--owner", default=None, help="the human owner's login (default: the repo owner)")
+    run.add_argument("--data-dir", type=Path, default=Path("data"))
+    run.add_argument("--image", default=DEFAULT_IMAGE)
+    run.add_argument("--model", default=None)
+    run.add_argument("--interval", type=int, default=None, help="seconds between ticks (default: rails)")
+    run.add_argument("--once", action="store_true", help="one tick, then exit")
+
+    stop = sub.add_parser("stop", help="kill switch: write the STOP flag and kill the live burst")
+    stop.add_argument("--data-dir", type=Path, default=Path("data"))
 
     sub.add_parser(
         "github-check",
@@ -89,89 +108,117 @@ def _run_burst(args: argparse.Namespace) -> int:
         return 2
 
     init_telemetry()
-    data_dir = args.data_dir.expanduser().resolve()
-    archive = LocalSessionArchive(data_dir / "sessions")
-    ledger = SqliteLedger(data_dir / "ledger.sqlite3")
-
-    model = resolve_model(args.model)
-    codex_auth = Path.home() / ".codex"
-    codex_auth_dir = codex_auth if (codex_auth / "auth.json").is_file() else None
-    if args.mode == "run":
-        print(f"[model] {model}")
-        print(f"[codex] {'auth mounted' if codex_auth_dir else 'no auth — pre-PR review unavailable'}")
-
-    github_token = git_name = git_email = None
-    if args.mode == "run":
-        try:
-            creds = AppCredentials.from_env()
-            if creds is not None:
-                minted = mint_installation_token(creds)
-                github_token = minted.token
-                git_name, git_email = bot_git_identity(minted, creds.app_id)
-                print(f"[github] burst pushes as {git_name} (token expires {minted.expires_at})")
-        except GitHubAuthError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-
-    task = ledger.get_task(args.task_id) or TaskRecord(task_id=args.task_id, repo=str(repo))
-    burst_id = uuid.uuid4().hex[:12]
-    volume = prepare_volume(data_dir / "volumes", burst_id, args.task_id, archive)
-    resume = None if args.fresh else task.session_id
-
-    burst = BurstRecord(burst_id=burst_id, task_id=args.task_id, model=model)
-    with burst_span(args.task_id, burst_id, burst.role, burst.kind, model=model) as (
-        span,
-        traceparent,
-    ):
-        burst.trace_id = f"{span.get_span_context().trace_id:032x}"
-        ledger.record_burst(burst)
-        spec = BurstSpec(
-            task_id=args.task_id,
-            burst_id=burst_id,
-            volume_dir=volume,
-            repo_mount=repo,
-            prompt=prompt,
-            command=args.mode,
+    stores = PlatformStores.open(args.data_dir)
+    task = stores.ledger.get_task(args.task_id) or TaskRecord(task_id=args.task_id, repo=str(repo))
+    try:
+        outcome = execute_burst(
+            stores,
+            task,
+            repo,
+            prompt,
+            mode=args.mode,
             image=args.image,
-            resume_session_id=resume,
+            model=args.model,
             max_budget_usd=args.budget,
             max_turns=args.max_turns,
-            model=model,
-            traceparent=traceparent,
-            github_token=github_token,
-            git_user_name=git_name,
-            git_user_email=git_email,
-            codex_auth_dir=codex_auth_dir,
+            fresh=args.fresh,
         )
-        log_path = data_dir / "logs" / f"{burst_id}.log"
-        exit_code = DockerRunner().run(spec, log_path=log_path)
-        burst.exit_code = exit_code
-        burst.status = BurstStatus.SUCCEEDED if exit_code == 0 else BurstStatus.FAILED
-        burst.finished_at = utc_now()
-        span.set_attribute("burst.exit_code", exit_code)
-
-        outcome = harvest_volume(volume, burst, archive, ledger)
-        if burst.model:
-            span.set_attribute("burst.model", burst.model)  # resolved beats requested
-        ledger.finish_burst(burst)
-        task.session_id = burst.session_id or task.session_id
-        task.transcript_key = outcome.transcript_key
-        task.transcript_checksum = outcome.transcript_checksum
-        ledger.upsert_task(task)
-
-    print(
-        f"[burst {burst_id}] exit={exit_code} status={burst.status} "
-        f"model={burst.model} session={burst.session_id} violations={outcome.violation_count} "
-        f"transcript={outcome.transcript_key} log={log_path}"
-    )
+    except GitHubAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
-    return exit_code
+    return outcome.exit_code
+
+
+def _run_scheduler(args: argparse.Namespace) -> int:
+    repo = args.repo.expanduser().resolve()
+    if not repo.is_dir():
+        print(f"error: --repo is not a directory: {repo}", file=sys.stderr)
+        return 2
+    slug = args.github or slug_from_origin(repo)
+    if not slug:
+        print("error: could not derive owner/name from the clone's origin — pass --github", file=sys.stderr)
+        return 2
+    try:
+        creds = AppCredentials.from_env()
+    except GitHubAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if creds is None:
+        print("error: the scheduler needs the GitHub App configured (it polls as the App)", file=sys.stderr)
+        return 2
+
+    init_telemetry()
+    stores = PlatformStores.open(args.data_dir)
+    if (stores.data_dir / STOP_FILENAME).exists():
+        print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
+        return 2
+
+    api = GitHubApi(slug, InstallationTokenCache(creds))
+    try:
+        owner = args.owner or api.repo_owner()
+    except GitHubApiError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    rails = Rails.from_env()
+    interval = args.interval if args.interval is not None else rails.poll_interval_s
+    scheduler = Scheduler(
+        stores, api, repo, owner, rails=rails, image=args.image, model=args.model
+    )
+    print(f"[scheduler] repo={slug} owner={owner} interval={interval}s rails={rails}")
+
+    def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
+        scheduler.stop_path.touch()
+        if scheduler.current_burst_id:
+            subprocess.run(
+                ["docker", "kill", f"burst-{scheduler.current_burst_id}"],
+                check=False,
+                capture_output=True,
+            )
+        print("[scheduler] stop requested — exiting after this tick")
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    while True:
+        try:
+            scheduler.tick()
+        except (GitHubApiError, GitHubAuthError) as exc:
+            print(f"[scheduler] GitHub error — retrying next tick: {exc}", file=sys.stderr)
+        if scheduler.stop_requested():
+            print("[scheduler] STOP flag present — exiting")
+            break
+        if args.once:
+            break
+        time.sleep(interval)
+    trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
+    return 0
+
+
+def _stop(args: argparse.Namespace) -> int:
+    data_dir = args.data_dir.expanduser().resolve()
+    flag = data_dir / STOP_FILENAME
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.touch()
+    print(f"[stop] flag written: {flag}")
+    ledger_path = data_dir / "ledger.sqlite3"
+    if ledger_path.is_file():
+        for burst in SqliteLedger(ledger_path).running_bursts():
+            subprocess.run(["docker", "kill", f"burst-{burst.burst_id}"], check=False, capture_output=True)
+            print(f"[stop] docker kill burst-{burst.burst_id}")
+    print("[stop] the scheduler exits before its next spawn; remove the flag to allow `run` again")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()  # the platform's .env; real env vars win — bursts still get an explicit env
     args = build_parser().parse_args(argv)
     if args.command == "burst":
         return _run_burst(args)
+    if args.command == "run":
+        return _run_scheduler(args)
+    if args.command == "stop":
+        return _stop(args)
     if args.command == "github-check":
         return _github_check()
     return 2

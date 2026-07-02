@@ -80,8 +80,11 @@ class LocalSessionArchive:
 class Ledger(Protocol):
     def upsert_task(self, task: TaskRecord) -> None: ...
     def get_task(self, task_id: str) -> TaskRecord | None: ...
+    def tasks_by_status(self, *statuses: str) -> list[TaskRecord]: ...
     def record_burst(self, burst: BurstRecord) -> None: ...
     def finish_burst(self, burst: BurstRecord) -> None: ...
+    def running_bursts(self) -> list[BurstRecord]: ...
+    def bursts_started_since(self, since_iso: str) -> int: ...
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
 
@@ -94,6 +97,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     session_id TEXT,
     transcript_key TEXT,
     transcript_checksum TEXT,
+    pr_number INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    review_rounds INTEGER NOT NULL DEFAULT 0,
+    next_burst_kind TEXT,
+    last_review_id INTEGER,
+    last_burst_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -136,7 +145,16 @@ class SqliteLedger:
         self._conn.executescript(_SCHEMA)
         # Phase-0 migration: additive columns only (CREATE IF NOT EXISTS won't
         # touch a ledger created before the column existed).
-        self._ensure_column("bursts", "model", "TEXT")
+        for table, column, decl in (
+            ("bursts", "model", "TEXT"),
+            ("tasks", "pr_number", "INTEGER"),
+            ("tasks", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("tasks", "review_rounds", "INTEGER NOT NULL DEFAULT 0"),
+            ("tasks", "next_burst_kind", "TEXT"),
+            ("tasks", "last_review_id", "INTEGER"),
+            ("tasks", "last_burst_at", "TEXT"),
+        ):
+            self._ensure_column(table, column, decl)
         self._conn.commit()
 
     def _ensure_column(self, table: str, column: str, decl: str) -> None:
@@ -161,6 +179,13 @@ class SqliteLedger:
         row = self._conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         return TaskRecord(**dict(row)) if row else None
 
+    def tasks_by_status(self, *statuses: str) -> list[TaskRecord]:
+        marks = ", ".join("?" for _ in statuses)
+        rows = self._conn.execute(
+            f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at", statuses
+        ).fetchall()
+        return [TaskRecord(**dict(row)) for row in rows]
+
     def record_burst(self, burst: BurstRecord) -> None:
         data = asdict(burst)
         cols = ", ".join(data)
@@ -177,6 +202,16 @@ class SqliteLedger:
             asdict(burst),
         )
         self._conn.commit()
+
+    def running_bursts(self) -> list[BurstRecord]:
+        rows = self._conn.execute("SELECT * FROM bursts WHERE status = 'running'").fetchall()
+        return [BurstRecord(**dict(row)) for row in rows]
+
+    def bursts_started_since(self, since_iso: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= ?", (since_iso,)
+        ).fetchone()
+        return int(row["n"])
 
     def record_violation(self, violation: Violation) -> None:
         data = asdict(violation)

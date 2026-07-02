@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -134,3 +135,32 @@ def bot_git_identity(token: InstallationToken, app_id: str) -> tuple[str, str]:
     name = token.bot_login
     email = f"{app_id}+{name}@users.noreply.github.com"
     return name, email
+
+
+class InstallationTokenCache:
+    """Callable token supplier that re-mints within 5 minutes of expiry.
+
+    Serves the scheduler's polling across hour-plus runs; bursts still mint
+    their own fresh token each spawn.
+    """
+
+    MARGIN_S = 300
+
+    def __init__(self, creds: AppCredentials) -> None:
+        self._creds = creds
+        self._token: str | None = None
+        self._expires: float = 0.0
+
+    def __call__(self) -> str:
+        if self._token is None or time.time() > self._expires - self.MARGIN_S:
+            minted = mint_installation_token(self._creds)
+            self._token = minted.token
+            self._expires = _expiry_epoch(minted.expires_at)
+        return self._token
+
+
+def _expiry_epoch(iso: str) -> float:
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time() + 3600  # GitHub's default installation-token lifetime

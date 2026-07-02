@@ -39,6 +39,10 @@ uv run control-plane burst --task-id t1 --repo ../discord-bot --mode check --dat
 # One real burst (needs CLAUDE_CODE_OAUTH_TOKEN in the control-plane env)
 uv run control-plane burst --task-id t1 --repo ../discord-bot \
   --prompt "Summarize the repo layout" --budget 1.0
+
+# The M2 scheduler (SCHEDULER.md): ready issue → PR → review rounds, unattended
+uv run control-plane run --repo ../discord-bot     # loop (--once for a single tick)
+uv run control-plane stop                          # kill switch: STOP flag + docker kill
 ```
 
 ## Test
