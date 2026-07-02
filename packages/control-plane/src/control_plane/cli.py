@@ -128,7 +128,8 @@ def _run_burst(args: argparse.Namespace) -> int:
             git_user_name=git_name,
             git_user_email=git_email,
         )
-        exit_code = DockerRunner().run(spec)
+        log_path = data_dir / "logs" / f"{burst_id}.log"
+        exit_code = DockerRunner().run(spec, log_path=log_path)
         burst.exit_code = exit_code
         burst.status = BurstStatus.SUCCEEDED if exit_code == 0 else BurstStatus.FAILED
         burst.finished_at = utc_now()
@@ -144,7 +145,7 @@ def _run_burst(args: argparse.Namespace) -> int:
     print(
         f"[burst {burst_id}] exit={exit_code} status={burst.status} "
         f"session={burst.session_id} violations={outcome.violation_count} "
-        f"transcript={outcome.transcript_key}"
+        f"transcript={outcome.transcript_key} log={log_path}"
     )
     trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
     return exit_code

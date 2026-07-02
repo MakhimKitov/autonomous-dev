@@ -70,6 +70,28 @@ def test_github_token_feeds_both_git_and_gh(monkeypatch):
     assert f"{agentenv.GIT_USER_EMAIL}=b@nr.gh" in cmd
 
 
+def test_run_tees_output_to_log_file(tmp_path, monkeypatch, capsys):
+    runner = DockerRunner()
+    monkeypatch.setattr(
+        runner, "build_command", lambda spec: ["sh", "-c", "echo agent-line; echo oops 1>&2"]
+    )
+    log_path = tmp_path / "logs" / "b1.log"
+    code = runner.run(_spec(), log_path=log_path)
+    assert code == 0
+    logged = log_path.read_text(encoding="utf-8")
+    assert "agent-line" in logged
+    assert "oops" in logged  # stderr captured too
+    assert "agent-line" in capsys.readouterr().out  # still streams live
+
+
+def test_run_propagates_exit_code(tmp_path, monkeypatch):
+    runner = DockerRunner()
+    monkeypatch.setattr(runner, "build_command", lambda spec: ["sh", "-c", "echo dying; exit 3"])
+    log_path = tmp_path / "b2.log"
+    assert runner.run(_spec(), log_path=log_path) == 3
+    assert "dying" in log_path.read_text(encoding="utf-8")
+
+
 def test_optional_env_only_when_set(monkeypatch):
     monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
     minimal = " ".join(DockerRunner().build_command(_spec(prompt="", traceparent=None)))

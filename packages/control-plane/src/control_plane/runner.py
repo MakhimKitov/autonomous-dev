@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -97,5 +98,26 @@ class DockerRunner:
         cmd += [spec.image, spec.command]
         return cmd
 
-    def run(self, spec: BurstSpec) -> int:
-        return subprocess.run(self.build_command(spec), check=False).returncode
+    def run(self, spec: BurstSpec, log_path: Path | None = None) -> int:
+        """Run the burst; when log_path is set, tee container output there.
+
+        The transcript on the volume is the deep record, but it only exists
+        once the SDK is up — the log file catches everything, including a
+        container that dies before writing any result.
+        """
+        cmd = self.build_command(spec)
+        if log_path is None:
+            return subprocess.run(cmd, check=False).returncode
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with (
+            log_path.open("w", encoding="utf-8") as log,
+            subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            ) as proc,
+        ):
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                log.write(line)
+        return proc.returncode

@@ -17,3 +17,4 @@ wheels/
 
 # Credentials — the GitHub App private key lives here, never in git
 *.pem
+data/
