@@ -23,6 +23,22 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
+# Codex CLI — the pre-PR reviewer. Auth is a control-plane-mounted ~/.codex
+# (ChatGPT subscription); nothing is baked in.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         arm64) target="aarch64-unknown-linux-musl" ;; \
+         amd64) target="x86_64-unknown-linux-musl" ;; \
+         *) echo "unsupported arch: $arch" && exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/codex.tar.gz \
+        "https://github.com/openai/codex/releases/latest/download/codex-${target}.tar.gz" \
+    && tar -xzf /tmp/codex.tar.gz -C /usr/local/bin \
+    && rm /tmp/codex.tar.gz \
+    && { [ -f "/usr/local/bin/codex-${target}" ] && mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex || true; } \
+    && chmod +x /usr/local/bin/codex \
+    && codex --version
+
 # gh CLI — the agent's GitHub interface (PRs, issues); reads GH_TOKEN from env.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \

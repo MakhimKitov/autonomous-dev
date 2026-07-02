@@ -39,6 +39,9 @@ class BurstSpec:
     github_token: str | None = None
     git_user_name: str | None = None
     git_user_email: str | None = None
+    # Host dir with codex auth.json (ChatGPT subscription). Mounted rw at
+    # /home/agent/.codex so token refresh persists across bursts.
+    codex_auth_dir: Path | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -93,6 +96,8 @@ class DockerRunner:
             "-v",
             f"{spec.repo_mount}:{agentenv.CONTAINER_REPO_DIR}",
         ]
+        if spec.codex_auth_dir and spec.command == "run":
+            cmd += ["-v", f"{spec.codex_auth_dir}:/home/agent/.codex"]
         for key, value in env.items():
             cmd += ["-e", f"{key}={value}"]
         cmd += [spec.image, spec.command]

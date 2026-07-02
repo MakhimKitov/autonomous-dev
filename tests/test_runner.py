@@ -92,6 +92,14 @@ def test_run_propagates_exit_code(tmp_path, monkeypatch):
     assert "dying" in log_path.read_text(encoding="utf-8")
 
 
+def test_codex_auth_mounted_only_for_run_bursts(monkeypatch):
+    monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
+    spec_run = _spec(codex_auth_dir=Path("/host/.codex"))
+    spec_check = _spec(codex_auth_dir=Path("/host/.codex"), command="check")
+    assert "/host/.codex:/home/agent/.codex" in DockerRunner().build_command(spec_run)
+    assert "/host/.codex:/home/agent/.codex" not in DockerRunner().build_command(spec_check)
+
+
 def test_optional_env_only_when_set(monkeypatch):
     monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
     minimal = " ".join(DockerRunner().build_command(_spec(prompt="", traceparent=None)))

@@ -89,6 +89,11 @@ def _run_burst(args: argparse.Namespace) -> int:
     archive = LocalSessionArchive(data_dir / "sessions")
     ledger = SqliteLedger(data_dir / "ledger.sqlite3")
 
+    codex_auth = Path.home() / ".codex"
+    codex_auth_dir = codex_auth if (codex_auth / "auth.json").is_file() else None
+    if args.mode == "run":
+        print(f"[codex] {'auth mounted' if codex_auth_dir else 'no auth — pre-PR review unavailable'}")
+
     github_token = git_name = git_email = None
     if args.mode == "run":
         try:
@@ -127,6 +132,7 @@ def _run_burst(args: argparse.Namespace) -> int:
             github_token=github_token,
             git_user_name=git_name,
             git_user_email=git_email,
+            codex_auth_dir=codex_auth_dir,
         )
         log_path = data_dir / "logs" / f"{burst_id}.log"
         exit_code = DockerRunner().run(spec, log_path=log_path)

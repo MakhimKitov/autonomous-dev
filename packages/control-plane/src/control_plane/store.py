@@ -36,7 +36,8 @@ class SessionArchive(Protocol):
 # Credentials must never reach the archive. With CLAUDE_CONFIG_DIR set, the CLI
 # stores .credentials.json under it — i.e. on the session volume we harvest.
 # Env-token auth shouldn't write it, but the exclusion is unconditional.
-EXCLUDE_FROM_ARCHIVE = {".credentials.json"}
+# auth.json is codex's credential file (mounted outside the volume — defense only).
+EXCLUDE_FROM_ARCHIVE = {".credentials.json", "auth.json"}
 
 
 class LocalSessionArchive:
