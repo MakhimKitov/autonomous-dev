@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -65,9 +66,29 @@ def _to_options(env: BurstEnv) -> ClaudeAgentOptions:
     )
 
 
+def setup_git(env: BurstEnv) -> None:
+    """Commit identity (the App bot) + gh as the credential helper for pushes.
+
+    Only touches the clone's local config; no token is written to disk — git
+    asks gh, gh reads GH_TOKEN from the environment.
+    """
+    if not (env.github_token and (env.repo_dir / ".git").exists()):
+        return
+    settings = [
+        ("user.name", env.git_user_name or "dev-agent"),
+        ("user.email", env.git_user_email or "dev-agent@invalid"),
+        ("credential.helper", "!gh auth git-credential"),
+    ]
+    for key, value in settings:
+        subprocess.run(
+            ["git", "config", "--local", key, value], cwd=env.repo_dir, check=True
+        )
+
+
 async def run_burst(env: BurstEnv) -> BurstResult:
     if not env.task_prompt:
         raise ValueError("a burst needs a task prompt")
+    setup_git(env)
     started = time.monotonic()
     result = BurstResult(
         task_id=env.task_id, burst_id=env.burst_id, role=env.role, burst_kind=env.burst_kind

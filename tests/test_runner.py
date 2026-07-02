@@ -57,6 +57,19 @@ def test_no_credentials_in_check_bursts(monkeypatch):
     assert agentenv.ANTHROPIC_API_KEY not in check_cmd
 
 
+def test_github_token_feeds_both_git_and_gh(monkeypatch):
+    monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
+    cmd = " ".join(
+        DockerRunner().build_command(
+            _spec(github_token="ghs_x", git_user_name="bot[bot]", git_user_email="b@nr.gh")
+        )
+    )
+    assert f"{agentenv.GITHUB_TOKEN}=ghs_x" in cmd
+    assert f"{agentenv.GH_TOKEN}=ghs_x" in cmd
+    assert f"{agentenv.GIT_USER_NAME}=bot[bot]" in cmd
+    assert f"{agentenv.GIT_USER_EMAIL}=b@nr.gh" in cmd
+
+
 def test_optional_env_only_when_set(monkeypatch):
     monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
     minimal = " ".join(DockerRunner().build_command(_spec(prompt="", traceparent=None)))

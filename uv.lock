@@ -252,16 +252,22 @@ name = "control-plane"
 version = "0.1.0"
 source = { editable = "packages/control-plane" }
 dependencies = [
+    { name = "cryptography" },
     { name = "dev-agent" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
+    { name = "pyjwt" },
+    { name = "requests" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42" },
     { name = "dev-agent", editable = "packages/dev-agent" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.27" },
     { name = "opentelemetry-sdk", specifier = ">=1.27" },
+    { name = "pyjwt", specifier = ">=2.8" },
+    { name = "requests", specifier = ">=2.31" },
 ]
 
 [[package]]

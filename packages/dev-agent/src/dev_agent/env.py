@@ -24,6 +24,8 @@ MAX_BUDGET_USD = "AGENT_MAX_BUDGET_USD"
 MAX_TURNS = "AGENT_MAX_TURNS"
 PERMISSION_MODE = "AGENT_PERMISSION_MODE"
 MODEL = "AGENT_MODEL"
+GIT_USER_NAME = "AGENT_GIT_USER_NAME"
+GIT_USER_EMAIL = "AGENT_GIT_USER_EMAIL"
 
 # --- standard variables we rely on but don't own ---
 CLAUDE_CONFIG_DIR = "CLAUDE_CONFIG_DIR"
@@ -32,7 +34,10 @@ TRACEPARENT = "TRACEPARENT"
 # OAuth token in the CLI's precedence — the runner must inject exactly one.
 CLAUDE_CODE_OAUTH_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+# The short-lived installation token, if the burst talks to GitHub. GH_TOKEN is
+# the same value — the gh CLI reads it natively.
 GITHUB_TOKEN = "GITHUB_TOKEN"
+GH_TOKEN = "GH_TOKEN"
 
 ROLES = ("dev", "tester")
 BURST_KINDS = ("work", "review", "test")
@@ -68,6 +73,9 @@ class BurstEnv:
     max_turns: int | None = None
     permission_mode: str = DEFAULT_PERMISSION_MODE
     model: str | None = None
+    github_token: str | None = None
+    git_user_name: str | None = None
+    git_user_email: str | None = None
 
     @property
     def result_path(self) -> Path:
@@ -118,4 +126,7 @@ class BurstEnv:
             max_turns=_int(MAX_TURNS),
             permission_mode=env.get(PERMISSION_MODE, DEFAULT_PERMISSION_MODE),
             model=env.get(MODEL) or None,
+            github_token=env.get(GITHUB_TOKEN) or None,
+            git_user_name=env.get(GIT_USER_NAME) or None,
+            git_user_email=env.get(GIT_USER_EMAIL) or None,
         )

@@ -14,6 +14,12 @@ from pathlib import Path
 
 from opentelemetry import trace
 
+from control_plane.github_auth import (
+    AppCredentials,
+    GitHubAuthError,
+    bot_git_identity,
+    mint_installation_token,
+)
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner
 from control_plane.store import LocalSessionArchive, SqliteLedger
@@ -37,7 +43,33 @@ def build_parser() -> argparse.ArgumentParser:
     burst.add_argument("--budget", type=float, default=None, help="max_budget_usd for the burst")
     burst.add_argument("--max-turns", type=int, default=None)
     burst.add_argument("--model", default=None)
+
+    sub.add_parser(
+        "github-check",
+        help="preflight the GitHub App: mint a token, show installation + permissions",
+    )
     return parser
+
+
+def _github_check() -> int:
+    try:
+        creds = AppCredentials.from_env()
+        if creds is None:
+            print("GitHub App not configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY_PATH unset)")
+            return 2
+        token = mint_installation_token(creds)
+    except GitHubAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    name, email = bot_git_identity(token, creds.app_id)
+    print(f"app:          {token.app_slug}")
+    print(f"bot identity: {name} <{email}>")
+    print(f"token:        {token.token[:11]}… expires {token.expires_at}")
+    print(f"permissions:  {token.permissions}")
+    forbidden = {"administration", "merge_queues"} & set(token.permissions)
+    if forbidden:
+        print(f"⚠ unexpected permissions present: {forbidden}")
+    return 0
 
 
 def _run_burst(args: argparse.Namespace) -> int:
@@ -56,6 +88,19 @@ def _run_burst(args: argparse.Namespace) -> int:
     data_dir = args.data_dir.expanduser().resolve()
     archive = LocalSessionArchive(data_dir / "sessions")
     ledger = SqliteLedger(data_dir / "ledger.sqlite3")
+
+    github_token = git_name = git_email = None
+    if args.mode == "run":
+        try:
+            creds = AppCredentials.from_env()
+            if creds is not None:
+                minted = mint_installation_token(creds)
+                github_token = minted.token
+                git_name, git_email = bot_git_identity(minted, creds.app_id)
+                print(f"[github] burst pushes as {git_name} (token expires {minted.expires_at})")
+        except GitHubAuthError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     task = ledger.get_task(args.task_id) or TaskRecord(task_id=args.task_id, repo=str(repo))
     burst_id = uuid.uuid4().hex[:12]
@@ -79,6 +124,9 @@ def _run_burst(args: argparse.Namespace) -> int:
             max_turns=args.max_turns,
             model=args.model,
             traceparent=traceparent,
+            github_token=github_token,
+            git_user_name=git_name,
+            git_user_email=git_email,
         )
         exit_code = DockerRunner().run(spec)
         burst.exit_code = exit_code
@@ -106,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "burst":
         return _run_burst(args)
+    if args.command == "github-check":
+        return _github_check()
     return 2
 
 

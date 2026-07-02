@@ -36,6 +36,8 @@ class BurstSpec:
     model: str | None = None
     traceparent: str | None = None
     github_token: str | None = None
+    git_user_name: str | None = None
+    git_user_email: str | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -62,6 +64,11 @@ class DockerRunner:
             env[agentenv.TRACEPARENT] = spec.traceparent
         if spec.github_token:
             env[agentenv.GITHUB_TOKEN] = spec.github_token
+            env[agentenv.GH_TOKEN] = spec.github_token  # the gh CLI reads this one
+        if spec.git_user_name:
+            env[agentenv.GIT_USER_NAME] = spec.git_user_name
+        if spec.git_user_email:
+            env[agentenv.GIT_USER_EMAIL] = spec.git_user_email
         # Exactly one Anthropic credential enters the box, subscription first —
         # the CLI prefers ANTHROPIC_API_KEY over the OAuth token, so passing
         # both would silently switch billing to the API.
