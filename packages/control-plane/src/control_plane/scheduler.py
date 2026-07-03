@@ -190,39 +190,62 @@ class Scheduler:
                 self.api.remove_label(number, "in-progress")
                 print(f"[scheduler] PR #{task.pr_number} closed unmerged — task #{task.task_id} blocked")
                 continue
-            if not self._unseen_owner_changes(task):
+            pending, owner_triggered = self._actionable_reviews(task)
+            if not pending:
                 continue
             if task.review_rounds >= self.rails.max_review_rounds:
-                task.status = TaskStatus.BLOCKED
-                task.next_burst_kind = None
-                self.stores.ledger.upsert_task(task)
-                self.api.comment(
-                    number,
-                    f"⛔ control plane: parking this task after {task.review_rounds} review rounds — "
-                    "a human can re-add `ready` to grant more.",
-                )
-                self.api.remove_label(number, "in-progress")
+                if owner_triggered:
+                    task.status = TaskStatus.BLOCKED
+                    task.next_burst_kind = None
+                    self.stores.ledger.upsert_task(task)
+                    self.api.comment(
+                        number,
+                        f"⛔ control plane: parking this task after {task.review_rounds} review rounds — "
+                        "a human can re-add `ready` to grant more.",
+                    )
+                    self.api.remove_label(number, "in-progress")
+                else:
+                    # Copilot rounds cap softly: stop chasing, the human gate decides
+                    task.last_review_id = max(review.id for review in pending)
+                    self.stores.ledger.upsert_task(task)
+                    self.api.comment(
+                        number,
+                        f"ℹ️ control plane: review-round cap ({task.review_rounds}) reached — "
+                        "remaining Copilot findings are left for the owner's review.",
+                    )
                 continue
             task.review_rounds += 1
             task.status = TaskStatus.CLAIMED
             task.next_burst_kind = REVIEW
             self.stores.ledger.upsert_task(task)
-            print(f"[scheduler] changes requested on PR #{task.pr_number} — review round {task.review_rounds}")
+            trigger = "changes requested" if owner_triggered else "Copilot findings"
+            print(f"[scheduler] {trigger} on PR #{task.pr_number} — review round {task.review_rounds}")
 
-    def _unseen_owner_changes(self, task: TaskRecord) -> list[Review]:
-        """Owner changes-requested reviews above the processed cursor.
+    def _actionable_reviews(self, task: TaskRecord) -> tuple[list[Review], bool]:
+        """(reviews to address, owner_triggered) above the processed cursor.
 
         The cursor (last_review_id) advances only after a review burst
-        succeeds, so failed rounds re-surface the same reviews. Copilot
-        reviews never trigger a round — advisory only.
+        succeeds, so failed rounds re-surface the same reviews. Two triggers:
+        the owner's CHANGES_REQUESTED, and Copilot reviews carrying inline
+        findings — Copilot never requests changes (COMMENTED by design), so
+        the autonomous loop keys on its findings instead. Overview-only
+        Copilot reviews trigger nothing.
         """
         reviews = self.api.list_reviews(task.pr_number)
         last = task.last_review_id or 0
-        return [
+        unseen = [review for review in reviews if review.id > last]
+        owner = [
             review
-            for review in reviews
-            if review.id > last and review.state == "CHANGES_REQUESTED" and review.author == self.owner
+            for review in unseen
+            if review.author == self.owner and review.state == "CHANGES_REQUESTED"
         ]
+        copilot = [review for review in unseen if review.author == COPILOT_REVIEWER]
+        if copilot:
+            with_findings = {
+                comment.review_id for comment in self.api.list_review_comments(task.pr_number)
+            }
+            copilot = [review for review in copilot if review.id in with_findings]
+        return owner + copilot, bool(owner)
 
     # --- spawning ---
 
@@ -255,16 +278,19 @@ class Scheduler:
             except CloneError as exc:
                 self._register_failure(task, f"platform clone sync failed: {exc}")
                 return
+        pending: list[Review] = []
+        owner_triggered = False
+        head_before = ""
         if kind == WORK:
             prompt = work_prompt(self.api.get_issue(number))
-            pending: list[Review] = []
         else:
-            pending = self._unseen_owner_changes(task)
+            pending, owner_triggered = self._actionable_reviews(task)
             if not pending:  # review dismissed/vanished between ticks
                 task.status = TaskStatus.AWAITING_REVIEW
                 self.stores.ledger.upsert_task(task)
                 return
             prompt = review_prompt(task.pr_number, pending, self.api.list_review_comments(task.pr_number))
+            head_before = self.api.get_pr(task.pr_number).head_sha
 
         task.status = TaskStatus.WORKING
         task.last_burst_at = utc_now()
@@ -303,20 +329,27 @@ class Scheduler:
                 return
             task.pr_number = pr.number
             print(f"[scheduler] task #{task.task_id}: PR #{pr.number} open")
-            self._request_re_review(task)  # Copilot auto-review is not reliable on open
+            # Copilot auto-review is not reliable on open; the owner sees the PR exists
+            self._request_re_review(task, [COPILOT_REVIEWER, self.owner])
         else:
             task.last_review_id = max(review.id for review in pending)
-            self._request_re_review(task)
+            pushed = self.api.get_pr(task.pr_number).head_sha != head_before
+            if owner_triggered:
+                self._request_re_review(task, [COPILOT_REVIEWER, self.owner])
+            elif pushed:
+                # autonomous Copilot round: fresh diff → Copilot re-reviews; no owner ping
+                self._request_re_review(task, [COPILOT_REVIEWER])
+            # reply-only round: threads answered, same diff — re-requesting would loop
         task.status = TaskStatus.AWAITING_REVIEW
         task.next_burst_kind = None
         self.stores.ledger.upsert_task(task)
 
-    def _request_re_review(self, task: TaskRecord) -> None:
+    def _request_re_review(self, task: TaskRecord, reviewers: list[str]) -> None:
         """Deterministic review request: on PR open (auto-review observed not
         firing) and after review-round pushes (the M1 gap). Never fatal."""
         try:
-            self.api.request_reviewers(task.pr_number, [COPILOT_REVIEWER, self.owner])
-            print(f"[scheduler] re-requested review on PR #{task.pr_number}: Copilot + {self.owner}")
+            self.api.request_reviewers(task.pr_number, reviewers)
+            print(f"[scheduler] review requested on PR #{task.pr_number}: {', '.join(reviewers)}")
         except GitHubApiError as exc:
             print(f"[scheduler] re-request failed (advisory, continuing): {exc}")
 

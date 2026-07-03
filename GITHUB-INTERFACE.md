@@ -152,7 +152,7 @@ of high-confidence issues is a later-phase step.
 | Stage | Actor | When | Gates? |
 |---|---|---|---|
 | Pre-PR review | **Codex** (in-container) | before the PR is opened | dev self-corrects |
-| Post-PR review | **GitHub Copilot** (auto-reviewer) | on PR open | advisory to human |
+| Post-PR review | **GitHub Copilot** (requested by the control plane) | on PR open + after review-round pushes | findings drive **autonomous dev rounds** (in-thread triage, capped); advisory to the human gate |
 | E2E testing (phase 1+) | **Tester** (test burst) — QA, not review: invents scenarios from the spec, runs them in the sandbox | after CI green | advisory to human (test report on the PR) |
 | Final | **Human owner** | before merge | **yes** — branch protection |
 

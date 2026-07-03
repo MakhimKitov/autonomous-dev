@@ -23,3 +23,6 @@ dev-agent = { workspace = true }
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]  # never collect from data/ (platform clones carry the product suite)

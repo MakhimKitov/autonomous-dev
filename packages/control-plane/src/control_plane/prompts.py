@@ -57,11 +57,11 @@ def review_prompt(pr_number: int, reviews: list[Review], comments: list[ReviewCo
         )
     reviews_text = "\n\n".join(blocks)
     return f"""\
-The owner reviewed pull request #{pr_number} and requested changes. Your session already has the
-full task context. Check out the PR branch, address the review below, run the checks, push,
-and summarize the round in a PR comment. Answer every inline thread in that thread (your
-contract's Review section has the reply command and the fix / reply / defer triage rules) —
-thread ids are given below.
+Pull request #{pr_number} has new review feedback to address. Your session already has the
+full task context. Check out the PR branch, triage the feedback below, run the checks, push
+any fixes, and summarize the round in a PR comment. Answer every inline thread in that
+thread (your contract's Review section has the reply command and the fix / reply / defer
+triage rules) — thread ids are given below.
 
 {reviews_text}
 

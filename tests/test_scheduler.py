@@ -10,7 +10,7 @@ import pytest
 from control_plane import scheduler as sched_mod
 from control_plane.bursts import BurstOutcome, PlatformStores
 from control_plane.clone import CloneError
-from control_plane.github_api import COPILOT_REVIEWER, Issue, PullRequest, Review
+from control_plane.github_api import COPILOT_REVIEWER, Issue, PullRequest, Review, ReviewComment
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, TaskStatus, utc_now
 from control_plane.scheduler import Rails, Scheduler
 from control_plane.volume import HarvestOutcome
@@ -94,12 +94,27 @@ def _issue(number=1, labels=("ready", "human")):
     return Issue(number=number, title="add /coinflip", body="do it", labels=list(labels))
 
 
-def _pr(number=2, state="open", merged=False, head_ref="dev/1-coinflip"):
-    return PullRequest(number=number, state=state, merged=merged, head_ref=head_ref, head_sha="abc")
+def _pr(number=2, state="open", merged=False, head_ref="dev/1-coinflip", head_sha="abc"):
+    return PullRequest(number=number, state=state, merged=merged, head_ref=head_ref, head_sha=head_sha)
 
 
 def _changes_requested(review_id=10, author=OWNER):
     return Review(id=review_id, author=author, state="CHANGES_REQUESTED", body="tweak it")
+
+
+def _copilot_review(review_id=20):
+    return Review(id=review_id, author=COPILOT_REVIEWER, state="COMMENTED", body="overview")
+
+
+def _finding(review_id=20, comment_id=900):
+    return ReviewComment(
+        id=comment_id, review_id=review_id, author="Copilot", path="bot/x.py", line=3, body="off-by-one"
+    )
+
+
+def _awaiting(stores, **overrides):
+    defaults = dict(task_id="1", repo="r", status=TaskStatus.AWAITING_REVIEW, pr_number=2)
+    stores.ledger.upsert_task(TaskRecord(**(defaults | overrides)))
 
 
 def test_claims_ready_issue_and_swaps_labels(rig):
@@ -173,21 +188,88 @@ def test_owner_changes_requested_triggers_review_round(rig):
     assert task.review_rounds == 1
 
 
-def test_copilot_and_seen_reviews_never_trigger_rounds(rig):
+def test_seen_and_findingless_reviews_never_trigger_rounds(rig):
     scheduler, api, stores, _, _ = rig
-    stores.ledger.upsert_task(
-        TaskRecord(
-            task_id="1", repo="r", status=TaskStatus.AWAITING_REVIEW, pr_number=2, last_review_id=10
-        )
-    )
+    _awaiting(stores, last_review_id=10)
     api.issues[1] = _issue(labels=("in-progress",))
     api.prs[2] = _pr()
     api.reviews[2] = [
         _changes_requested(review_id=10),  # already processed (cursor)
-        _changes_requested(review_id=11, author=COPILOT_REVIEWER),  # advisory
+        _copilot_review(review_id=11),  # overview only — no inline findings
     ]
     scheduler.observe()
     assert stores.ledger.get_task("1").status == TaskStatus.AWAITING_REVIEW
+
+
+def test_copilot_findings_trigger_an_autonomous_round(rig):
+    """Copilot never requests changes (COMMENTED by design) — its inline
+    findings are the trigger; no human involved."""
+    scheduler, api, stores, _, _ = rig
+    _awaiting(stores)
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.prs[2] = _pr()
+    api.reviews[2] = [_copilot_review()]
+    api.review_comments[2] = [_finding()]
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "review"
+    assert task.review_rounds == 1
+
+
+def test_copilot_round_with_push_re_requests_copilot_only(rig):
+    scheduler, api, stores, _, _ = rig
+    _awaiting(stores, status=TaskStatus.CLAIMED, next_burst_kind="review", review_rounds=1)
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.prs[2] = _pr()
+    api.reviews[2] = [_copilot_review()]
+    api.review_comments[2] = [_finding()]
+    orig = sched_mod.execute_burst
+
+    def push_and_succeed(stores_, task, repo, prompt, **kwargs):
+        assert "off-by-one" in prompt  # the finding reached the dev
+        api.prs[2] = _pr(head_sha="new")  # the burst pushed fixes
+        return _outcome()
+
+    sched_mod.execute_burst = push_and_succeed
+    try:
+        scheduler.tick()
+    finally:
+        sched_mod.execute_burst = orig
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW
+    assert task.last_review_id == 20
+    assert api.rerequests == [(2, (COPILOT_REVIEWER,))]  # fresh diff → Copilot; no owner ping
+
+
+def test_copilot_reply_only_round_re_requests_nobody(rig):
+    """Same diff after the round — re-requesting Copilot would just loop."""
+    scheduler, api, stores, _, _ = rig
+    _awaiting(stores, status=TaskStatus.CLAIMED, next_burst_kind="review", review_rounds=1)
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.prs[2] = _pr()
+    api.reviews[2] = [_copilot_review()]
+    api.review_comments[2] = [_finding()]
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW
+    assert task.last_review_id == 20  # processed — won't re-trigger
+    assert api.rerequests == []
+
+
+def test_copilot_rounds_cap_softly_for_the_owner(rig):
+    """Exhausted rounds on Copilot findings never park the task — the human
+    merge gate decides; only owner rounds can block."""
+    scheduler, api, stores, _, _ = rig
+    _awaiting(stores, review_rounds=2)  # rig cap
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.prs[2] = _pr()
+    api.reviews[2] = [_copilot_review(review_id=30)]
+    api.review_comments[2] = [_finding(review_id=30)]
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW  # not blocked
+    assert task.last_review_id == 30  # cursor advanced — no re-trigger loop
+    assert any("cap" in body for _, body in api.comments)
 
 
 def test_review_burst_advances_cursor_and_re_requests(rig):

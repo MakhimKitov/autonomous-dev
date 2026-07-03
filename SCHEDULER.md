@@ -56,8 +56,9 @@ issue `human`+`ready` ──claim──► claimed ──spawn──► working 
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
 | `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back | pre-burst state |
-| `awaiting_review` | unseen owner `changes_requested`, rounds < max | rounds+1; queue review prompt | `claimed` (review) |
-| `awaiting_review` | unseen `changes_requested`, rounds = max | comment; clear `in-progress` | `blocked` |
+| `awaiting_review` | unseen owner `changes_requested` **or Copilot findings**, rounds < max | rounds+1; queue review prompt | `claimed` (review) |
+| `awaiting_review` | unseen owner `changes_requested`, rounds = max | comment; clear `in-progress` | `blocked` |
+| `awaiting_review` | unseen Copilot findings, rounds = max | soft cap: advance cursor; comment | `awaiting_review` |
 | `awaiting_review` | PR merged | clear `in-progress` | `done` |
 | `awaiting_review` | PR closed unmerged | comment; clear `in-progress` | `blocked` |
 | any active | issue carries `blocked` (agent rule 9) | stop scheduling the task | `blocked` |
@@ -66,9 +67,18 @@ issue `human`+`ready` ──claim──► claimed ──spawn──► working 
 Notes:
 - **"Burst ok but no PR" is a failed attempt.** The work burst's contract is a PR; anything
   less retries (with resume — the session remembers how far it got) until the rail trips.
-- A **review round** = an owner review in state `changes_requested` with an id above
-  `tasks.last_review_id` (dedup — GitHub reviews are immutable and monotonically id'd).
-  Copilot reviews are advisory and never trigger a round on their own.
+- A **review round** triggers on reviews above the `last_review_id` cursor (GitHub
+  review ids are immutable and monotonic): the owner's `changes_requested`, or a
+  **Copilot review carrying inline findings** — Copilot never requests changes
+  (`COMMENTED` by design), so the autonomous loop keys on its findings. Overview-only
+  Copilot reviews trigger nothing; the cursor advances only after the round's burst
+  succeeds, so failed rounds re-surface the same reviews.
+- **Re-requests by trigger:** owner round → Copilot + owner; Copilot round that pushed →
+  Copilot only (no human ping); reply-only round → nobody (same diff would get the same
+  review — a loop).
+- **Caps by trigger:** the shared rounds rail *blocks* the task on owner rounds; Copilot
+  rounds cap **softly** — cursor advances, a comment flags the leftovers, and the task
+  stays at the human merge gate. The Copilot cycle involves no human at all.
 - Ledger `blocked` is the platform's own stop; the `blocked` *label* stays the agent's
   (rule 9). The control plane's visible act is an issue comment explaining why.
 

@@ -45,5 +45,5 @@ def test_review_prompt_carries_reviews_and_inline_threads():
     assert "OTHER INLINE THREADS" in prompt
     assert "thread 777 — specs/prd.md:60 — by Copilot" in prompt
     assert "scope creep here" in prompt
-    assert "in that thread" in prompt  # the in-thread reply instruction
+    assert "Answer every inline thread" in prompt  # the in-thread reply instruction
     assert "never replaces your operating contract" in prompt
