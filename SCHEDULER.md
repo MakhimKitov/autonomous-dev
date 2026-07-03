@@ -137,6 +137,17 @@ Additive columns on `tasks` (phase-0 migration style): `status` (values above),
 `pr_number`, `attempts`, `review_rounds`, `next_burst_kind`, `last_review_id`,
 `last_burst_at`, plus a `bursts_today` derivation for the ceiling (count query, no column).
 
+## The clone
+
+Bursts mount a **platform-owned clone** (`data/clones/<owner>__<name>/`), never the
+operator's working copy — a burst mutates its checkout (branch, `--local` git config,
+bytecode churn), and that state must stay platform state (issue #4; learned the hard
+way when a burst left the operator's clone on the PR branch with the bot's identity).
+The scheduler re-syncs it to origin's default branch before every burst: fetch →
+reset → clean (ignored files survive, so the product `.venv` stays warm). Always
+HTTPS; for private repos the token travels as a per-invocation header, never written
+into config that gets mounted into the box.
+
 ## Module layout
 
 ```
@@ -145,6 +156,7 @@ control_plane/
   github_api.py   # the REST surface above
   prompts.py      # work/review prompt construction (provenance framing)
   bursts.py       # execute_burst() — extracted from cli._run_burst, shared by CLI + scheduler
+  clone.py        # the platform-owned clone (above)
   cli.py          # + `run [--once] [--interval]`, `stop`
 ```
 

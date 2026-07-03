@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from opentelemetry import trace
 
 from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.clone import CloneError, prepare_clone
 from control_plane.github_api import GitHubApi, GitHubApiError, slug_from_origin
 from control_plane.github_auth import (
     AppCredentials,
@@ -55,8 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run = sub.add_parser("run", help="the M2 scheduler: reconcile GitHub ↔ ledger, spawn bursts")
-    run.add_argument("--repo", type=Path, required=True, help="path to the product clone to mount")
-    run.add_argument("--github", default=None, help="owner/name (default: parsed from the clone's origin)")
+    run.add_argument(
+        "--repo",
+        type=Path,
+        default=None,
+        help="operator clone — used only to derive owner/name; bursts mount the platform clone",
+    )
+    run.add_argument("--github", default=None, help="owner/name (default: parsed from --repo's origin)")
     run.add_argument("--owner", default=None, help="the human owner's login (default: the repo owner)")
     run.add_argument("--data-dir", type=Path, default=Path("data"))
     run.add_argument("--image", default=DEFAULT_IMAGE)
@@ -131,13 +137,11 @@ def _run_burst(args: argparse.Namespace) -> int:
 
 
 def _run_scheduler(args: argparse.Namespace) -> int:
-    repo = args.repo.expanduser().resolve()
-    if not repo.is_dir():
-        print(f"error: --repo is not a directory: {repo}", file=sys.stderr)
-        return 2
-    slug = args.github or slug_from_origin(repo)
+    slug = args.github
+    if not slug and args.repo is not None:
+        slug = slug_from_origin(args.repo.expanduser().resolve())
     if not slug:
-        print("error: could not derive owner/name from the clone's origin — pass --github", file=sys.stderr)
+        print("error: pass --github owner/name (or --repo, to derive it from origin)", file=sys.stderr)
         return 2
     try:
         creds = AppCredentials.from_env()
@@ -154,18 +158,32 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
         return 2
 
-    api = GitHubApi(slug, InstallationTokenCache(creds))
+    token_cache = InstallationTokenCache(creds)
+    api = GitHubApi(slug, token_cache)
+    clones_root = stores.data_dir / "clones"
+
+    def sync_clone() -> Path:
+        return prepare_clone(clones_root, slug, token_cache())
+
     try:
         owner = args.owner or api.repo_owner()
-    except GitHubApiError as exc:
+        platform_clone = sync_clone()  # bursts mount this, never the operator's copy (#4)
+    except (GitHubApiError, CloneError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     rails = Rails.from_env()
     interval = args.interval if args.interval is not None else rails.poll_interval_s
     scheduler = Scheduler(
-        stores, api, repo, owner, rails=rails, image=args.image, model=args.model
+        stores,
+        api,
+        platform_clone,
+        owner,
+        rails=rails,
+        image=args.image,
+        model=args.model,
+        sync_clone=sync_clone,
     )
-    print(f"[scheduler] repo={slug} owner={owner} interval={interval}s rails={rails}")
+    print(f"[scheduler] repo={slug} owner={owner} clone={platform_clone} interval={interval}s rails={rails}")
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
         scheduler.stop_path.touch()

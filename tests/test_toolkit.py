@@ -18,10 +18,23 @@ def test_codex_review_skill_pins_the_safe_invocation():
     skill = (TOOLKIT / "skills" / "codex-review" / "SKILL.md").read_text(encoding="utf-8")
     assert skill.startswith("---")
     assert "name: codex-review" in skill
-    assert "env -u GH_TOKEN" in skill  # credential scrub
+    assert "platform shim" in skill  # the scrub/refusal is enforced, not instructed
     assert 'sandbox_mode="read-only"' in skill
-    assert "--dangerously-bypass-approvals-and-sandbox" in skill  # named as forbidden
+    assert "--dangerously-bypass-approvals-and-sandbox" in skill  # named as refused
     assert "two rounds" in skill
+
+
+def test_codex_shim_enforces_the_walls():
+    """Issue #1: scrub + refusal live in the binary the agent can't edit."""
+    shim = (TOOLKIT.parent / "codex-shim.sh").read_text(encoding="utf-8")
+    assert shim.startswith("#!/bin/sh")
+    for var in ("GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+        assert f"-u {var}" in shim  # unconditional credential scrub
+    assert "--dangerously-bypass-approvals-and-sandbox" in shim
+    assert "*danger-full-access*" in shim
+    assert "--yolo" in shim
+    assert "exit 64" in shim  # refused, not silently rewritten
+    assert "codex-real" in shim
 
 
 def test_burst_loads_toolkit_only_when_present(monkeypatch, tmp_path):

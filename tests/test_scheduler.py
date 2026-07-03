@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from control_plane import scheduler as sched_mod
 from control_plane.bursts import BurstOutcome, PlatformStores
+from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, Issue, PullRequest, Review
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, TaskStatus, utc_now
 from control_plane.scheduler import Rails, Scheduler
@@ -316,6 +317,40 @@ def test_re_ready_resets_rails_and_resumes_review_path(rig):
     assert task.status == TaskStatus.CLAIMED
     assert task.attempts == 0 and task.review_rounds == 0
     assert task.next_burst_kind == "review"
+
+
+def test_sync_clone_feeds_the_burst_and_failures_hit_the_rail(rig, tmp_path):
+    scheduler, api, stores, spawned, _ = rig
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    api.open_prs = [_pr()]
+    platform_clone = tmp_path / "data" / "clones" / "owner__product"
+    scheduler.sync_clone = lambda: platform_clone
+    captured = []
+    orig = sched_mod.execute_burst
+
+    def capture(stores_, task, repo, prompt, **kwargs):
+        captured.append(repo)
+        return orig(stores_, task, repo, prompt, **kwargs)
+
+    sched_mod.execute_burst = capture
+    try:
+        scheduler.tick()
+    finally:
+        sched_mod.execute_burst = orig
+    assert captured == [platform_clone]  # the platform clone, not the operator's
+
+    def broken_clone():
+        raise CloneError("origin unreachable")
+
+    stores.ledger.upsert_task(TaskRecord(task_id="2", repo="r", status=TaskStatus.CLAIMED))
+    api.issues[2] = _issue(number=2)
+    api.prs[2] = _pr()  # task 1 sits in awaiting_review on PR #2
+    scheduler.sync_clone = broken_clone
+    scheduler.rails.failure_cooldown_s = 0
+    scheduler.tick()
+    task = stores.ledger.get_task("2")
+    assert task.status == TaskStatus.CLAIMED and task.attempts == 1
 
 
 def test_rails_from_env_overrides():

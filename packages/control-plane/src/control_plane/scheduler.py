@@ -13,8 +13,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, GitHubApi, GitHubApiError, Review
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import BurstStatus, TaskRecord, TaskStatus, utc_now
@@ -69,14 +71,16 @@ class Scheduler:
         rails: Rails | None = None,
         image: str = DEFAULT_IMAGE,
         model: str | None = None,
+        sync_clone: Callable[[], Path] | None = None,
     ) -> None:
         self.stores = stores
         self.api = api
-        self.repo = repo
+        self.repo = repo  # the platform-owned clone (issue #4), never the operator's
         self.owner = owner  # the human whose changes-requested reviews trigger rounds
         self.rails = rails or Rails()
         self.image = image
         self.model = model
+        self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
         self.current_burst_id: str | None = None  # for the kill switch mid-burst
 
     # --- stop flag ---
@@ -244,6 +248,13 @@ class Scheduler:
     def run_task_burst(self, task: TaskRecord) -> None:
         number = int(task.task_id)
         kind = task.next_burst_kind or WORK
+        repo = self.repo
+        if self.sync_clone is not None:
+            try:
+                repo = self.sync_clone()
+            except CloneError as exc:
+                self._register_failure(task, f"platform clone sync failed: {exc}")
+                return
         if kind == WORK:
             prompt = work_prompt(self.api.get_issue(number))
             pending: list[Review] = []
@@ -264,7 +275,7 @@ class Scheduler:
             outcome = execute_burst(
                 self.stores,
                 task,
-                self.repo,
+                repo,
                 prompt,
                 kind=kind,
                 image=self.image,

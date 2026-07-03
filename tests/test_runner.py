@@ -100,6 +100,27 @@ def test_codex_auth_mounted_only_for_run_bursts(monkeypatch):
     assert "/host/.codex:/home/agent/.codex" not in DockerRunner().build_command(spec_check)
 
 
+def test_seccomp_profile_applied_and_valid(monkeypatch):
+    """Issue #3: bursts run under the userns-enabled profile, never unconfined."""
+    import json
+
+    from control_plane.runner import SECCOMP_PROFILE
+
+    monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
+    cmd = DockerRunner().build_command(_spec())
+    assert f"seccomp={SECCOMP_PROFILE}" in cmd
+    assert "unconfined" not in " ".join(cmd)
+
+    profile = json.loads(SECCOMP_PROFILE.read_text(encoding="utf-8"))
+    assert profile["defaultAction"] != "SCMP_ACT_ALLOW"  # still an allowlist
+    userns_rules = [
+        rule
+        for rule in profile["syscalls"]
+        if "unshare" in rule.get("names", []) and rule["action"] == "SCMP_ACT_ALLOW" and not rule.get("args")
+    ]
+    assert userns_rules, "userns syscalls must be allowed unconditionally"
+
+
 def test_model_env_var_and_spec_passthrough(monkeypatch):
     monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
     cmd = " ".join(DockerRunner().build_command(_spec(model="claude-opus-4-8")))

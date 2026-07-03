@@ -17,6 +17,13 @@ from dev_agent import env as agentenv
 
 DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
 
+# Docker's default seccomp profile blocks unprivileged user namespaces, which
+# codex's bubblewrap read-only sandbox needs (issue #3). This is moby v28.3.0's
+# default profile plus an allow rule for the userns/mount syscalls — measured
+# widening, not `unconfined`. Verified live: bwrap + a real read-only codex
+# review run inside the container.
+SECCOMP_PROFILE = Path(__file__).parent / "resources" / "seccomp-userns.json"
+
 # The platform pins the burst model explicitly — "unset" must mean *our* pinned
 # default, never whatever `claude` the image happens to ship with (that default
 # drifts across CLI releases, silently changing the experiment's key variable).
@@ -102,6 +109,8 @@ class DockerRunner:
             "--rm",
             "--name",
             f"burst-{spec.burst_id}",
+            "--security-opt",
+            f"seccomp={SECCOMP_PROFILE}",
             "-v",
             f"{spec.volume_dir}:{agentenv.CONTAINER_SESSION_DIR}",
             "-v",

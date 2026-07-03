@@ -19,15 +19,18 @@ RUN uv build --wheel /src/dev-agent --out-dir /wheels
 
 FROM python:3.12-slim
 
+# bubblewrap: codex's read-only sandbox needs it on slim Debian (issue #3)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep \
+    && apt-get install -y --no-install-recommends git curl ca-certificates ripgrep bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # uv — the product's env/deps tool (warm base: the burst just runs `uv sync`).
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Codex CLI — the pre-PR reviewer. Auth is a control-plane-mounted ~/.codex
-# (ChatGPT subscription); nothing is baked in.
+# (ChatGPT subscription); nothing is baked in. The real binary is codex-real;
+# `codex` on PATH is the platform shim (issue #1): credential scrub + refusal
+# of sandbox-weakening flags, enforced — not just instructed.
 RUN arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
          arm64) target="aarch64-unknown-linux-musl" ;; \
@@ -38,9 +41,11 @@ RUN arch="$(dpkg --print-architecture)" \
         "https://github.com/openai/codex/releases/latest/download/codex-${target}.tar.gz" \
     && tar -xzf /tmp/codex.tar.gz -C /usr/local/bin \
     && rm /tmp/codex.tar.gz \
-    && { [ -f "/usr/local/bin/codex-${target}" ] && mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex || true; } \
-    && chmod +x /usr/local/bin/codex \
-    && codex --version
+    && { [ -f "/usr/local/bin/codex-${target}" ] && mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex-real || true; } \
+    && { [ -f "/usr/local/bin/codex" ] && mv /usr/local/bin/codex /usr/local/bin/codex-real || true; } \
+    && chmod +x /usr/local/bin/codex-real
+COPY docker/dev-agent/codex-shim.sh /usr/local/bin/codex
+RUN chmod 755 /usr/local/bin/codex && codex --version
 
 # gh CLI — the agent's GitHub interface (PRs, issues); reads GH_TOKEN from env.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

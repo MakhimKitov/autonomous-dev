@@ -12,14 +12,15 @@ credentials. Do not improvise the invocation; use exactly the recipe below.
 ## Invocation
 
 ```bash
-env -u GH_TOKEN -u GITHUB_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY \
-  codex exec review --base main -c 'sandbox_mode="read-only"' 2>&1
+codex exec review --base main -c 'sandbox_mode="read-only"' 2>&1
 ```
 
-- The `env -u` scrub is mandatory — the reviewer runs without your tokens.
-- **Never** pass `--dangerously-bypass-approvals-and-sandbox` or weaken the sandbox
-  in any way. If the read-only run fails, that is a finding to report, not a reason
-  to escalate permissions.
+- `codex` here is the platform shim: it scrubs your credentials (`GH_TOKEN`,
+  `GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`) unconditionally and
+  **refuses sandbox-weakening flags** (`--dangerously-bypass-approvals-and-sandbox`,
+  `danger-full-access`, `--yolo`) — don't pass them; the attempt is refused and logged.
+- If the read-only run fails, that is a finding to report, not a reason to escalate
+  permissions.
 - Expect a startup `shell_snapshot` ERROR line in the output — it is cosmetic; the
   review still runs. The verdict is the final `codex` block.
 

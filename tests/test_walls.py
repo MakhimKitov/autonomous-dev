@@ -40,6 +40,20 @@ def test_bash_screen(tmp_path):
     assert forbidden_reason("Bash", {"command": "pytest -q"}, tmp_path) is None
 
 
+def test_bash_screen_sandbox_weakening(tmp_path):
+    """Issue #2: handing the reviewer full access is a wall + ledger entry."""
+    denied = [
+        "codex exec review --dangerously-bypass-approvals-and-sandbox 2>&1",
+        'codex exec review -c sandbox_mode="danger-full-access"',
+        "codex exec --yolo 'review my diff'",
+    ]
+    for command in denied:
+        reason = forbidden_reason("Bash", {"command": command}, tmp_path)
+        assert reason and "sandbox-weakening" in reason
+    safe = 'codex exec review --base main -c sandbox_mode="read-only" 2>&1'
+    assert forbidden_reason("Bash", {"command": safe}, tmp_path) is None
+
+
 def test_hook_denies_and_records(tmp_path):
     violations = tmp_path / "violations.jsonl"
     hook = make_pre_tool_use_hook(tmp_path, violations)
