@@ -14,6 +14,7 @@ from control_plane.github_api import COPILOT_REVIEWER, Issue, PullRequest, Revie
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, TaskStatus, utc_now
 from control_plane.review import ReviewPolicy
 from control_plane.scheduler import Rails, Scheduler
+from control_plane.testing import E2EPolicy
 from control_plane.volume import HarvestOutcome
 
 OWNER = "owner1"
@@ -85,7 +86,15 @@ def rig(tmp_path, monkeypatch):
     spawned = []
 
     def fake_execute(stores_, task, repo, prompt, **kwargs):
-        spawned.append({"task": task.task_id, "prompt": prompt, "kind": kwargs.get("kind")})
+        spawned.append(
+            {
+                "task": task.task_id,
+                "prompt": prompt,
+                "kind": kwargs.get("kind"),
+                "role": kwargs.get("role"),
+                "extra_env": kwargs.get("extra_env"),
+            }
+        )
         return fake_execute.next_outcome
 
     fake_execute.next_outcome = _outcome()
@@ -480,9 +489,13 @@ CLAUDE_ON = ReviewPolicy(enabled=True, providers=("claude", "copilot"))
 class FakeReviewerApi:
     def __init__(self):
         self.posted = []
+        self.commented = []
 
     def post_review(self, pr_number, body, findings, event="COMMENT"):
         self.posted.append((pr_number, body, findings, event))
+
+    def comment(self, number, body):
+        self.commented.append((number, body))
 
 
 def _claude_rig(rig):
@@ -655,3 +668,122 @@ def test_pushed_dev_round_queues_assess_again(rig):
     task = stores.ledger.get_task("1")
     assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "assess"
     assert task.last_review_id == 41
+
+
+# --- the tester funnel (TESTER.md slice 1) ---
+
+TEST_MANIFEST = """---
+env: [DISCORD_TOKEN]
+tools: []
+---
+Boot: run the bot in the sandbox guild.
+"""
+
+
+def _tester_rig(rig, monkeypatch, manifest=TEST_MANIFEST, provisioned=True):
+    scheduler, api, stores, spawned, fake_execute = _claude_rig(rig)
+    scheduler.testing = E2EPolicy(enabled=True)
+    scheduler.repo.mkdir(parents=True, exist_ok=True)
+    if manifest is not None:
+        (scheduler.repo / "TESTING.md").write_text(manifest, encoding="utf-8")
+    if provisioned:
+        monkeypatch.setenv("TEST_DISCORD_TOKEN", "sandbox-token")
+    else:
+        monkeypatch.delenv("TEST_DISCORD_TOKEN", raising=False)
+    return scheduler, api, stores, spawned, fake_execute
+
+
+def _queued_assess(stores):
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess")
+    )
+
+
+def test_clean_assess_queues_test_when_product_plugs_in(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    _queued_assess(stores)
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome('{"verdict": "Clean.", "findings": []}')
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "test"
+    assert task.attempts == 0
+
+
+def test_assess_findings_never_queue_test(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    _queued_assess(stores)
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "Broken.", "findings": [{"path": "bot/x.py", "line": 3, "body": "bug"}]}'
+    )
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
+
+
+def test_missing_sandbox_credentials_skip_test_with_comment(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch, provisioned=False)
+    _queued_assess(stores)
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome('{"verdict": "Clean.", "findings": []}')
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
+    assert any("TEST_DISCORD_TOKEN" in body for _, body in api.comments)
+
+
+def test_product_without_manifest_is_not_testable(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch, manifest=None)
+    _queued_assess(stores)
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome('{"verdict": "Clean.", "findings": []}')
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
+    assert api.comments == []  # a logged skip, not a commented one
+
+
+def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
+    scheduler, api, stores, spawned, fake_execute = _tester_rig(rig, monkeypatch)
+    stores.ledger.upsert_task(
+        TaskRecord(
+            task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2,
+            next_burst_kind="test", session_id="dev-session",
+        )
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "One defect.", "scenarios": [{"name": "boot", "result": "pass", '
+        '"evidence": "synced"}], "defects": [{"summary": "bad reply", "repro": "/roll"}]}'
+    )
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    # defects are advisory (slice 1): the task still proceeds to the human gate
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
+    assert task.session_id == "dev-session"  # the tester never pollutes the dev's session
+    assert spawned[0]["kind"] == "test" and spawned[0]["role"] == "tester"
+    # the injection is the TEST_ intersection, unprefixed on the way in
+    assert spawned[0]["extra_env"] == {"DISCORD_TOKEN": "sandbox-token"}
+    # the testing contract's prose rides the task prompt
+    assert "sandbox guild" in spawned[0]["prompt"]
+    ((pr_number, body),) = scheduler.reviewer_api.commented
+    assert pr_number == 2 and "Machine test report" in body
+    assert "❌" not in body and "- **bad reply** — /roll" in body
+
+
+def test_test_failure_gives_up_softly_never_blocks(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _outcome(exit_code=1)
+    scheduler.tick()  # attempt 1 → retry
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.attempts == 1
+    scheduler.tick()  # attempt 2 = rails cap → give up on the test, not the task
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.attempts == 0
+    assert any("machine test could not run" in body for _, body in api.comments)
+    assert ("remove", 1, "in-progress") not in api.label_ops  # task is NOT parked

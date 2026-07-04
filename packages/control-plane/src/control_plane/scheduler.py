@@ -20,15 +20,27 @@ from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Review
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import BurstStatus, TaskRecord, TaskStatus, utc_now
-from control_plane.prompts import assess_prompt, review_prompt, work_prompt
+from control_plane.prompts import assess_prompt, review_prompt, test_prompt, work_prompt
 from control_plane.review import FindingsError, ReviewPolicy, format_review_body, parse_findings
 from control_plane.runner import DEFAULT_IMAGE
+from control_plane.testing import (
+    MANIFEST_FILENAME,
+    ManifestError,
+    ReportError,
+    E2EPolicy,
+    format_test_report,
+    parse_manifest,
+    parse_report,
+    resolve_test_env,
+)
 
 STOP_FILENAME = "STOP"
 
 WORK = "work"
 REVIEW = "review"
 ASSESS = "assess"  # a reviewer-role burst judging the open PR (REVIEWERS.md)
+TEST = "test"  # a tester-role burst running the product in its sandbox (TESTER.md)
+MACHINE_STAGES = (ASSESS, TEST)  # additive stages: their failures never block the task
 
 
 @dataclass(slots=True)
@@ -72,6 +84,7 @@ class Scheduler:
         owner: str,
         rails: Rails | None = None,
         review: ReviewPolicy | None = None,
+        testing: E2EPolicy | None = None,
         reviewer_api: GitHubApi | None = None,
         reviewer_login: str | None = None,
         image: str = DEFAULT_IMAGE,
@@ -85,6 +98,7 @@ class Scheduler:
         self.owner = owner  # the human whose changes-requested reviews trigger rounds
         self.rails = rails or Rails()
         self.review = review or ReviewPolicy()  # ships off (REVIEWERS.md)
+        self.testing = testing or E2EPolicy()  # ships off (TESTER.md)
         self.reviewer_api = reviewer_api  # posts the claude provider's findings (second App)
         self.reviewer_login = reviewer_login  # that App's bot login, learned at startup
         self.machine_reviewers = set(self.review.machine_reviewers())
@@ -294,6 +308,9 @@ class Scheduler:
         if kind == ASSESS:
             self._run_assess_burst(task)
             return
+        if kind == TEST:
+            self._run_test_burst(task)
+            return
         repo = self.repo
         if self.sync_clone is not None:
             try:
@@ -431,10 +448,142 @@ class Scheduler:
             return
         model = (outcome.harvest.result or {}).get("model")  # resolved, not requested
         self._post_assessment(task, parsed, head_sha=pr.head_sha, model=model)
+        # the funnel (TESTER.md): only a clean assess queues the sandbox —
+        # no boot for a diff that findings are about to change
+        if not parsed.findings and self._test_queueable(task, repo):
+            task.status = TaskStatus.CLAIMED
+            task.next_burst_kind = TEST
+            print(f"[scheduler] machine test queued for PR #{task.pr_number} (test burst)")
+        else:
+            task.status = TaskStatus.AWAITING_REVIEW
+            task.next_burst_kind = None
+        task.attempts = 0  # machine-stage retries must not poison later dev rounds
+        self.stores.ledger.upsert_task(task)
+
+    def _test_queueable(self, task: TaskRecord, repo: Path) -> bool:
+        """Whether the tester can plug in (TESTER.md): policy on, the product
+        ships a parseable TESTING.md, and every declared credential exists
+        platform-side. Anything short is a logged or commented skip, never a
+        failure — tests are additive."""
+        if not self.testing.enabled:
+            return False
+        manifest_path = repo / MANIFEST_FILENAME
+        if not manifest_path.is_file():
+            print(f"[scheduler] product ships no {MANIFEST_FILENAME} — not testable, skipping")
+            return False
+        try:
+            manifest = parse_manifest(manifest_path.read_text(encoding="utf-8"))
+        except ManifestError as exc:
+            self._skip_test(task, str(exc))
+            return False
+        _, missing = resolve_test_env(manifest)
+        if missing:
+            self._skip_test(
+                task, f"sandbox credentials not provisioned platform-side: {', '.join(missing)}"
+            )
+            return False
+        return True
+
+    def _skip_test(self, task: TaskRecord, reason: str) -> None:
+        print(f"[scheduler] machine test skipped: {reason}")
+        try:
+            self.api.comment(
+                int(task.task_id),
+                f"ℹ️ control plane: machine test could not run ({reason}).",
+            )
+        except GitHubApiError as exc:
+            print(f"[scheduler] skip comment failed (advisory, continuing): {exc}")
+
+    def _run_test_burst(self, task: TaskRecord) -> None:
+        """A tester-role burst (TESTER.md): boots the product per its own
+        TESTING.md, sandbox credentials injected as the TEST_ intersection;
+        the report returns via the harvest and posts as a PR comment."""
+        pr = self.api.get_pr(task.pr_number)
+        if pr.merged or pr.state != "open":
+            task.status = TaskStatus.AWAITING_REVIEW  # resolved while queued — nothing to test
+            task.next_burst_kind = None
+            self.stores.ledger.upsert_task(task)
+            return
+        repo = self.repo
+        if self.sync_clone_ref is not None:
+            try:
+                repo = self.sync_clone_ref(pr.head_sha)
+            except CloneError as exc:
+                self._register_failure(task, f"platform clone sync failed: {exc}")
+                return
+        # re-read at spawn time — the synced head owns the manifest's truth
+        try:
+            manifest = parse_manifest((repo / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        except (OSError, ManifestError) as exc:
+            self._register_failure(task, f"test manifest unusable: {exc}")
+            return
+        sandbox_env, missing = resolve_test_env(manifest)
+        if missing:
+            self._register_failure(task, f"sandbox credentials missing: {', '.join(missing)}")
+            return
+
+        task.status = TaskStatus.WORKING
+        task.last_burst_at = utc_now()
+        self.stores.ledger.upsert_task(task)
+
+        self.current_burst_id = uuid.uuid4().hex[:12]
+        try:
+            outcome = execute_burst(
+                self.stores,
+                task,
+                repo,
+                test_prompt(task.pr_number, pr.head_sha, manifest.prose),
+                kind=TEST,
+                role="tester",
+                fresh=True,  # no shared context with the dev or the reviewer
+                image=self.image,
+                model=self.testing.tester_model or self.model,
+                max_budget_usd=self.rails.burst_budget_usd,
+                max_turns=self.rails.burst_max_turns,
+                burst_id=self.current_burst_id,
+                extra_env=sandbox_env,  # the TEST_ intersection — tester bursts only
+            )
+        except (GitHubAuthError, GitHubApiError) as exc:
+            print(f"[scheduler] burst spawn failed: {exc}")
+            self._register_failure(task, f"burst could not start: {exc}")
+            return
+        finally:
+            self.current_burst_id = None
+
+        if not outcome.succeeded:
+            self._register_failure(task, f"test burst {outcome.burst.burst_id} failed (see its log)")
+            return
+        try:
+            report = parse_report((outcome.harvest.result or {}).get("final_text") or "")
+        except ReportError as exc:
+            self._register_failure(task, f"tester output unusable: {exc}")
+            return
+        model = (outcome.harvest.result or {}).get("model")  # resolved, not requested
+        self._post_test_report(task, report, head_sha=pr.head_sha, model=model)
         task.status = TaskStatus.AWAITING_REVIEW
         task.next_burst_kind = None
-        task.attempts = 0  # the assess retry rail must not poison later dev rounds
+        task.attempts = 0  # machine-stage retries must not poison later dev rounds
         self.stores.ledger.upsert_task(task)
+
+    def _post_test_report(
+        self, task: TaskRecord, report, head_sha: str = "", model: str | None = None
+    ) -> None:
+        """Advisory (TESTER.md slice 1): a PR comment in the reviewer App's
+        voice; defects never trigger dev rounds — the human reads and decides."""
+        if self.reviewer_api is None:
+            print("[scheduler] no reviewer App configured — test report not posted")
+            return
+        body = format_test_report(report, head_sha, model)
+        try:
+            self.reviewer_api.comment(task.pr_number, body)
+            failed = sum(1 for s in report.scenarios if s["result"] == "fail")
+            print(
+                f"[scheduler] test report posted on PR #{task.pr_number}: "
+                f"{len(report.scenarios)} scenario(s), {failed} failed, "
+                f"{len(report.defects)} defect(s)"
+            )
+        except GitHubApiError as exc:
+            print(f"[scheduler] posting the test report failed (advisory, continuing): {exc}")
 
     def _post_assessment(
         self, task: TaskRecord, parsed, head_sha: str = "", model: str | None = None
@@ -494,18 +643,19 @@ class Scheduler:
         task.last_burst_at = utc_now()
         if task.attempts >= self.rails.max_attempts:
             number = int(task.task_id)
-            if task.next_burst_kind == ASSESS:
-                # reviews are additive (REVIEWERS.md): give up on the machine
-                # review, never on the task — it proceeds to the human gate
+            if task.next_burst_kind in MACHINE_STAGES:
+                # machine stages are additive (REVIEWERS.md, TESTER.md): give up
+                # on the stage, never on the task — it proceeds to the human gate
+                stage = "review" if task.next_burst_kind == ASSESS else "test"
                 task.status = TaskStatus.AWAITING_REVIEW
                 task.next_burst_kind = None
                 task.attempts = 0
                 self.api.comment(
                     number,
-                    f"ℹ️ control plane: machine review could not run ({reason}) — "
+                    f"ℹ️ control plane: machine {stage} could not run ({reason}) — "
                     "left for the owner's review.",
                 )
-                print(f"[scheduler] task #{task.task_id}: machine review given up: {reason}")
+                print(f"[scheduler] task #{task.task_id}: machine {stage} given up: {reason}")
             else:
                 task.status = TaskStatus.BLOCKED
                 task.next_burst_kind = None

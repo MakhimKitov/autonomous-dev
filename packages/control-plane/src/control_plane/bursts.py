@@ -75,6 +75,7 @@ def execute_burst(
     burst_id: str | None = None,
     with_github: bool = False,
     mount_codex: bool = False,
+    extra_env: dict[str, str] | None = None,
     runner: DockerRunner | None = None,
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
@@ -82,6 +83,8 @@ def execute_burst(
     ``with_github`` mints the dev App token into the box (dev bursts push;
     reviewer bursts get no GitHub credential at all — REVIEWERS.md).
     ``mount_codex`` mounts the operator's codex auth (slice 3, reviewer only).
+    ``extra_env`` injects sandbox credentials — the resolved TEST_ intersection,
+    tester bursts only (TESTER.md).
 
     May raise GitHubAuthError (before the container starts) — callers decide
     whether that aborts (CLI) or waits for the next tick (scheduler).
@@ -132,7 +135,8 @@ def execute_burst(
             git_user_name=git_name,
             git_user_email=git_email,
             codex_auth_dir=codex_auth,
-            repo_read_only=(role == "reviewer"),  # a wall, not an instruction
+            repo_read_only=(role in ("reviewer", "tester")),  # a wall, not an instruction
+            extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"
         exit_code = runner.run(spec, log_path=log_path)

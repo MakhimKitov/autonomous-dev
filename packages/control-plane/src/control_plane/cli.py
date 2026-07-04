@@ -34,6 +34,7 @@ from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
 from control_plane.store import SqliteLedger
 from control_plane.telemetry import init_telemetry
+from control_plane.testing import E2EPolicy, E2EPolicyError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -156,8 +157,14 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         return 2
     try:
         review = ReviewPolicy.from_env()  # a declaration that can't be honored refuses to start
-    except ReviewPolicyError as exc:
+        testing = E2EPolicy.from_env()
+    except (ReviewPolicyError, E2EPolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if testing.enabled and not review.claude:
+        # the funnel (TESTER.md): tests run only after a clean assess — without
+        # the claude review provider that trigger never fires
+        print("error: E2E=on requires the claude review provider (tests run after a clean assess)", file=sys.stderr)
         return 2
 
     init_telemetry()
@@ -204,6 +211,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         owner,
         rails=rails,
         review=review,
+        testing=testing,
         reviewer_api=reviewer_api,
         reviewer_login=reviewer_login,
         image=args.image,
@@ -213,7 +221,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     )
     print(f"[scheduler] repo={slug} owner={owner} clone={platform_clone} interval={interval}s rails={rails}")
     reviewer_note = f" · reviewer={reviewer_login}" if reviewer_login else ""
-    print(f"[scheduler] review: {review.describe()}{reviewer_note} · gate={owner}")
+    print(f"[scheduler] review: {review.describe()}{reviewer_note} · e2e={testing.describe()} · gate={owner}")
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
         scheduler.stop_path.touch()

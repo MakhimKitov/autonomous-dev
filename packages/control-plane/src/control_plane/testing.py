@@ -1,0 +1,194 @@
+"""The E2E test policy and the product's testing manifest (TESTER.md).
+
+The platform owns the envelope; the product owns the knowledge. Its
+``TESTING.md`` carries YAML-ish frontmatter for the control plane (what to
+inject) and prose for the tester agent (how to test). The manifest is
+UNTRUSTED — it lives in a repo the dev agent writes to — so credentials are
+resolved by intersection: only names the manifest asks for AND the operator
+provisioned under the ``TEST_`` prefix ever enter the container.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass, field
+
+E2E_ENV = "E2E"
+TESTER_MODEL_ENV = "TESTER_MODEL"
+TEST_ENV_PREFIX = "TEST_"  # the allowlist boundary and the radioactivity marker
+MANIFEST_FILENAME = "TESTING.md"
+
+RECOGNIZED_TOOLS: tuple[str, ...] = ()  # slice 2 adds "playwright"
+
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")  # boring env names only — no smuggling
+
+
+class E2EPolicyError(ValueError):
+    """The declared E2E configuration cannot be honored — refuse to start."""
+
+
+@dataclass(frozen=True, slots=True)
+class E2EPolicy:
+    """The operator's declaration: a toggle and an optional model override."""
+
+    enabled: bool = False
+    tester_model: str | None = None
+
+    @classmethod
+    def from_env(cls, environ: dict[str, str] | None = None) -> E2EPolicy:
+        env = dict(os.environ) if environ is None else environ
+        raw = (env.get(E2E_ENV) or "off").strip().lower()
+        if raw not in ("on", "off"):
+            raise E2EPolicyError(f"{E2E_ENV} must be on|off, got {raw!r}")
+        if raw == "off":
+            return cls()
+        return cls(enabled=True, tester_model=(env.get(TESTER_MODEL_ENV) or "").strip() or None)
+
+    def describe(self) -> str:
+        return "on" if self.enabled else "off"
+
+
+class ManifestError(ValueError):
+    """The product's TESTING.md frontmatter is missing or unusable."""
+
+
+@dataclass(slots=True)
+class TestManifest:
+    """The machine-readable half of the product's testing contract."""
+
+    env: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()
+    prose: str = ""  # the tester agent's operating contract, verbatim
+
+
+def parse_manifest(text: str) -> TestManifest:
+    """Frontmatter between ``---`` fences: ``env``/``tools`` flow lists only.
+
+    Deliberately strict and deliberately not a YAML parser — two keys, one
+    shape. Unknown keys refuse: a manifest asking for more than the socket
+    offers is a contract mismatch, not something to guess around.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ManifestError(f"{MANIFEST_FILENAME} has no frontmatter (--- fence)")
+    try:
+        end = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        raise ManifestError(f"{MANIFEST_FILENAME} frontmatter never closes") from None
+    fields: dict[str, tuple[str, ...]] = {}
+    for line in lines[1:end]:
+        bare = line.split("#", 1)[0].strip()
+        if not bare:
+            continue
+        key, sep, value = bare.partition(":")
+        key, value = key.strip(), value.strip()
+        if not sep or key not in ("env", "tools"):
+            raise ManifestError(f"{MANIFEST_FILENAME} frontmatter: unknown line {line.strip()!r}")
+        if not (value.startswith("[") and value.endswith("]")):
+            raise ManifestError(f"{MANIFEST_FILENAME} frontmatter: {key} must be a [flow, list]")
+        items = tuple(item.strip() for item in value[1:-1].split(",") if item.strip())
+        fields[key] = items
+    env = fields.get("env", ())
+    for name in env:
+        if not _ENV_NAME.match(name):
+            raise ManifestError(f"{MANIFEST_FILENAME}: {name!r} is not a plain env var name")
+    tools = fields.get("tools", ())
+    for tool in tools:
+        if tool not in RECOGNIZED_TOOLS:
+            raise ManifestError(
+                f"{MANIFEST_FILENAME}: tool {tool!r} is not shipped (TESTER.md slices) — "
+                f"available today: {', '.join(RECOGNIZED_TOOLS) or 'none'}"
+            )
+    return TestManifest(env=env, tools=tools, prose="\n".join(lines[end + 1 :]).strip())
+
+
+def resolve_test_env(
+    manifest: TestManifest, environ: dict[str, str] | None = None
+) -> tuple[dict[str, str], list[str]]:
+    """The intersection: manifest name ``X`` ← platform ``TEST_X``.
+
+    Returns (injectable, missing). The manifest can only name its way to
+    ``TEST_``-prefixed values — nothing else is reachable, by construction.
+    """
+    env = dict(os.environ) if environ is None else environ
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for name in manifest.env:
+        value = (env.get(TEST_ENV_PREFIX + name) or "").strip()
+        if value:
+            resolved[name] = value
+        else:
+            missing.append(TEST_ENV_PREFIX + name)
+    return resolved, missing
+
+
+class ReportError(ValueError):
+    """The tester burst's final message wasn't the contracted JSON."""
+
+
+@dataclass(slots=True)
+class TestReport:
+    """A tester burst's structured report, parsed from its final message."""
+
+    verdict: str
+    scenarios: list[dict] = field(default_factory=list)  # {name, result, evidence}
+    defects: list[dict] = field(default_factory=list)  # {summary, repro}
+
+
+def parse_report(final_text: str) -> TestReport:
+    """The tester's contract: the final message IS a JSON object
+    ``{"verdict", "scenarios": [{"name", "result", "evidence"}],
+    "defects": [{"summary", "repro"}]}``. Accept a fenced block around it."""
+    text = (final_text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ReportError("no JSON object in the tester's final message")
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ReportError(f"tester JSON does not parse: {exc}") from exc
+    verdict = str(data.get("verdict") or "").strip()
+    if not verdict:
+        raise ReportError("tester JSON has no verdict")
+    scenarios = []
+    for item in data.get("scenarios") or []:
+        name = str(item.get("name") or "").strip()
+        result = str(item.get("result") or "").strip().lower()
+        if not name or result not in ("pass", "fail"):
+            raise ReportError(f"scenario needs a name and result pass|fail: {item!r}")
+        scenarios.append(
+            {"name": name, "result": result, "evidence": str(item.get("evidence") or "").strip()}
+        )
+    defects = []
+    for item in data.get("defects") or []:
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            raise ReportError(f"defect missing summary: {item!r}")
+        defects.append({"summary": summary, "repro": str(item.get("repro") or "").strip()})
+    return TestReport(verdict=verdict, scenarios=scenarios, defects=defects)
+
+
+def format_test_report(report: TestReport, head_sha: str, model: str | None) -> str:
+    """The posted PR comment: the report in uniform (mirrors the review
+    overview — header, resolved model, the exact commit the sandbox ran)."""
+    meta = " · ".join(
+        part for part in (f"`{model}`" if model else None, f"tested `{head_sha[:7]}`") if part
+    )
+    lines = [f"#### 🧪 Machine test report", f"<sub>{meta}</sub>", "", report.verdict]
+    if report.scenarios:
+        lines += ["", "| scenario | result | evidence |", "|---|---|---|"]
+        for s in report.scenarios:
+            mark = "✅ pass" if s["result"] == "pass" else "❌ fail"
+            lines.append(f"| {s['name']} | {mark} | {s['evidence']} |")
+    if report.defects:
+        lines += ["", "**Defects**", ""]
+        lines += [
+            f"- **{d['summary']}**" + (f" — {d['repro']}" if d["repro"] else "")
+            for d in report.defects
+        ]
+    return "\n".join(lines)

@@ -129,7 +129,7 @@ platform config — everything product-specific rides in the product's `TESTING.
 
 1. **Envelope** — frontmatter parsing, env intersection, test burst after clean assess,
    report posted by the reviewer App. Ships with discord-bot's `TESTING.md`
-   (`tools: []` — no registry needed yet).
+   (`tools: []` — no registry needed yet). *Shipped 2026-07-04.*
 2. **Tools registry** — `playwright` baked into the image, enabled per manifest.
 3. **Defect → round automation** — test defects trigger dev rounds like review
    findings; gated on slice-1 reports proving trustworthy.
