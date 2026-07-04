@@ -490,12 +490,21 @@ class FakeReviewerApi:
     def __init__(self):
         self.posted = []
         self.commented = []
+        self.filed = []
+        self.open_auto = []
 
     def post_review(self, pr_number, body, findings, event="COMMENT"):
         self.posted.append((pr_number, body, findings, event))
 
     def comment(self, number, body):
         self.commented.append((number, body))
+
+    def list_open_issues_by_label(self, label):
+        return list(self.open_auto)
+
+    def create_issue(self, title, body, labels):
+        self.filed.append((title, body, labels))
+        return 100 + len(self.filed)
 
 
 def _claude_rig(rig):
@@ -754,12 +763,11 @@ def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
     )
     api.prs[2] = _pr()
     fake_execute.next_outcome = _assess_outcome(
-        '{"verdict": "One defect.", "scenarios": [{"name": "boot", "result": "pass", '
-        '"evidence": "synced"}], "defects": [{"summary": "bad reply", "repro": "/roll"}]}'
+        '{"verdict": "Clean.", "scenarios": [{"name": "boot", "result": "pass", '
+        '"evidence": "synced"}], "defects": [], "issues": []}'
     )
     scheduler.tick()
     task = stores.ledger.get_task("1")
-    # defects are advisory (slice 1): the task still proceeds to the human gate
     assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
     assert task.session_id == "dev-session"  # the tester never pollutes the dev's session
     assert spawned[0]["kind"] == "test" and spawned[0]["role"] == "tester"
@@ -767,9 +775,82 @@ def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
     assert spawned[0]["extra_env"] == {"DISCORD_TOKEN": "sandbox-token"}
     # the testing contract's prose rides the task prompt
     assert "sandbox guild" in spawned[0]["prompt"]
-    ((pr_number, body),) = scheduler.reviewer_api.commented
-    assert pr_number == 2 and "Machine test report" in body
-    assert "❌" not in body and "- **bad reply** — /roll" in body
+    ((pr_number, body),) = scheduler.reviewer_api.commented  # clean run → plain comment
+    assert pr_number == 2 and "Machine test report" in body and "✅" in body
+    assert scheduler.reviewer_api.posted == []  # no review costume without PR-caused defects
+
+
+def test_pr_caused_defects_return_to_the_developer(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "One defect.", "scenarios": [{"name": "roll", "result": "fail", '
+        '"evidence": "wrong reply"}], "defects": [{"summary": "bad reply", "repro": "/roll"}]}'
+    )
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW
+    # the report wears the review costume — the existing round machinery
+    # (machine reviewer + CHANGES_REQUESTED) returns the defect to the dev
+    ((pr_number, body, findings, event),) = scheduler.reviewer_api.posted
+    assert (pr_number, findings, event) == (2, [], "REQUEST_CHANGES")
+    assert "Machine test report" in body and "- **bad reply** — /roll" in body
+    assert scheduler.reviewer_api.commented == []
+
+    # next tick observes the review and queues the dev round
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.reviews[2] = [Review(id=50, author=REVIEWER_LOGIN, state="CHANGES_REQUESTED", body=body)]
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "review"
+
+
+def test_preexisting_defects_file_auto_issues(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "Old bug found.", "scenarios": [], '
+        '"defects": [{"summary": "log signal missing", "repro": "boot", "preexisting": true}], '
+        '"issues": [{"title": "bot log lines never reach stdout", "body": "### Summary\\nlogging"}]}'
+    )
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW
+    # the tester authored it; the platform relayed it verbatim + mechanical provenance
+    ((title, body, labels),) = scheduler.reviewer_api.filed
+    assert title == "bot log lines never reach stdout" and labels == ["auto"]
+    assert body.startswith("### Summary\nlogging")
+    assert "Machine-filed (`auto` provenance)" in body and "`ready`" in body
+    # pre-existing only → the report stays a comment, and it links the issue
+    ((_, comment),) = scheduler.reviewer_api.commented
+    assert "*(pre-existing)*" in comment and "#101" in comment
+    assert scheduler.reviewer_api.posted == []
+
+
+def test_auto_issue_dedup_skips_already_open_symptom(rig, monkeypatch):
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
+    )
+    api.prs[2] = _pr()
+    scheduler.reviewer_api.open_auto = [
+        Issue(number=90, title="Bot log lines never reach stdout", body="", labels=["auto"])
+    ]
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "Same old bug.", "scenarios": [], '
+        '"defects": [{"summary": "log signal missing", "repro": "boot", "preexisting": true}], '
+        '"issues": [{"title": "bot log lines never reach stdout", "body": "### Summary\\nlogging"}]}'
+    )
+    scheduler.tick()
+    assert scheduler.reviewer_api.filed == []  # matched case-insensitively — not re-filed
+    ((_, comment),) = scheduler.reviewer_api.commented
+    assert "filed as" not in comment.lower()
 
 
 def test_test_failure_gives_up_softly_never_blocks(rig, monkeypatch):
@@ -787,3 +868,17 @@ def test_test_failure_gives_up_softly_never_blocks(rig, monkeypatch):
     assert task.status == TaskStatus.AWAITING_REVIEW and task.attempts == 0
     assert any("machine test could not run" in body for _, body in api.comments)
     assert ("remove", 1, "in-progress") not in api.label_ops  # task is NOT parked
+
+
+def test_auto_issue_claims_with_tainted_framing(rig):
+    # the tester-filed symptom (auto + human-added ready) enters the loop like
+    # any task, but the work prompt flips to reproduce-first framing
+    scheduler, api, stores, spawned, _ = rig
+    auto_issue = Issue(number=13, title="log lines never reach stdout", body="symptom", labels=["ready", "auto"])
+    api.ready_issues = [auto_issue]
+    api.issues[13] = auto_issue
+    scheduler.tick()
+    task = stores.ledger.get_task("13")
+    assert task is not None and task.status in (TaskStatus.CLAIMED, TaskStatus.WORKING, TaskStatus.AWAITING_REVIEW)
+    assert "tainted data" in spawned[0]["prompt"]  # auto provenance framing
+    assert "reproduce" in spawned[0]["prompt"]

@@ -77,7 +77,11 @@ The reviewer's envelope, reused — with the execution posture inverted:
   session** — no shared context with the dev or reviewer.
 - **No GitHub credential.** The report returns through the harvest as the final
   message: `{"verdict": str, "scenarios": [{"name", "result": "pass|fail",
-  "evidence"}], "defects": [{"summary", "repro"}]}`. The control plane posts it.
+  "evidence"}], "defects": [{"summary", "repro", "preexisting": bool}],
+  "issues": [{"title", "body"}]}`. The control plane posts it. The `issues` are
+  the complete symptom reports the tester **authors** for pre-existing defects —
+  the platform relays them verbatim: authorship stays with the agent, the
+  credential stays outside the box.
 - Clone mounted at the PR head, read-only; the tester copies to scratch and boots
   there. (A product too heavy for copy-boot gets a platform-prepared throwaway copy —
   decide when such a product exists.)
@@ -99,19 +103,30 @@ work ok, PR open ──► assess ──findings──► dev round ──push�
 
 - **Only a clean assess queues a test** — no sandbox boot for a diff that's about to
   change. A pushed dev round re-queues assess; only its APPROVE re-queues the test.
-- Test failures are **advisory**: the report lands as a PR comment; defects do not
-  trigger autonomous dev rounds in slice 1 (the human reads and decides; defect→round
-  automation is a later, trust-gated slice).
+- **Defects route by cause** — the tester classifies each (`preexisting`, judged
+  against the diff):
+  - **PR-caused** → the report posts as a `REQUEST_CHANGES` review, and the *existing*
+    round machinery returns it to the developer — no new states, the rounds rail and
+    soft caps apply, and the loop closes naturally: push → assess (its APPROVE clears
+    the chip) → re-test.
+  - **Pre-existing** → the tester authors a complete symptom issue (the product's
+    `symptom.yml` template shape); the control plane relays it verbatim under the
+    **`auto` label, never `ready`** — the human gate authorizes all work, machine-filed
+    included. Rails: dedup against open `auto` issues by title, ≤3 filed per report.
+    This is the monitor's pipeline arriving early: the `auto` provenance framing
+    (reproduce-first, body-is-tainted-data) gets its first real feeder.
+  - Neither, or a clean run → the report is a plain PR comment, advisory.
 - Rails mirror assess: retry with attempts/cooldown; at cap → "machine test could not
   run" comment, task proceeds to `awaiting_review`, never blocked.
 
 ## Posting
 
-Slice 1 posts as the **reviewer App** with a `#### 🧪 Machine test report` header
-(distinct voice, no new App to provision) — one comment per test burst: verdict, a
-scenario table, defects with repro steps. A dedicated tester App is the clean
-provenance answer once reports carry weight; the seam (`AppCredentials.from_env`
-prefix) already exists.
+Everything posts as the **reviewer App** with a `#### 🧪 Machine test report` header
+(distinct voice, no new App to provision): the report (comment, or `REQUEST_CHANGES`
+review when PR-caused defects exist) and the relayed `auto` issues — which require
+**Issues: read/write** on the App, alongside its pull-request permission. A dedicated
+tester App is the clean provenance answer once reports carry weight; the seam
+(`AppCredentials.from_env` prefix) already exists.
 
 ## Config
 
@@ -130,9 +145,11 @@ platform config — everything product-specific rides in the product's `TESTING.
 1. **Envelope** — frontmatter parsing, env intersection, test burst after clean assess,
    report posted by the reviewer App. Ships with discord-bot's `TESTING.md`
    (`tools: []` — no registry needed yet). *Shipped 2026-07-04.*
-2. **Tools registry** — `playwright` baked into the image, enabled per manifest.
-3. **Defect → round automation** — test defects trigger dev rounds like review
-   findings; gated on slice-1 reports proving trustworthy.
+2. **Defect routing** — PR-caused defects return to the developer via a
+   `REQUEST_CHANGES` review (the existing round machinery); pre-existing defects
+   become tester-authored `auto` issues, relayed by the control plane behind the
+   human `ready` gate. *Shipped 2026-07-04.*
+3. **Tools registry** — `playwright` baked into the image, enabled per manifest.
 
 ## Deliberately out
 

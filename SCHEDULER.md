@@ -117,7 +117,8 @@ The contract (product `CLAUDE.md`, baked as system prompt) owns *behavior*; the 
 carries only the *task*:
 
 - **work** — issue number/title/body + the provenance framing (`human`: trusted spec;
-  `auto`: symptom data, reproduce-first — phase 0 feeds only `human`). The evidence block
+  `auto`: symptom data, reproduce-first — fed by the tester's relayed symptom issues,
+  TESTER.md; the human `ready` gate authorizes both provenances). The evidence block
   is flagged untrusted regardless of provenance.
 - **review** — the unseen review(s) verbatim + their inline comments + "address on the
   open PR branch". The session resumes; the agent already has the full task context.
@@ -189,6 +190,7 @@ control_plane/
 
 ## Deliberately out
 
-Webhooks (wake-up optimization once off the laptop — see above) · tester role (TESTER.md) ·
-concurrent bursts · Postgres/SeaweedFS backends · Phoenix compose service · monitor/`auto`
-issues (the provenance gate ships anyway; phase 0 just never feeds it).
+Webhooks (wake-up optimization once off the laptop — see above) ·
+concurrent bursts · Postgres/SeaweedFS backends · Phoenix compose service · the monitor
+(the `auto` pipeline runs already — the tester feeds it, TESTER.md; a monitor adds
+production telemetry as a second feeder).

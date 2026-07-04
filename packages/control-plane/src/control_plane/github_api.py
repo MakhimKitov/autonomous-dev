@@ -154,6 +154,26 @@ class GitHubApi:
     def get_issue(self, number: int) -> Issue:
         return _issue_of(self._call("GET", f"/issues/{number}", f"reading issue #{number}"))
 
+    def list_open_issues_by_label(self, label: str) -> list[Issue]:
+        data = self._call(
+            "GET",
+            "/issues",
+            f"listing open '{label}' issues",
+            params={"labels": label, "state": "open", "per_page": 100},
+        )
+        return [_issue_of(item) for item in data if "pull_request" not in item]
+
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        """File an issue and return its number (the auto-provenance relay,
+        TESTER.md — the content is agent-authored, this is just the pipe)."""
+        data = self._call(
+            "POST",
+            "/issues",
+            f"filing issue {title!r}",
+            json={"title": title, "body": body, "labels": labels},
+        )
+        return int(data["number"])
+
     def add_labels(self, number: int, labels: list[str]) -> None:
         self._call("POST", f"/issues/{number}/labels", f"labelling #{number}", json={"labels": labels})
 

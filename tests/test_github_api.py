@@ -213,3 +213,32 @@ def test_post_review_falls_back_to_body_only_on_422():
     assert "bot/x.py:999" in retry["body"] and "stale line" in retry["body"]
     # the review *state* must survive the degradation — it's the round trigger
     assert retry["event"] == "REQUEST_CHANGES"
+
+
+def test_create_issue_posts_and_returns_number():
+    transport = FakeTransport(
+        {("POST", "/repos/owner/product/issues"): FakeResponse(201, payload={"number": 13})}
+    )
+    api = GitHubApi("owner/product", "ghs_reviewer", request=transport)
+    number = api.create_issue("symptom title", "### Summary\nbody", ["auto"])
+    assert number == 13
+    (post,) = transport.calls
+    assert post["json"] == {"title": "symptom title", "body": "### Summary\nbody", "labels": ["auto"]}
+
+
+def test_list_open_issues_by_label_filters_prs():
+    transport = FakeTransport(
+        {
+            ("GET", "/repos/owner/product/issues"): FakeResponse(
+                200,
+                payload=[
+                    {"number": 1, "title": "real issue", "body": "", "labels": [{"name": "auto"}]},
+                    {"number": 2, "title": "a PR", "body": "", "labels": [], "pull_request": {}},
+                ],
+            )
+        }
+    )
+    api = GitHubApi("owner/product", "ghs_reviewer", request=transport)
+    issues = api.list_open_issues_by_label("auto")
+    assert [i.number for i in issues] == [1]
+    assert transport.calls[0]["params"]["labels"] == "auto"

@@ -116,7 +116,25 @@ def test_parse_report_full_shape():
     )
     assert report.verdict == "Solid."
     assert report.scenarios == [{"name": "boot", "result": "pass", "evidence": "synced in 4s"}]
-    assert report.defects == [{"summary": "crash", "repro": "run x"}]
+    # preexisting defaults to False: an unclassified defect belongs to the PR
+    assert report.defects == [{"summary": "crash", "repro": "run x", "preexisting": False}]
+    assert report.pr_caused == report.defects and report.issues == []
+
+
+def test_parse_report_defect_routing_and_authored_issues():
+    report = parse_report(
+        '{"verdict": "x", "scenarios": [], '
+        '"defects": [{"summary": "old bug", "repro": "r", "preexisting": true}, '
+        '{"summary": "new bug", "repro": "r"}], '
+        '"issues": [{"title": "logging broken", "body": "### Summary\\n..."}]}'
+    )
+    assert [d["summary"] for d in report.pr_caused] == ["new bug"]
+    assert report.issues == [{"title": "logging broken", "body": "### Summary\n..."}]
+
+
+def test_parse_report_rejects_issue_without_body():
+    with pytest.raises(ReportError, match="title and a body"):
+        parse_report('{"verdict": "x", "issues": [{"title": "no body"}]}')
 
 
 def test_parse_report_accepts_fenced_and_empty_defects():

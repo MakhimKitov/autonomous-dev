@@ -134,13 +134,22 @@ class TestReport:
 
     verdict: str
     scenarios: list[dict] = field(default_factory=list)  # {name, result, evidence}
-    defects: list[dict] = field(default_factory=list)  # {summary, repro}
+    defects: list[dict] = field(default_factory=list)  # {summary, repro, preexisting}
+    issues: list[dict] = field(default_factory=list)  # {title, body} — tester-authored
+
+    @property
+    def pr_caused(self) -> list[dict]:
+        """Defects the diff introduced — they go back to the developer."""
+        return [d for d in self.defects if not d.get("preexisting")]
 
 
 def parse_report(final_text: str) -> TestReport:
     """The tester's contract: the final message IS a JSON object
     ``{"verdict", "scenarios": [{"name", "result", "evidence"}],
-    "defects": [{"summary", "repro"}]}``. Accept a fenced block around it."""
+    "defects": [{"summary", "repro", "preexisting"}], "issues": [{"title",
+    "body"}]}``. Accept a fenced block around it. ``issues`` are the complete
+    symptom reports the tester authored for pre-existing defects — the
+    platform relays them verbatim (authorship stays with the agent)."""
     text = (final_text or "").strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, flags=re.DOTALL)
     if fenced:
@@ -169,17 +178,33 @@ def parse_report(final_text: str) -> TestReport:
         summary = str(item.get("summary") or "").strip()
         if not summary:
             raise ReportError(f"defect missing summary: {item!r}")
-        defects.append({"summary": summary, "repro": str(item.get("repro") or "").strip()})
-    return TestReport(verdict=verdict, scenarios=scenarios, defects=defects)
+        defects.append(
+            {
+                "summary": summary,
+                "repro": str(item.get("repro") or "").strip(),
+                "preexisting": bool(item.get("preexisting")),
+            }
+        )
+    issues = []
+    for item in data.get("issues") or []:
+        title = str(item.get("title") or "").strip()
+        body = str(item.get("body") or "").strip()
+        if not title or not body:
+            raise ReportError(f"issue needs a title and a body: {item!r}")
+        issues.append({"title": title, "body": body})
+    return TestReport(verdict=verdict, scenarios=scenarios, defects=defects, issues=issues)
 
 
-def format_test_report(report: TestReport, head_sha: str, model: str | None) -> str:
-    """The posted PR comment: the report in uniform (mirrors the review
-    overview — header, resolved model, the exact commit the sandbox ran)."""
+def format_test_report(
+    report: TestReport, head_sha: str, model: str | None, filed: list[int] | None = None
+) -> str:
+    """The posted report in uniform (mirrors the review overview — header,
+    resolved model, the exact commit the sandbox ran). ``filed`` are the
+    auto-issue numbers the pre-existing defects were relayed to."""
     meta = " · ".join(
         part for part in (f"`{model}`" if model else None, f"tested `{head_sha[:7]}`") if part
     )
-    lines = [f"#### 🧪 Machine test report", f"<sub>{meta}</sub>", "", report.verdict]
+    lines = ["#### 🧪 Machine test report", f"<sub>{meta}</sub>", "", report.verdict]
     if report.scenarios:
         lines += ["", "| scenario | result | evidence |", "|---|---|---|"]
         for s in report.scenarios:
@@ -188,7 +213,11 @@ def format_test_report(report: TestReport, head_sha: str, model: str | None) -> 
     if report.defects:
         lines += ["", "**Defects**", ""]
         lines += [
-            f"- **{d['summary']}**" + (f" — {d['repro']}" if d["repro"] else "")
+            f"- **{d['summary']}**"
+            + (" *(pre-existing)*" if d.get("preexisting") else "")
+            + (f" — {d['repro']}" if d["repro"] else "")
             for d in report.defects
         ]
+    if filed:
+        lines += ["", "Pre-existing defects filed as: " + ", ".join(f"#{n}" for n in filed)]
     return "\n".join(lines)
