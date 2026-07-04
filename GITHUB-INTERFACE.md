@@ -158,7 +158,7 @@ of high-confidence issues is a later-phase step.
 | Stage | Actor | When | Gates? |
 |---|---|---|---|
 | Post-PR review | the **review providers** (REVIEWERS.md): `claude`/`codex` reviewer bursts posting as the reviewer App · `copilot` requested by the control plane | on PR open + after review-round pushes | findings drive **autonomous dev rounds** (in-thread triage, capped); advisory to the human gate |
-| E2E testing (phase 1+) | **Tester** (test burst) — QA, not review: invents scenarios from the spec, runs them in the sandbox | after CI green | advisory to human (test report on the PR) |
+| E2E testing (phase 1+) | **Tester** (test burst, TESTER.md) — QA, not review: boots the product in its declared sandbox, invents scenarios from the spec, runs them | after a clean machine review | advisory to human (test report on the PR) |
 | Final | **Human owner** | before merge | **yes** — branch protection |
 
 Branch protection on the default branch: require a PR, require human approval, require CI

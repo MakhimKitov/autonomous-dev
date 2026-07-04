@@ -179,5 +179,5 @@ stays a note.
 
 `platform.toml` (env vars hold until a second consumer of config exists) · review
 quality scoring / reviewer ensembles · per-provider round caps (the shared rail is
-enough at this scale) · tester role and E2E runs (phase 1+, own doc) · monitor-filed
+enough at this scale) · tester role and E2E runs (TESTER.md) · monitor-filed
 issues (provenance gate ships regardless).

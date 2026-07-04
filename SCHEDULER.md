@@ -189,6 +189,6 @@ control_plane/
 
 ## Deliberately out
 
-Webhooks (wake-up optimization once off the laptop — see above) · tester role ·
+Webhooks (wake-up optimization once off the laptop — see above) · tester role (TESTER.md) ·
 concurrent bursts · Postgres/SeaweedFS backends · Phoenix compose service · monitor/`auto`
 issues (the provenance gate ships anyway; phase 0 just never feeds it).
