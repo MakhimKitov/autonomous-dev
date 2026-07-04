@@ -60,6 +60,9 @@ class BurstSpec:
     # Host dir with codex auth.json (ChatGPT subscription). Mounted rw at
     # /home/agent/.codex so token refresh persists across bursts.
     codex_auth_dir: Path | None = None
+    # Reviewer bursts get the clone read-only — "never modify" is a wall, not
+    # an instruction (REVIEWERS.md); anything they execute copies to /tmp first.
+    repo_read_only: bool = False
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -114,7 +117,7 @@ class DockerRunner:
             "-v",
             f"{spec.volume_dir}:{agentenv.CONTAINER_SESSION_DIR}",
             "-v",
-            f"{spec.repo_mount}:{agentenv.CONTAINER_REPO_DIR}",
+            f"{spec.repo_mount}:{agentenv.CONTAINER_REPO_DIR}{':ro' if spec.repo_read_only else ''}",
         ]
         if spec.codex_auth_dir and spec.command == "run":
             cmd += ["-v", f"{spec.codex_auth_dir}:/home/agent/.codex"]

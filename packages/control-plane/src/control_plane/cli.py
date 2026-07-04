@@ -8,6 +8,7 @@ scheduler: the same choreography, driven unattended by the reconciler loop
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from opentelemetry import trace
 
 from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError, prepare_clone
-from control_plane.github_api import GitHubApi, GitHubApiError, slug_from_origin
+from control_plane.github_api import COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, slug_from_origin
 from control_plane.github_auth import (
     AppCredentials,
     GitHubAuthError,
@@ -28,6 +29,7 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.models import TaskRecord
+from control_plane.review import REVIEWER_APP_PREFIX, ReviewPolicy, ReviewPolicyError
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
 from control_plane.store import SqliteLedger
@@ -128,6 +130,7 @@ def _run_burst(args: argparse.Namespace) -> int:
             max_budget_usd=args.budget,
             max_turns=args.max_turns,
             fresh=args.fresh,
+            with_github=True,  # the manual burst mirrors a dev burst
         )
     except GitHubAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -151,6 +154,11 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     if creds is None:
         print("error: the scheduler needs the GitHub App configured (it polls as the App)", file=sys.stderr)
         return 2
+    try:
+        review = ReviewPolicy.from_env()  # a declaration that can't be honored refuses to start
+    except ReviewPolicyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     init_telemetry()
     stores = PlatformStores.open(args.data_dir)
@@ -159,11 +167,27 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         return 2
 
     token_cache = InstallationTokenCache(creds)
-    api = GitHubApi(slug, token_cache)
+    copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
+    api = GitHubApi(slug, token_cache, copilot_token=copilot_token)
+
+    reviewer_api = reviewer_login = None
+    if review.claude:  # the claude provider posts as a second App (REVIEWERS.md)
+        try:
+            reviewer_creds = AppCredentials.from_env(prefix=REVIEWER_APP_PREFIX)
+            minted = mint_installation_token(reviewer_creds)
+        except GitHubAuthError as exc:
+            print(f"error: reviewer App: {exc}", file=sys.stderr)
+            return 2
+        reviewer_login = minted.bot_login
+        reviewer_api = GitHubApi(slug, InstallationTokenCache(reviewer_creds))
+
     clones_root = stores.data_dir / "clones"
 
     def sync_clone() -> Path:
         return prepare_clone(clones_root, slug, token_cache())
+
+    def sync_clone_ref(ref: str) -> Path:
+        return prepare_clone(clones_root, slug, token_cache(), ref=ref)
 
     try:
         owner = args.owner or api.repo_owner()
@@ -179,11 +203,17 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         platform_clone,
         owner,
         rails=rails,
+        review=review,
+        reviewer_api=reviewer_api,
+        reviewer_login=reviewer_login,
         image=args.image,
         model=args.model,
         sync_clone=sync_clone,
+        sync_clone_ref=sync_clone_ref,
     )
     print(f"[scheduler] repo={slug} owner={owner} clone={platform_clone} interval={interval}s rails={rails}")
+    reviewer_note = f" · reviewer={reviewer_login}" if reviewer_login else ""
+    print(f"[scheduler] review: {review.describe()}{reviewer_note} · gate={owner}")
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
         scheduler.stop_path.touch()

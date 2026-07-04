@@ -39,8 +39,8 @@ ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 GITHUB_TOKEN = "GITHUB_TOKEN"
 GH_TOKEN = "GH_TOKEN"
 
-ROLES = ("dev", "tester")
-BURST_KINDS = ("work", "review", "test")
+ROLES = ("dev", "reviewer", "tester")
+BURST_KINDS = ("work", "review", "assess", "test")
 
 # --- container filesystem contract (mount points, well-known files) ---
 CONTAINER_SESSION_DIR = "/session"  # control-plane-owned volume; CLAUDE_CONFIG_DIR

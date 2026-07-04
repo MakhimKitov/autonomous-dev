@@ -117,13 +117,19 @@ of high-confidence issues is a later-phase step.
   - **Evidence** — tests added/changed and their results; checks run
   - **Release notes** (user-facing) and a **Rollback** command — required by the
     "mergeable rule" (`EXPERIMENT.md`)
-- Opened **ready for review** (not draft): the in-container Codex pass + green local
-  tests happen *before* opening, so a PR appearing is already self-reviewed.
+- Opened **ready for review** (not draft): green local tests + a full diff re-read
+  happen *before* opening. Machine review lands **on the PR** (REVIEWERS.md) — there is
+  no pre-PR review subsystem (dropped: its output wasn't a platform artifact).
 - **Review requests are deterministic control-plane steps** (M2): Copilot + the owner
   are requested on PR open (auto-review proved unreliable) and re-requested after every
-  review-round push (verified: the dev App's `pull_requests:write` can request Copilot
-  reviews — HTTP 201). The product contract instructs the dev to re-request too —
-  belt and braces.
+  review-round push. **Copilot requests need a user token**: GitHub grants them only to
+  a user with a Copilot seat and silently drops them from an App/bot token — the 201 lies
+  (falsified 2026-07-03 on PR #6; two earlier "successful" App re-requests never landed).
+  The control plane sends the Copilot request on the owner's fine-grained PAT
+  (`GITHUB_COPILOT_REVIEW_TOKEN`, PR read/write on the product repo only) and verifies
+  the response echo; the PAT never enters the burst container. Owner requests ride the
+  App token as before. The dev agent cannot re-request Copilot at all (it holds only the
+  App token) — its contract sends it to the owner only, for owner rounds.
 - **Review findings are answered in-thread**, one of: **fix** (reply with the commit
   SHA) · **reply** (one-line rationale for not actioning) · **defer** (follow-up issue,
   linked in-thread). Never a top-level comment per finding; top-level is the round
@@ -151,13 +157,15 @@ of high-confidence issues is a later-phase step.
 
 | Stage | Actor | When | Gates? |
 |---|---|---|---|
-| Pre-PR review | **Codex** (in-container) | before the PR is opened | dev self-corrects |
-| Post-PR review | **GitHub Copilot** (requested by the control plane) | on PR open + after review-round pushes | findings drive **autonomous dev rounds** (in-thread triage, capped); advisory to the human gate |
+| Post-PR review | the **review providers** (REVIEWERS.md): `claude`/`codex` reviewer bursts posting as the reviewer App · `copilot` requested by the control plane | on PR open + after review-round pushes | findings drive **autonomous dev rounds** (in-thread triage, capped); advisory to the human gate |
 | E2E testing (phase 1+) | **Tester** (test burst) — QA, not review: invents scenarios from the spec, runs them in the sandbox | after CI green | advisory to human (test report on the PR) |
 | Final | **Human owner** | before merge | **yes** — branch protection |
 
 Branch protection on the default branch: require a PR, require human approval, require CI
-status checks to pass, and disallow the dev identity from merging.
+status checks to pass, and disallow the dev identity from merging. If approval is enforced
+as a required-review *count*, it must be "require review from Code Owners" (an owner-naming
+`CODEOWNERS`), never a bare count — the reviewer App approves clean PRs (REVIEWERS.md) and
+App approvals satisfy a bare count, which would quietly dissolve the human gate.
 
 ## Provenance gate (dev-agent rules)
 
@@ -214,7 +222,8 @@ runtime.
   (Copilot, a future tester App) can ever satisfy the human gate
 - Copilot enabled as an automatic PR reviewer — a **user-side Copilot-settings toggle**
   on personal accounts (rulesets can't set it outside org plans). Fallback: the control
-  plane requests a Copilot review per PR via the API after PR-open (M2).
+  plane requests a Copilot review per PR via the API after PR-open (M2) — which requires
+  the owner's PAT in `GITHUB_COPILOT_REVIEW_TOKEN` (bot tokens are silently ignored).
 - `.github/copilot-instructions.md` — the reviewer's contract-first checklist (FR
   coverage, scope boundaries/forbidden changes, containment, conventions)
 - The two GitHub Apps with the scopes above

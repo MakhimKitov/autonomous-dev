@@ -91,8 +91,8 @@ def test_open_pr_matched_by_branch_prefix():
     assert api.open_pr_with_branch_prefix("dev/99-") is None
 
 
-def test_reviews_and_re_request():
-    api, transport = _api(
+def test_reviews_parse():
+    api, _ = _api(
         {
             ("GET", "/repos/owner/product/pulls/2/reviews"): FakeResponse(
                 200,
@@ -106,8 +106,54 @@ def test_reviews_and_re_request():
     reviews = api.list_reviews(2)
     assert reviews[0].author == "MakhimKitov" and reviews[0].state == "CHANGES_REQUESTED"
     assert reviews[1].body == ""
-    api.request_reviewers(2, [COPILOT_REVIEWER, "MakhimKitov"])
-    assert transport.calls[-1]["json"] == {"reviewers": [COPILOT_REVIEWER, "MakhimKitov"]}
+
+
+def test_request_reviewers_without_user_token_drops_copilot():
+    api, transport = _api(
+        {
+            ("POST", "/repos/owner/product/pulls/2/requested_reviewers"): FakeResponse(
+                201, payload={"requested_reviewers": [{"login": "MakhimKitov"}]}
+            )
+        }
+    )
+    dropped = api.request_reviewers(2, [COPILOT_REVIEWER, "MakhimKitov"])
+    assert dropped == [COPILOT_REVIEWER]
+    # Copilot is never sent on the App token — GitHub would 201 and drop it anyway
+    posts = [c for c in transport.calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert posts[0]["json"] == {"reviewers": ["MakhimKitov"]}
+
+
+def test_request_reviewers_routes_copilot_through_user_token():
+    transport = FakeTransport(
+        {
+            ("POST", "/repos/owner/product/pulls/2/requested_reviewers"): FakeResponse(
+                201,
+                payload={"requested_reviewers": [{"login": "MakhimKitov"}, {"login": "Copilot"}]},
+            )
+        }
+    )
+    api = GitHubApi("owner/product", "ghs_app", request=transport, copilot_token="ghp_user")
+    dropped = api.request_reviewers(2, [COPILOT_REVIEWER, "MakhimKitov"])
+    assert dropped == []
+    posts = [c for c in transport.calls if c["method"] == "POST"]
+    assert [p["json"]["reviewers"] for p in posts] == [["MakhimKitov"], [COPILOT_REVIEWER]]
+    assert posts[0]["headers"]["Authorization"] == "Bearer ghs_app"
+    assert posts[1]["headers"]["Authorization"] == "Bearer ghp_user"
+
+
+def test_request_reviewers_detects_silent_drop():
+    # 201 whose echo is missing the reviewer = GitHub dropped it (the PR #6 lesson:
+    # a granted Copilot request echoes back as login "Copilot")
+    transport = FakeTransport(
+        {
+            ("POST", "/repos/owner/product/pulls/2/requested_reviewers"): FakeResponse(
+                201, payload={"requested_reviewers": [{"login": "MakhimKitov"}]}
+            )
+        }
+    )
+    api = GitHubApi("owner/product", "ghs_app", request=transport, copilot_token="ghp_user")
+    assert api.request_reviewers(2, [COPILOT_REVIEWER]) == [COPILOT_REVIEWER]
 
 
 def test_token_supplier_is_consulted_per_call():
@@ -118,3 +164,52 @@ def test_token_supplier_is_consulted_per_call():
     api.comment(2, "two")
     auths = [call["headers"]["Authorization"] for call in transport.calls]
     assert auths == ["Bearer ghs_first", "Bearer ghs_second"]
+
+
+def test_post_review_inline_findings():
+    transport = FakeTransport(
+        {("POST", "/repos/owner/product/pulls/2/reviews"): FakeResponse(200, payload={"id": 1})}
+    )
+    api = GitHubApi("owner/product", "ghs_reviewer", request=transport)
+    api.post_review(
+        2,
+        "Sound change.",
+        [
+            {"path": "bot/x.py", "line": 3, "body": "off-by-one"},
+            {"path": "specs/a.md", "line": None, "body": "file-level note"},
+        ],
+    )
+    (post,) = [c for c in transport.calls if c["method"] == "POST"]
+    assert post["json"]["event"] == "COMMENT"
+    # line-anchored finding rides inline; file-level folds into the body
+    assert post["json"]["comments"] == [
+        {"path": "bot/x.py", "line": 3, "side": "RIGHT", "body": "off-by-one"}
+    ]
+    assert "file-level note" in post["json"]["body"]
+
+
+def test_post_review_falls_back_to_body_only_on_422():
+    calls = {"n": 0}
+
+    class FlakyTransport(FakeTransport):
+        def __call__(self, method, url, **kwargs):
+            response = super().__call__(method, url, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return FakeResponse(422, text="line not in diff")
+            return FakeResponse(200, payload={"id": 2})
+
+    transport = FlakyTransport({})
+    api = GitHubApi("owner/product", "ghs_reviewer", request=transport)
+    api.post_review(
+        2,
+        "verdict",
+        [{"path": "bot/x.py", "line": 999, "body": "stale line"}],
+        event="REQUEST_CHANGES",
+    )
+    assert len(transport.calls) == 2
+    retry = transport.calls[1]["json"]
+    assert "comments" not in retry  # degraded but delivered
+    assert "bot/x.py:999" in retry["body"] and "stale line" in retry["body"]
+    # the review *state* must survive the degradation — it's the round trigger
+    assert retry["event"] == "REQUEST_CHANGES"

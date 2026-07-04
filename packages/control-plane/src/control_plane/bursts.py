@@ -73,22 +73,27 @@ def execute_burst(
     max_turns: int | None = None,
     fresh: bool = False,
     burst_id: str | None = None,
+    with_github: bool = False,
+    mount_codex: bool = False,
     runner: DockerRunner | None = None,
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
+
+    ``with_github`` mints the dev App token into the box (dev bursts push;
+    reviewer bursts get no GitHub credential at all — REVIEWERS.md).
+    ``mount_codex`` mounts the operator's codex auth (slice 3, reviewer only).
 
     May raise GitHubAuthError (before the container starts) — callers decide
     whether that aborts (CLI) or waits for the next tick (scheduler).
     """
     runner = runner or DockerRunner()
     model = resolve_model(model)
-    codex_auth = codex_auth_dir()
+    codex_auth = codex_auth_dir() if mount_codex else None
     if mode == "run":
         print(f"[model] {model}")
-        print(f"[codex] {'auth mounted' if codex_auth else 'no auth — pre-PR review unavailable'}")
 
     github_token = git_name = git_email = None
-    if mode == "run":
+    if mode == "run" and with_github:
         creds = AppCredentials.from_env()
         if creds is not None:
             minted = mint_installation_token(creds)
@@ -97,7 +102,11 @@ def execute_burst(
             print(f"[github] burst pushes as {git_name} (token expires {minted.expires_at})")
 
     burst_id = burst_id or uuid.uuid4().hex[:12]
-    volume = prepare_volume(stores.data_dir / "volumes", burst_id, task.task_id, stores.archive)
+    # fresh = amnesiac: no resume, and the volume isn't seeded with the task's
+    # session either — the reviewer must not even be able to read the dev's
+    volume = prepare_volume(
+        stores.data_dir / "volumes", burst_id, task.task_id, stores.archive, seed=not fresh
+    )
     resume = None if fresh else task.session_id
 
     burst = BurstRecord(burst_id=burst_id, task_id=task.task_id, kind=kind, role=role, model=model)
@@ -123,6 +132,7 @@ def execute_burst(
             git_user_name=git_name,
             git_user_email=git_email,
             codex_auth_dir=codex_auth,
+            repo_read_only=(role == "reviewer"),  # a wall, not an instruction
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"
         exit_code = runner.run(spec, log_path=log_path)
@@ -131,13 +141,18 @@ def execute_burst(
         burst.finished_at = utc_now()
         span.set_attribute("burst.exit_code", exit_code)
 
-        outcome = harvest_volume(volume, burst, stores.archive, stores.ledger)
+        outcome = harvest_volume(
+            volume, burst, stores.archive, stores.ledger, archive_session=(role == "dev")
+        )
         if burst.model:
             span.set_attribute("burst.model", burst.model)  # resolved beats requested
         stores.ledger.finish_burst(burst)
-        task.session_id = burst.session_id or task.session_id
-        task.transcript_key = outcome.transcript_key
-        task.transcript_checksum = outcome.transcript_checksum
+        if role == "dev":
+            # the task's session is the *dev's* memory — a reviewer burst's
+            # session must never become what the next dev round resumes
+            task.session_id = burst.session_id or task.session_id
+            task.transcript_key = outcome.transcript_key
+            task.transcript_checksum = outcome.transcript_checksum
         stores.ledger.upsert_task(task)
 
     print(

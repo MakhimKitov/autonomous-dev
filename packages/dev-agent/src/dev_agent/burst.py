@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolUseBlock,
     query,
 )
 
@@ -30,6 +31,7 @@ from dev_agent.env import BurstEnv
 from dev_agent.walls import make_pre_tool_use_hook
 
 TEXT_TAIL_CHARS = 4000
+FINAL_TEXT_CHARS = 16000  # the last assistant message whole — reviewer findings ride here
 
 # Image-baked procedures (codex-review, …). Root-owned in the image so the
 # agent can invoke but never edit them; absent in local dev runs.
@@ -54,6 +56,7 @@ class BurstResult:
     duration_s: float | None = None
     finished_at: str = ""
     text_tail: str = ""
+    final_text: str = ""  # the last assistant message — structured output lands here
 
 
 def _to_options(env: BurstEnv) -> ClaudeAgentOptions:
@@ -110,12 +113,20 @@ async def run_burst(env: BurstEnv) -> BurstResult:
         task_id=env.task_id, burst_id=env.burst_id, role=env.role, burst_kind=env.burst_kind
     )
     chunks: list[str] = []
+    final_parts: list[str] = []
     async for message in query(prompt=env.task_prompt, options=_to_options(env)):
         if isinstance(message, AssistantMessage):
+            final_parts = []
             for block in message.content:
                 if isinstance(block, TextBlock):
                     print(block.text, flush=True)
                     chunks.append(block.text)
+                    final_parts.append(block.text)
+                elif isinstance(block, ToolUseBlock):
+                    # a silent burst looks identical to a hung one from outside —
+                    # the log must show activity, not just narration
+                    detail = json.dumps(block.input)[:160] if block.input else ""
+                    print(f"[tool] {block.name} {detail}", flush=True)
         elif isinstance(message, SystemMessage) and message.subtype == "init":
             result.model = message.data.get("model") or result.model
         elif isinstance(message, ResultMessage):
@@ -129,6 +140,7 @@ async def run_burst(env: BurstEnv) -> BurstResult:
     result.duration_s = round(time.monotonic() - started, 3)
     result.finished_at = datetime.now(UTC).isoformat()
     result.text_tail = "".join(chunks)[-TEXT_TAIL_CHARS:]
+    result.final_text = "".join(final_parts)[-FINAL_TEXT_CHARS:]
     write_result(env, result)
     return result
 

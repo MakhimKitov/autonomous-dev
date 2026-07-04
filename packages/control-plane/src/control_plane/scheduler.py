@@ -17,16 +17,18 @@ from typing import Callable
 
 from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError
-from control_plane.github_api import COPILOT_REVIEWER, GitHubApi, GitHubApiError, Review
+from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Review
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import BurstStatus, TaskRecord, TaskStatus, utc_now
-from control_plane.prompts import review_prompt, work_prompt
+from control_plane.prompts import assess_prompt, review_prompt, work_prompt
+from control_plane.review import FindingsError, ReviewPolicy, format_review_body, parse_findings
 from control_plane.runner import DEFAULT_IMAGE
 
 STOP_FILENAME = "STOP"
 
 WORK = "work"
 REVIEW = "review"
+ASSESS = "assess"  # a reviewer-role burst judging the open PR (REVIEWERS.md)
 
 
 @dataclass(slots=True)
@@ -69,18 +71,29 @@ class Scheduler:
         repo: Path,
         owner: str,
         rails: Rails | None = None,
+        review: ReviewPolicy | None = None,
+        reviewer_api: GitHubApi | None = None,
+        reviewer_login: str | None = None,
         image: str = DEFAULT_IMAGE,
         model: str | None = None,
         sync_clone: Callable[[], Path] | None = None,
+        sync_clone_ref: Callable[[str], Path] | None = None,
     ) -> None:
         self.stores = stores
         self.api = api
         self.repo = repo  # the platform-owned clone (issue #4), never the operator's
         self.owner = owner  # the human whose changes-requested reviews trigger rounds
         self.rails = rails or Rails()
+        self.review = review or ReviewPolicy()  # ships off (REVIEWERS.md)
+        self.reviewer_api = reviewer_api  # posts the claude provider's findings (second App)
+        self.reviewer_login = reviewer_login  # that App's bot login, learned at startup
+        self.machine_reviewers = set(self.review.machine_reviewers())
+        if self.review.claude and reviewer_login:
+            self.machine_reviewers.add(reviewer_login)
         self.image = image
         self.model = model
         self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
+        self.sync_clone_ref = sync_clone_ref  # same, to a PR head sha (assess bursts)
         self.current_burst_id: str | None = None  # for the kill switch mid-burst
 
     # --- stop flag ---
@@ -205,20 +218,20 @@ class Scheduler:
                     )
                     self.api.remove_label(number, "in-progress")
                 else:
-                    # Copilot rounds cap softly: stop chasing, the human gate decides
+                    # machine-review rounds cap softly: stop chasing, the human gate decides
                     task.last_review_id = max(review.id for review in pending)
                     self.stores.ledger.upsert_task(task)
                     self.api.comment(
                         number,
                         f"ℹ️ control plane: review-round cap ({task.review_rounds}) reached — "
-                        "remaining Copilot findings are left for the owner's review.",
+                        "remaining reviewer findings are left for the owner's review.",
                     )
                 continue
             task.review_rounds += 1
             task.status = TaskStatus.CLAIMED
             task.next_burst_kind = REVIEW
             self.stores.ledger.upsert_task(task)
-            trigger = "changes requested" if owner_triggered else "Copilot findings"
+            trigger = "changes requested" if owner_triggered else "reviewer findings"
             print(f"[scheduler] {trigger} on PR #{task.pr_number} — review round {task.review_rounds}")
 
     def _actionable_reviews(self, task: TaskRecord) -> tuple[list[Review], bool]:
@@ -226,10 +239,13 @@ class Scheduler:
 
         The cursor (last_review_id) advances only after a review burst
         succeeds, so failed rounds re-surface the same reviews. Two triggers:
-        the owner's CHANGES_REQUESTED, and Copilot reviews carrying inline
-        findings — Copilot never requests changes (COMMENTED by design), so
-        the autonomous loop keys on its findings instead. Overview-only
-        Copilot reviews trigger nothing.
+        the owner's CHANGES_REQUESTED, and a registered machine reviewer's
+        CHANGES_REQUESTED *or* review carrying inline findings — the reviewer
+        App requests changes exactly when it has findings, but its body-only
+        422 fallback loses the inline comments (state survives), and Copilot
+        never requests changes (COMMENTED by design), so neither signal alone
+        covers both. Approvals and overview-only reviews trigger nothing, and
+        reviewers outside the policy's registry are ignored entirely.
         """
         reviews = self.api.list_reviews(task.pr_number)
         last = task.last_review_id or 0
@@ -239,13 +255,17 @@ class Scheduler:
             for review in unseen
             if review.author == self.owner and review.state == "CHANGES_REQUESTED"
         ]
-        copilot = [review for review in unseen if review.author == COPILOT_REVIEWER]
-        if copilot:
+        machine = [review for review in unseen if review.author in self.machine_reviewers]
+        if machine:
             with_findings = {
                 comment.review_id for comment in self.api.list_review_comments(task.pr_number)
             }
-            copilot = [review for review in copilot if review.id in with_findings]
-        return owner + copilot, bool(owner)
+            machine = [
+                review
+                for review in machine
+                if review.state == "CHANGES_REQUESTED" or review.id in with_findings
+            ]
+        return owner + machine, bool(owner)
 
     # --- spawning ---
 
@@ -271,6 +291,9 @@ class Scheduler:
     def run_task_burst(self, task: TaskRecord) -> None:
         number = int(task.task_id)
         kind = task.next_burst_kind or WORK
+        if kind == ASSESS:
+            self._run_assess_burst(task)
+            return
         repo = self.repo
         if self.sync_clone is not None:
             try:
@@ -304,6 +327,7 @@ class Scheduler:
                 repo,
                 prompt,
                 kind=kind,
+                with_github=True,  # dev bursts push branches and open PRs
                 image=self.image,
                 model=self.model,
                 max_budget_usd=self.rails.burst_budget_usd,
@@ -321,6 +345,7 @@ class Scheduler:
             self._register_failure(task, f"burst {outcome.burst.burst_id} failed (see its log)")
             return
 
+        queue_assess = False
         if kind == WORK:
             pr = self.api.open_pr_with_branch_prefix(f"dev/{number}-")
             if pr is None:
@@ -329,29 +354,138 @@ class Scheduler:
                 return
             task.pr_number = pr.number
             print(f"[scheduler] task #{task.task_id}: PR #{pr.number} open")
-            # Copilot auto-review is not reliable on open; the owner sees the PR exists
-            self._request_re_review(task, [COPILOT_REVIEWER, self.owner])
+            # fire every active provider (REVIEWERS.md); the owner sees the PR exists
+            self._request_re_review(task, [*self._active_request_providers(), self.owner])
+            queue_assess = self.review.claude
         else:
             task.last_review_id = max(review.id for review in pending)
             pushed = self.api.get_pr(task.pr_number).head_sha != head_before
             if owner_triggered:
-                self._request_re_review(task, [COPILOT_REVIEWER, self.owner])
+                self._request_re_review(task, [*self._active_request_providers(), self.owner])
             elif pushed:
-                # autonomous Copilot round: fresh diff → Copilot re-reviews; no owner ping
-                self._request_re_review(task, [COPILOT_REVIEWER])
-            # reply-only round: threads answered, same diff — re-requesting would loop
+                # autonomous reviewer round: fresh diff → re-review; no owner ping
+                self._request_re_review(task, self._active_request_providers())
+            # reply-only round: threads answered, same diff — re-reviewing would loop
+            queue_assess = self.review.claude and pushed
+        if queue_assess:
+            task.status = TaskStatus.CLAIMED
+            task.next_burst_kind = ASSESS
+            print(f"[scheduler] machine review queued for PR #{task.pr_number} (assess burst)")
+        else:
+            task.status = TaskStatus.AWAITING_REVIEW
+            task.next_burst_kind = None
+        self.stores.ledger.upsert_task(task)
+
+    def _run_assess_burst(self, task: TaskRecord) -> None:
+        """A reviewer-role burst judging the open PR (REVIEWERS.md): fresh
+        session, no GitHub credential; findings return via the harvest and the
+        control plane posts them as the reviewer App."""
+        pr = self.api.get_pr(task.pr_number)
+        if pr.merged or pr.state != "open":
+            task.status = TaskStatus.AWAITING_REVIEW  # resolved while queued — nothing to judge
+            task.next_burst_kind = None
+            self.stores.ledger.upsert_task(task)
+            return
+        repo = self.repo
+        if self.sync_clone_ref is not None:
+            try:
+                repo = self.sync_clone_ref(pr.head_sha)
+            except CloneError as exc:
+                self._register_failure(task, f"platform clone sync failed: {exc}")
+                return
+
+        task.status = TaskStatus.WORKING
+        task.last_burst_at = utc_now()
+        self.stores.ledger.upsert_task(task)
+
+        self.current_burst_id = uuid.uuid4().hex[:12]
+        try:
+            outcome = execute_burst(
+                self.stores,
+                task,
+                repo,
+                assess_prompt(task.pr_number, pr.head_sha),
+                kind=ASSESS,
+                role="reviewer",
+                fresh=True,  # deliberately amnesiac — no shared context with the dev
+                image=self.image,
+                model=self.review.reviewer_model or self.model,
+                max_budget_usd=self.rails.burst_budget_usd,
+                max_turns=self.rails.burst_max_turns,
+                burst_id=self.current_burst_id,
+            )
+        except (GitHubAuthError, GitHubApiError) as exc:
+            print(f"[scheduler] burst spawn failed: {exc}")
+            self._register_failure(task, f"burst could not start: {exc}")
+            return
+        finally:
+            self.current_burst_id = None
+
+        if not outcome.succeeded:
+            self._register_failure(task, f"assess burst {outcome.burst.burst_id} failed (see its log)")
+            return
+        try:
+            parsed = parse_findings((outcome.harvest.result or {}).get("final_text") or "")
+        except FindingsError as exc:
+            self._register_failure(task, f"reviewer output unusable: {exc}")
+            return
+        model = (outcome.harvest.result or {}).get("model")  # resolved, not requested
+        self._post_assessment(task, parsed, head_sha=pr.head_sha, model=model)
         task.status = TaskStatus.AWAITING_REVIEW
         task.next_burst_kind = None
+        task.attempts = 0  # the assess retry rail must not poison later dev rounds
         self.stores.ledger.upsert_task(task)
+
+    def _post_assessment(
+        self, task: TaskRecord, parsed, head_sha: str = "", model: str | None = None
+    ) -> None:
+        """Posting is advisory — a failure degrades to 'no machine review this
+        round' (logged), never a blocked task."""
+        if self.reviewer_api is None:
+            print("[scheduler] no reviewer App configured — assessment not posted")
+            return
+        # The verdict is the review state: findings block, a clean pass approves.
+        # A later review by the same App supersedes, so the red chip clears when
+        # a re-assess comes back clean. The human merge gate is untouched — an
+        # App approval only *satisfies* branch protection if the repo requires
+        # approving reviews, which this experiment deliberately does not.
+        event = "REQUEST_CHANGES" if parsed.findings else "APPROVE"
+        body = format_review_body(parsed.verdict, head_sha, model)
+        try:
+            self.reviewer_api.post_review(task.pr_number, body, parsed.findings, event=event)
+            print(
+                f"[scheduler] review posted on PR #{task.pr_number}: "
+                f"{event} · {len(parsed.findings)} finding(s)"
+            )
+        except GitHubApiError as exc:
+            print(f"[scheduler] posting the review failed (advisory, continuing): {exc}")
+
+    def _active_request_providers(self) -> list[str]:
+        """Request-driver providers to fire on PR events (REVIEWERS.md) — today
+        just Copilot; spawn providers queue reviewer bursts instead (slice 2)."""
+        return [COPILOT_REVIEWER] if self.review.copilot else []
 
     def _request_re_review(self, task: TaskRecord, reviewers: list[str]) -> None:
         """Deterministic review request: on PR open (auto-review observed not
         firing) and after review-round pushes (the M1 gap). Never fatal."""
+        if not reviewers:
+            return
         try:
-            self.api.request_reviewers(task.pr_number, reviewers)
-            print(f"[scheduler] review requested on PR #{task.pr_number}: {', '.join(reviewers)}")
+            dropped = self.api.request_reviewers(task.pr_number, reviewers)
         except GitHubApiError as exc:
             print(f"[scheduler] re-request failed (advisory, continuing): {exc}")
+            return
+        requested = [r for r in reviewers if r not in dropped]
+        if requested:
+            print(f"[scheduler] review requested on PR #{task.pr_number}: {', '.join(requested)}")
+        if COPILOT_REVIEWER in dropped:
+            print(
+                f"[scheduler] PR #{task.pr_number}: Copilot request dropped — GitHub only grants it "
+                f"to a user with a Copilot seat; set {COPILOT_TOKEN_ENV} in .env"
+            )
+            dropped = [r for r in dropped if r != COPILOT_REVIEWER]
+        if dropped:
+            print(f"[scheduler] PR #{task.pr_number}: review request silently dropped for: {', '.join(dropped)}")
 
     # --- failure rail ---
 
@@ -359,16 +493,29 @@ class Scheduler:
         task.attempts += 1
         task.last_burst_at = utc_now()
         if task.attempts >= self.rails.max_attempts:
-            task.status = TaskStatus.BLOCKED
-            task.next_burst_kind = None
             number = int(task.task_id)
-            self.api.comment(
-                number,
-                f"⛔ control plane: parking this task after {task.attempts} failed attempts — {reason}. "
-                "A human can re-add `ready` to retry.",
-            )
-            self.api.remove_label(number, "in-progress")
-            print(f"[scheduler] task #{task.task_id} blocked after {task.attempts} attempts: {reason}")
+            if task.next_burst_kind == ASSESS:
+                # reviews are additive (REVIEWERS.md): give up on the machine
+                # review, never on the task — it proceeds to the human gate
+                task.status = TaskStatus.AWAITING_REVIEW
+                task.next_burst_kind = None
+                task.attempts = 0
+                self.api.comment(
+                    number,
+                    f"ℹ️ control plane: machine review could not run ({reason}) — "
+                    "left for the owner's review.",
+                )
+                print(f"[scheduler] task #{task.task_id}: machine review given up: {reason}")
+            else:
+                task.status = TaskStatus.BLOCKED
+                task.next_burst_kind = None
+                self.api.comment(
+                    number,
+                    f"⛔ control plane: parking this task after {task.attempts} failed attempts — {reason}. "
+                    "A human can re-add `ready` to retry.",
+                )
+                self.api.remove_label(number, "in-progress")
+                print(f"[scheduler] task #{task.task_id} blocked after {task.attempts} attempts: {reason}")
         else:
             task.status = TaskStatus.CLAIMED  # next_burst_kind unchanged — retry the same kind
             print(f"[scheduler] task #{task.task_id} attempt {task.attempts} failed: {reason} — will retry")

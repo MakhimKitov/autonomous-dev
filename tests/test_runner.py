@@ -145,3 +145,12 @@ def test_optional_env_only_when_set(monkeypatch):
 
     resumed = " ".join(DockerRunner().build_command(_spec(resume_session_id="sess-9")))
     assert f"{agentenv.RESUME_SESSION_ID}=sess-9" in resumed
+
+
+def test_reviewer_repo_mount_is_read_only():
+    cmd = DockerRunner().build_command(_spec(role="reviewer", repo_read_only=True))
+    assert any(v.endswith("/workspace/repo:ro") for v in cmd)
+    # and the dev burst's stays writable
+    cmd = DockerRunner().build_command(_spec())
+    assert any(v.endswith("/workspace/repo") for v in cmd)
+    assert not any(v.endswith(":ro") for v in cmd)

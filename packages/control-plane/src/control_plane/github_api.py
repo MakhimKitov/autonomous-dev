@@ -19,6 +19,11 @@ import requests
 from control_plane.github_auth import GITHUB_API
 
 COPILOT_REVIEWER = "copilot-pull-request-reviewer[bot]"
+# GitHub records a granted Copilot request under this login, not the [bot] one
+COPILOT_REQUESTED_LOGIN = "Copilot"
+# Copilot reviews can only be *requested* by a user with a Copilot seat — never
+# by an App/bot token (GitHub answers 201 and silently drops the reviewer).
+COPILOT_TOKEN_ENV = "GITHUB_COPILOT_REVIEW_TOKEN"
 
 HttpRequest = Callable[..., Any]
 
@@ -98,10 +103,12 @@ class GitHubApi:
         repo: str,
         token: str | Callable[[], str],
         request: HttpRequest = requests.request,
+        copilot_token: str | None = None,
     ) -> None:
         self.repo = repo  # "owner/name"
         self._token = token if callable(token) else (lambda: token)
         self._request = request
+        self._copilot_token = copilot_token or None
 
     def _call(
         self,
@@ -112,12 +119,13 @@ class GitHubApi:
         params: dict | None = None,
         json: Any = None,
         ok: tuple[int, ...] = (),
+        token: str | None = None,
     ) -> Any:
         response = self._request(
             method,
             f"{GITHUB_API}/repos/{self.repo}{path}",
             headers={
-                "Authorization": f"Bearer {self._token()}",
+                "Authorization": f"Bearer {token or self._token()}",
                 "Accept": "application/vnd.github+json",
             },
             params=params,
@@ -199,13 +207,74 @@ class GitHubApi:
             for item in data
         ]
 
-    def request_reviewers(self, pr_number: int, reviewers: list[str]) -> None:
-        self._call(
+    def request_reviewers(self, pr_number: int, reviewers: list[str]) -> list[str]:
+        """Request reviews; returns the reviewers GitHub **silently dropped**.
+
+        A 201 does not mean everyone was added. Copilot in particular is only
+        granted to a *user* token whose owner holds a Copilot seat, and only
+        under the ``copilot-pull-request-reviewer[bot]`` name (a granted
+        request is then recorded as login ``Copilot``); any reviewer the token
+        can't request is dropped without an error. So Copilot goes through the
+        dedicated user token when configured, and the response's
+        ``requested_reviewers`` echo is checked instead of trusted.
+        """
+        dropped: list[str] = []
+        humans = [r for r in reviewers if r != COPILOT_REVIEWER]
+        if humans:
+            dropped += self._post_reviewers(pr_number, humans)
+        if COPILOT_REVIEWER in reviewers:
+            if self._copilot_token is None:
+                dropped.append(COPILOT_REVIEWER)
+            else:
+                dropped += self._post_reviewers(pr_number, [COPILOT_REVIEWER], token=self._copilot_token)
+        return dropped
+
+    def _post_reviewers(self, pr_number: int, reviewers: list[str], token: str | None = None) -> list[str]:
+        data = self._call(
             "POST",
             f"/pulls/{pr_number}/requested_reviewers",
             f"re-requesting review on PR #{pr_number}",
             json={"reviewers": reviewers},
+            token=token,
         )
+        echoed = {(user or {}).get("login", "") for user in (data or {}).get("requested_reviewers", [])}
+        expected = {r: COPILOT_REQUESTED_LOGIN if r == COPILOT_REVIEWER else r for r in reviewers}
+        return [r for r, login in expected.items() if login not in echoed]
+
+    def post_review(self, pr_number: int, body: str, findings: list[dict], event: str = "COMMENT") -> None:
+        """Post a review with inline findings (the reviewer App's delivery
+        path, REVIEWERS.md). ``event`` is APPROVE / REQUEST_CHANGES / COMMENT —
+        legal here because the reviewer App is never the PR author. GitHub
+        422s the whole review when any finding's line isn't in the diff —
+        fall back to a body-only review carrying the findings as text:
+        degraded, but delivered (same event, so the review state survives)."""
+        inline = [f for f in findings if f.get("line")]
+        flat_only = [f for f in findings if not f.get("line")]
+        if flat_only:  # file-level findings can't ride the inline array — body text
+            body += "\n\n" + "\n\n".join(f"**{f['path']}** — {f['body']}" for f in flat_only)
+        payload: dict[str, Any] = {"event": event, "body": body}
+        if inline:
+            payload["comments"] = [
+                {"path": f["path"], "line": f["line"], "side": "RIGHT", "body": f["body"]}
+                for f in inline
+            ]
+        try:
+            self._call(
+                "POST",
+                f"/pulls/{pr_number}/reviews",
+                f"posting review on PR #{pr_number}",
+                json=payload,
+            )
+        except GitHubApiError:
+            if not inline:
+                raise
+            flat = "\n\n".join(f"**{f['path']}:{f.get('line', '?')}** — {f['body']}" for f in inline)
+            self._call(
+                "POST",
+                f"/pulls/{pr_number}/reviews",
+                f"posting review on PR #{pr_number} (body-only fallback)",
+                json={"event": event, "body": f"{body}\n\n{flat}"},
+            )
 
     def repo_owner(self) -> str:
         return self._call("GET", "", "reading the repo")["owner"]["login"]

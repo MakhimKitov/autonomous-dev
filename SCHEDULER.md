@@ -30,7 +30,7 @@ Ledger-authoritative (`tasks.status`); labels stay reflective (`GITHUB-INTERFACE
 
 | State | Meaning |
 |---|---|
-| `claimed` | ours; a burst is queued (`next_burst_kind`: `work` or `review`) |
+| `claimed` | ours; a burst is queued (`next_burst_kind`: `work`, `review`, or `assess` — a reviewer-role burst judging the open PR, REVIEWERS.md) |
 | `working` | the burst container is running |
 | `awaiting_review` | PR open; the ball is with Copilot / the owner |
 | `blocked` | needs a human — rail tripped, agent rule 9, or PR closed unmerged |
@@ -56,9 +56,9 @@ issue `human`+`ready` ──claim──► claimed ──spawn──► working 
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
 | `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back | pre-burst state |
-| `awaiting_review` | unseen owner `changes_requested` **or Copilot findings**, rounds < max | rounds+1; queue review prompt | `claimed` (review) |
+| `awaiting_review` | unseen owner `changes_requested` **or machine findings**, rounds < max | rounds+1; queue review prompt | `claimed` (review) |
 | `awaiting_review` | unseen owner `changes_requested`, rounds = max | comment; clear `in-progress` | `blocked` |
-| `awaiting_review` | unseen Copilot findings, rounds = max | soft cap: advance cursor; comment | `awaiting_review` |
+| `awaiting_review` | unseen machine findings, rounds = max | soft cap: advance cursor; comment | `awaiting_review` |
 | `awaiting_review` | PR merged | clear `in-progress` | `done` |
 | `awaiting_review` | PR closed unmerged | comment; clear `in-progress` | `blocked` |
 | any active | issue carries `blocked` (agent rule 9) | stop scheduling the task | `blocked` |
@@ -69,16 +69,29 @@ Notes:
   less retries (with resume — the session remembers how far it got) until the rail trips.
 - A **review round** triggers on reviews above the `last_review_id` cursor (GitHub
   review ids are immutable and monotonic): the owner's `changes_requested`, or a
-  **Copilot review carrying inline findings** — Copilot never requests changes
-  (`COMMENTED` by design), so the autonomous loop keys on its findings. Overview-only
-  Copilot reviews trigger nothing; the cursor advances only after the round's burst
-  succeeds, so failed rounds re-surface the same reviews.
-- **Re-requests by trigger:** owner round → Copilot + owner; Copilot round that pushed →
-  Copilot only (no human ping); reply-only round → nobody (same diff would get the same
-  review — a loop).
-- **Caps by trigger:** the shared rounds rail *blocks* the task on owner rounds; Copilot
+  registered machine reviewer's **`changes_requested` or inline findings** — the
+  reviewer App requests changes exactly when it has findings (a clean pass approves,
+  REVIEWERS.md) but its 422 body-only fallback keeps only the state, while Copilot
+  never requests changes (`COMMENTED` by design) and only ever signals via findings.
+  Approvals and overview-only reviews trigger nothing; the cursor advances only after
+  the round's burst succeeds, so failed rounds re-surface the same reviews.
+- **Re-requests by trigger:** owner round → active providers + owner; reviewer round that
+  pushed → active providers only (no human ping); reply-only round → nobody (same diff
+  would get the same review — a loop). Which machine reviewers exist at all is the
+  **review policy** (`REVIEWERS.md`): a toggle + provider selector, declared in `.env`,
+  verified at startup. **Copilot requests ride the owner's user PAT**
+  (`GITHUB_COPILOT_REVIEW_TOKEN`): GitHub grants a Copilot review request only to a user
+  with a Copilot seat and silently drops it from an App/bot token with a 201 (falsified
+  on PR #6). `request_reviewers` checks the response echo and the scheduler logs any
+  reviewer that was dropped.
+- **Caps by trigger:** the shared rounds rail *blocks* the task on owner rounds; machine
   rounds cap **softly** — cursor advances, a comment flags the leftovers, and the task
-  stays at the human merge gate. The Copilot cycle involves no human at all.
+  stays at the human merge gate. The machine cycle involves no human at all.
+- **Spawn providers** (REVIEWERS.md): when the `claude` provider is active, PR open and
+  every pushed round queue an `assess` burst — reviewer role, fresh session, no GitHub
+  credential; the control plane posts its findings as the reviewer App, which then
+  trigger a dev round like any other. Assess failures degrade ("no machine review this
+  round", commented) — they never block the task.
 - Ledger `blocked` is the platform's own stop; the `blocked` *label* stays the agent's
   (rule 9). The control plane's visible act is an issue comment explaining why.
 
@@ -137,9 +150,10 @@ Defaults, `.env`-overridable:
 
 Additive `github_api.py` beside `github_auth.py` (stdlib HTTP, same style): list issues by
 label · edit labels · comment · find PR by head branch (`dev/<n>-`) · PR state (merged,
-head sha) · list reviews · request reviewers (Copilot + owner — the M1 gap, verified 201).
-The installation token is minted lazily and cached to just-under its 1 h expiry; each
-burst still gets its own fresh token.
+head sha) · list reviews · request reviewers (owner on the App token; Copilot on the
+owner's `GITHUB_COPILOT_REVIEW_TOKEN` PAT, echo-verified — a bot-token Copilot request
+gets a 201 and is silently dropped). The installation token is minted lazily and cached
+to just-under its 1 h expiry; each burst still gets its own fresh token.
 
 ## Ledger additions
 
@@ -154,9 +168,12 @@ operator's working copy — a burst mutates its checkout (branch, `--local` git 
 bytecode churn), and that state must stay platform state (issue #4; learned the hard
 way when a burst left the operator's clone on the PR branch with the bot's identity).
 The scheduler re-syncs it to origin's default branch before every burst: fetch →
-reset → clean (ignored files survive, so the product `.venv` stays warm). Always
-HTTPS; for private repos the token travels as a per-invocation header, never written
-into config that gets mounted into the box.
+reset → clean (ignored files survive, so the product `.venv` stays warm). Assess
+bursts sync it to the **PR head instead (detached)** and mount it **read-only**
+(REVIEWERS.md). The lifecycle invariant: one clone, serial bursts, **sync before
+every mount** — whatever a burst leaves behind is erased before the next one looks.
+Always HTTPS; for private repos the token travels as a per-invocation header, never
+written into config that gets mounted into the box.
 
 ## Module layout
 

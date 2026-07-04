@@ -40,11 +40,16 @@ def _git(args: list[str], cwd: Path | None = None, capture: bool = False) -> str
 
 
 def prepare_clone(
-    clones_root: Path, slug: str, token: str | None = None, url: str | None = None
+    clones_root: Path,
+    slug: str,
+    token: str | None = None,
+    url: str | None = None,
+    ref: str | None = None,
 ) -> Path:
     """Ensure the platform's clone of ``slug`` exists and exactly matches
-    origin's default branch; returns its path. ``url`` overrides the origin
-    (tests use file:// origins)."""
+    origin's default branch — or ``ref`` (a sha: reviewer bursts check out the
+    PR head, detached). Returns its path. ``url`` overrides the origin (tests
+    use file:// origins)."""
     clone = clones_root / slug.replace("/", "__")
     origin = url or f"https://github.com/{slug}.git"
     auth = _auth_config(token) if url is None else []
@@ -53,9 +58,12 @@ def prepare_clone(
         _git([*auth, "clone", "--quiet", origin, str(clone)])
     _git([*auth, "fetch", "--quiet", "--prune", "origin"], cwd=clone)
     _git([*auth, "remote", "set-head", "origin", "--auto"], cwd=clone)
-    default_ref = _git(["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=clone, capture=True)
-    branch = default_ref.split("/", 1)[1]
     _git(["reset", "--hard", "--quiet"], cwd=clone)  # clean tree so checkout can't conflict
-    _git(["checkout", "--quiet", "-B", branch, default_ref], cwd=clone)
+    if ref:
+        _git(["checkout", "--quiet", "--detach", ref], cwd=clone)
+    else:
+        default_ref = _git(["rev-parse", "--abbrev-ref", "origin/HEAD"], cwd=clone, capture=True)
+        branch = default_ref.split("/", 1)[1]
+        _git(["checkout", "--quiet", "-B", branch, default_ref], cwd=clone)
     _git(["clean", "-fdq"], cwd=clone)  # ignored files survive (warm .venv)
     return clone

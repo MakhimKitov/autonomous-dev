@@ -28,20 +28,33 @@ class HarvestOutcome:
     transcript_checksum: str | None
 
 
-def prepare_volume(volumes_root: Path, burst_id: str, task_id: str, archive: SessionArchive) -> Path:
-    """A fresh volume for this burst, seeded with the task's session if one exists."""
+def prepare_volume(
+    volumes_root: Path, burst_id: str, task_id: str, archive: SessionArchive, seed: bool = True
+) -> Path:
+    """A fresh volume for this burst, seeded with the task's session if one
+    exists. ``seed=False`` for deliberately-amnesiac bursts (the reviewer):
+    the dev's transcripts must not even be readable from inside."""
     volume = volumes_root / burst_id
     if volume.exists():
         shutil.rmtree(volume)
     volume.mkdir(parents=True)
-    archive.get(task_id, volume)
+    if seed:
+        archive.get(task_id, volume)
     return volume
 
 
 def harvest_volume(
-    volume: Path, burst: BurstRecord, archive: SessionArchive, ledger: Ledger
+    volume: Path,
+    burst: BurstRecord,
+    archive: SessionArchive,
+    ledger: Ledger,
+    archive_session: bool = True,
 ) -> HarvestOutcome:
-    """Fold a finished burst's volume back into the platform stores."""
+    """Fold a finished burst's volume back into the platform stores.
+
+    ``archive_session=False`` for reviewer bursts: the archive is task-keyed
+    and holds the *dev's* resumable session — archiving the reviewer's would
+    overwrite it. The reviewer's transcript still exists in the volume dir."""
     result: dict | None = None
     result_path = volume / BURST_RESULT_FILENAME
     if result_path.is_file():
@@ -73,7 +86,9 @@ def harvest_volume(
             )
             count += 1
 
-    key, checksum = archive.put(burst.task_id, volume)
+    key = checksum = None
+    if archive_session:
+        key, checksum = archive.put(burst.task_id, volume)
     return HarvestOutcome(
         result=result, violation_count=count, transcript_key=key, transcript_checksum=checksum
     )

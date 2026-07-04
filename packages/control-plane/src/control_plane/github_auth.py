@@ -41,22 +41,28 @@ class AppCredentials:
     installation_id: str | None = None
 
     @classmethod
-    def from_env(cls, environ: dict[str, str] | None = None) -> AppCredentials | None:
-        """None when the App is not configured (burst runs without GitHub)."""
+    def from_env(
+        cls, environ: dict[str, str] | None = None, prefix: str = ""
+    ) -> AppCredentials | None:
+        """None when the App is not configured (burst runs without GitHub).
+
+        ``prefix`` selects a second App identity from the same env — the
+        reviewer App reads ``REVIEWER_GITHUB_APP_ID`` etc. (REVIEWERS.md).
+        """
         env = dict(os.environ) if environ is None else environ
-        app_id = env.get(APP_ID, "").strip()
-        key_path = env.get(PRIVATE_KEY_PATH, "").strip()
+        app_id = env.get(prefix + APP_ID, "").strip()
+        key_path = env.get(prefix + PRIVATE_KEY_PATH, "").strip()
         if not app_id and not key_path:
             return None
         if not app_id or not key_path:
-            raise GitHubAuthError(f"set both {APP_ID} and {PRIVATE_KEY_PATH} (or neither)")
+            raise GitHubAuthError(f"set both {prefix + APP_ID} and {prefix + PRIVATE_KEY_PATH} (or neither)")
         path = Path(key_path).expanduser()
         if not path.is_file():
-            raise GitHubAuthError(f"{PRIVATE_KEY_PATH} does not exist: {path}")
+            raise GitHubAuthError(f"{prefix + PRIVATE_KEY_PATH} does not exist: {path}")
         return cls(
             app_id=app_id,
             private_key=path.read_text(encoding="utf-8"),
-            installation_id=env.get(INSTALLATION_ID, "").strip() or None,
+            installation_id=env.get(prefix + INSTALLATION_ID, "").strip() or None,
         )
 
 

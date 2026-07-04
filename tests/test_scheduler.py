@@ -12,10 +12,12 @@ from control_plane.bursts import BurstOutcome, PlatformStores
 from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, Issue, PullRequest, Review, ReviewComment
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, TaskStatus, utc_now
+from control_plane.review import ReviewPolicy
 from control_plane.scheduler import Rails, Scheduler
 from control_plane.volume import HarvestOutcome
 
 OWNER = "owner1"
+COPILOT_ON = ReviewPolicy(enabled=True, providers=("copilot",))
 
 
 class FakeApi:
@@ -59,6 +61,7 @@ class FakeApi:
 
     def request_reviewers(self, pr_number, reviewers):
         self.rerequests.append((pr_number, tuple(reviewers)))
+        return []  # nothing silently dropped
 
 
 def _outcome(exit_code=0, is_error=False):
@@ -77,7 +80,7 @@ def rig(tmp_path, monkeypatch):
     stores = PlatformStores.open(tmp_path / "data")
     api = FakeApi()
     rails = Rails(max_attempts=2, max_review_rounds=2, failure_cooldown_s=0)
-    scheduler = Scheduler(stores, api, tmp_path / "repo", OWNER, rails=rails)
+    scheduler = Scheduler(stores, api, tmp_path / "repo", OWNER, rails=rails, review=COPILOT_ON)
     monkeypatch.setattr(Scheduler, "_container_alive", lambda self, burst_id: False)
     spawned = []
 
@@ -440,3 +443,215 @@ def test_rails_from_env_overrides():
     assert rails.max_attempts == 5
     assert rails.burst_budget_usd == 0.5
     assert rails.max_review_rounds == 3  # untouched default
+
+
+def test_review_off_requests_owner_only_on_pr_open(rig):
+    scheduler, api, stores, _, _ = rig
+    scheduler.review = ReviewPolicy()  # ships off
+    scheduler.machine_reviewers = scheduler.review.machine_reviewers()
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    api.open_prs = [_pr()]
+    scheduler.tick()
+    assert api.rerequests == [(2, (OWNER,))]  # no machine reviewer to fire
+
+
+def test_review_off_ignores_copilot_findings(rig):
+    # a Copilot review outside the policy's registry (e.g. requested by hand)
+    # must not trigger autonomous rounds
+    scheduler, api, stores, _, _ = rig
+    scheduler.review = ReviewPolicy()
+    scheduler.machine_reviewers = scheduler.review.machine_reviewers()
+    _awaiting(stores)
+    api.prs[2] = _pr()
+    api.reviews[2] = [_copilot_review(review_id=30)]
+    api.review_comments[2] = [_finding(review_id=30)]
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.review_rounds == 0
+
+
+# --- the claude provider: assess bursts (REVIEWERS.md slice 2) ---
+
+REVIEWER_LOGIN = "discord-ai-reviewer[bot]"
+CLAUDE_ON = ReviewPolicy(enabled=True, providers=("claude", "copilot"))
+
+
+class FakeReviewerApi:
+    def __init__(self):
+        self.posted = []
+
+    def post_review(self, pr_number, body, findings, event="COMMENT"):
+        self.posted.append((pr_number, body, findings, event))
+
+
+def _claude_rig(rig):
+    scheduler, api, stores, spawned, fake_execute = rig
+    scheduler.review = CLAUDE_ON
+    scheduler.reviewer_api = FakeReviewerApi()
+    scheduler.reviewer_login = REVIEWER_LOGIN
+    scheduler.machine_reviewers = set(CLAUDE_ON.machine_reviewers()) | {REVIEWER_LOGIN}
+    return scheduler, api, stores, spawned, fake_execute
+
+
+def _assess_outcome(final_text):
+    outcome = _outcome()
+    outcome.harvest.result["final_text"] = final_text
+    return outcome
+
+
+def test_work_burst_queues_assess_when_claude_active(rig):
+    scheduler, api, stores, spawned, _ = _claude_rig(rig)
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    api.open_prs = [_pr()]
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "assess"
+    assert api.rerequests == [(2, (COPILOT_REVIEWER, OWNER))]  # request providers still fire
+
+
+def test_assess_burst_posts_findings_and_returns_to_awaiting(rig):
+    scheduler, api, stores, spawned, fake_execute = _claude_rig(rig)
+    stores.ledger.upsert_task(
+        TaskRecord(
+            task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2,
+            next_burst_kind="assess", session_id="dev-session",
+        )
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "Sound.", "findings": [{"path": "bot/x.py", "line": 3, "body": "bug"}]}'
+    )
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
+    assert task.session_id == "dev-session"  # the reviewer never pollutes the dev's session
+    assert spawned[0]["kind"] == "assess"
+    (pr_number, body, findings, event) = scheduler.reviewer_api.posted[0]
+    assert (pr_number, findings, event) == (
+        2, [{"path": "bot/x.py", "line": 3, "body": "bug"}], "REQUEST_CHANGES"
+    )
+    # the overview wears the uniform: header + reviewed commit, verdict below
+    assert "Machine review" in body and "Sound." in body and "reviewed `abc`" in body
+
+
+def test_clean_assessment_approves_the_pr(rig):
+    scheduler, api, stores, _, fake_execute = _claude_rig(rig)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome('{"verdict": "Clean.", "findings": []}')
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW
+    (pr_number, body, findings, event) = scheduler.reviewer_api.posted[0]
+    assert (pr_number, findings, event) == (2, [], "APPROVE")
+    assert "Clean." in body
+
+
+def test_assess_failure_gives_up_softly_never_blocks(rig):
+    scheduler, api, stores, _, fake_execute = _claude_rig(rig)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _outcome(exit_code=1)
+    scheduler.tick()  # attempt 1 → retry
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.attempts == 1
+    scheduler.tick()  # attempt 2 = rails cap → give up on the review, not the task
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.attempts == 0
+    assert any("machine review could not run" in body for _, body in api.comments)
+    assert ("remove", 1, "in-progress") not in api.label_ops  # task is NOT parked
+
+
+def test_unparseable_reviewer_output_is_a_failed_attempt(rig):
+    scheduler, api, stores, _, fake_execute = _claude_rig(rig)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome("I reviewed it, looks good!")
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.attempts == 1  # retried, not posted
+    assert scheduler.reviewer_api.posted == []
+
+
+def test_assess_skipped_when_pr_resolved_while_queued(rig):
+    scheduler, api, stores, spawned, _ = _claude_rig(rig)
+    stores.ledger.upsert_task(
+        TaskRecord(task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess")
+    )
+    api.prs[2] = _pr(merged=True, state="closed")
+    scheduler.tick()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW  # merged/closed handled next tick
+    assert spawned == []
+
+
+def test_reviewer_findings_trigger_dev_round(rig):
+    scheduler, api, stores, _, _ = _claude_rig(rig)
+    _awaiting(stores)
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.prs[2] = _pr()
+    api.reviews[2] = [Review(id=40, author=REVIEWER_LOGIN, state="COMMENTED", body="Sound.")]
+    api.review_comments[2] = [_finding(review_id=40)]
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "review"
+
+
+def test_machine_changes_requested_triggers_even_without_inline_comments(rig):
+    # the 422 body-only fallback loses the inline comments but keeps the
+    # review state — the round must still fire
+    scheduler, api, stores, _, _ = _claude_rig(rig)
+    _awaiting(stores)
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.prs[2] = _pr()
+    api.reviews[2] = [
+        Review(id=42, author=REVIEWER_LOGIN, state="CHANGES_REQUESTED", body="findings in body")
+    ]
+    api.review_comments[2] = []
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "review"
+
+
+def test_reviewer_approval_triggers_nothing(rig):
+    scheduler, api, stores, _, _ = _claude_rig(rig)
+    _awaiting(stores)
+    api.prs[2] = _pr()
+    api.reviews[2] = [Review(id=43, author=REVIEWER_LOGIN, state="APPROVED", body="Clean.")]
+    api.review_comments[2] = []
+    scheduler.observe()
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.review_rounds == 0
+
+
+def test_pushed_dev_round_queues_assess_again(rig):
+    scheduler, api, stores, spawned, fake_execute = _claude_rig(rig)
+    stores.ledger.upsert_task(
+        TaskRecord(
+            task_id="1", repo="r", status=TaskStatus.CLAIMED, pr_number=2,
+            next_burst_kind="review", session_id="s",
+        )
+    )
+    api.issues[1] = _issue(labels=("in-progress",))
+    api.reviews[2] = [Review(id=41, author=REVIEWER_LOGIN, state="COMMENTED", body="findings")]
+    api.review_comments[2] = [_finding(review_id=41)]
+    api.prs[2] = _pr(head_sha="before")
+    calls = {"n": 0}
+
+    def get_pr(number):  # the dev pushes during the round: head sha changes
+        calls["n"] += 1
+        return _pr(head_sha="before") if calls["n"] == 1 else _pr(head_sha="after")
+
+    api.get_pr = get_pr
+    scheduler.run_task_burst(stores.ledger.get_task("1"))
+    task = stores.ledger.get_task("1")
+    assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "assess"
+    assert task.last_review_id == 41

@@ -14,14 +14,11 @@ def test_plugin_manifest_is_valid():
     assert manifest["name"] == "dev-agent-toolkit"
 
 
-def test_codex_review_skill_pins_the_safe_invocation():
-    skill = (TOOLKIT / "skills" / "codex-review" / "SKILL.md").read_text(encoding="utf-8")
-    assert skill.startswith("---")
-    assert "name: codex-review" in skill
-    assert "platform shim" in skill  # the scrub/refusal is enforced, not instructed
-    assert 'sandbox_mode="read-only"' in skill
-    assert "--dangerously-bypass-approvals-and-sandbox" in skill  # named as refused
-    assert "two rounds" in skill
+def test_no_codex_skill_in_the_dev_toolkit():
+    """REVIEWERS.md slice 2: the pre-PR self-review subsystem left the dev
+    burst — codex returns as a reviewer-burst engine (slice 3), not a skill
+    the dev invokes. The binaries and walls stay in the image."""
+    assert not (TOOLKIT / "skills" / "codex-review").exists()
 
 
 def test_codex_shim_enforces_the_walls():
