@@ -1,0 +1,82 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="data-model" name="Data model">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1250" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="&lt;b&gt;Autonomous Maintenance Platform — Data model · MVP as built, 2026-07&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;GitHub owns task &amp;amp; delivery state · the ledger owns run state · the filesystem owns transcripts — correlated by ids, never mirrored&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="30" y="15" width="900" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bGithub" value="GITHUB — source of truth for task + delivery state (referenced by id, never mirrored)" style="rounded=1;dashed=1;fillColor=none;strokeColor=#8C8496;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#8C8496;html=1;" vertex="1" parent="1">
+          <mxGeometry x="25" y="80" width="320" height="620" as="geometry" />
+        </mxCell>
+        <mxCell id="bLedger" value="SQLITE LEDGER — data/ledger.db · run state (Postgres = designed scale-up, not built)" style="rounded=1;dashed=1;fillColor=none;strokeColor=#2A6DA3;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#2A6DA3;html=1;" vertex="1" parent="1">
+          <mxGeometry x="415" y="80" width="360" height="790" as="geometry" />
+        </mxCell>
+        <mxCell id="bFs" value="FILESYSTEM — data/ · transcripts + working state (SeaweedFS = designed scale-up, not built)" style="rounded=1;dashed=1;fillColor=none;strokeColor=#2A6DA3;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#2A6DA3;html=1;" vertex="1" parent="1">
+          <mxGeometry x="835" y="80" width="385" height="620" as="geometry" />
+        </mxCell>
+
+        <mxCell id="issue" value="&lt;b&gt;Issue #N&lt;/b&gt;&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;number — = tasks.task_id&lt;br&gt;provenance label: human | auto (immutable)&lt;br&gt;lifecycle labels: ready · in-progress · blocked (reflective — the ledger locks)&lt;br&gt;body — the spec; trust follows provenance&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#8C8496;strokeColor=#736C7E;fontColor=#ffffff;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="45" y="110" width="280" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="pr" value="&lt;b&gt;Pull Request #P&lt;/b&gt;&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;number — = tasks.pr_number&lt;br&gt;head branch — dev/{n}-{slug} (one per issue)&lt;br&gt;body: Closes #N · Evidence per FR&lt;br&gt;review threads — the round conversation&lt;br&gt;merge — the human gate (CODEOWNERS)&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#8C8496;strokeColor=#736C7E;fontColor=#ffffff;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="45" y="320" width="280" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="review" value="&lt;b&gt;PR Reviews&lt;/b&gt;&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;id — immutable, monotonic&lt;br&gt;author — owner · reviewer App · Copilot&lt;br&gt;state — REQUEST_CHANGES / APPROVE / COMMENTED + inline findings&lt;br&gt;consumed above tasks.last_review_id (the cursor)&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#8C8496;strokeColor=#736C7E;fontColor=#ffffff;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="45" y="530" width="280" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="tasks" value="&lt;b&gt;tasks&lt;/b&gt; — one row per issue&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;&lt;b&gt;task_id&lt;/b&gt; TEXT PK — = GitHub issue #&lt;br&gt;repo&lt;br&gt;status — open · claimed · working · awaiting_review · blocked · done&lt;br&gt;session_id — the resumable Claude session&lt;br&gt;transcript_key + transcript_checksum → archive blob&lt;br&gt;pr_number → PR #P&lt;br&gt;attempts · review_rounds — the rails counters&lt;br&gt;next_burst_kind — work · review · assess · test&lt;br&gt;last_review_id — the review cursor&lt;br&gt;last_burst_at · created_at · updated_at&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#438DD5;strokeColor=#2A6DA3;fontColor=#ffffff;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="430" y="110" width="330" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="bursts" value="&lt;b&gt;bursts&lt;/b&gt; — one row per container run (append-only)&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;&lt;b&gt;burst_id&lt;/b&gt; TEXT PK&lt;br&gt;task_id → tasks&lt;br&gt;kind — work · review · assess · test&lt;br&gt;role — dev · reviewer · tester&lt;br&gt;status — running · succeeded · failed · killed&lt;br&gt;trace_id — per-burst trace correlation&lt;br&gt;started_at · finished_at · exit_code&lt;br&gt;model · cost_usd · input/output_tokens · num_turns&lt;br&gt;session_id — captured from the init message&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#438DD5;strokeColor=#2A6DA3;fontColor=#ffffff;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="430" y="430" width="330" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="violations" value="&lt;b&gt;violations&lt;/b&gt; — the tripwire dataset&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;&lt;b&gt;id&lt;/b&gt; INTEGER PK · task_id · burst_id&lt;br&gt;tool · reason · detail · at&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#438DD5;strokeColor=#2A6DA3;fontColor=#ffffff;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="430" y="740" width="330" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sessions" value="&lt;b&gt;sessions/{task_id}/&lt;/b&gt; — the session archive&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;session.tar.gz — the resumable session&lt;br&gt;sha256 — verified on every materialize&lt;br&gt;credentials excluded unconditionally&lt;br&gt;task-keyed: holds the DEV session only&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#85BBF0;strokeColor=#5A96C8;fontColor=#000000;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="855" y="110" width="345" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="volumes" value="&lt;b&gt;volumes/{burst_id}/&lt;/b&gt; — the mounted CLAUDE_CONFIG_DIR&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;session JSONL — SDK-owned local storage&lt;br&gt;burst-result.json — written in finally: session_id, model, cost, tokens, is_error&lt;br&gt;violations.jsonl — tripwire feed&lt;br&gt;kept after harvest for forensics&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#85BBF0;strokeColor=#5A96C8;fontColor=#000000;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="855" y="310" width="345" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="clones" value="&lt;b&gt;clones/{owner}__{repo}/&lt;/b&gt; — platform-owned product clone&lt;hr&gt;&lt;div style=&quot;font-size:11px;text-align:left&quot;&gt;re-synced to origin before every mount&lt;br&gt;rw for dev bursts · ro at the PR head for assess + test&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#85BBF0;strokeColor=#5A96C8;fontColor=#000000;verticalAlign=top;spacing=6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="855" y="530" width="345" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eTaskIssue" value="task_id = issue #" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=0;exitY=0.25;entryX=1;entryY=0.5;" edge="1" parent="1" source="tasks" target="issue">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskPr" value="pr_number" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=0;exitY=0.55;entryX=1;entryY=0.4;" edge="1" parent="1" source="tasks" target="pr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskReview" value="last_review_id — a round fires on unseen reviews" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=0;exitY=0.85;entryX=1;entryY=0.5;" edge="1" parent="1" source="tasks" target="review">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBurstTask" value="N : 1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="bursts" target="tasks">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eViolBurst" value="harvested from volumes/…/violations.jsonl" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="violations" target="bursts">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskArchive" value="transcript_key + checksum" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=1;exitY=0.3;entryX=0;entryY=0.5;" edge="1" parent="1" source="tasks" target="sessions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBurstVolume" value="one volume per burst" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=1;exitY=0.3;entryX=0;entryY=0.5;" edge="1" parent="1" source="bursts" target="volumes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eVolArchive" value="harvest: dev sessions archived task-keyed — reviewer/tester volumes never archived" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="volumes" target="sessions">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBurstClone" value="mounts (sync before every mount)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;fontSize=10;dashed=1;exitX=1;exitY=0.8;entryX=0;entryY=0.5;" edge="1" parent="1" source="bursts" target="clones">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

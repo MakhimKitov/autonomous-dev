@@ -212,7 +212,9 @@ the ephemeral container.
 > violations) and the object store is a **filesystem archive** (`data/sessions/` for
 > task-keyed resumable transcripts, `data/volumes/` for per-burst forensics). Same
 > split, same walls, zero services to operate at experiment scale. Postgres +
-> SeaweedFS below are the scale-up design.
+> SeaweedFS below are the scale-up design. The full as-built data model —
+> ledger tables, filesystem stores, and the GitHub entities they reference —
+> is drawn in `diagrams/data-model.drawio` (+ `.png`).
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,
