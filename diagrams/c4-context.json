@@ -1,24 +1,26 @@
 {
-  "title": "Autonomous Maintenance Platform — System Context (C0)",
+  "title": "Autonomous Maintenance Platform — System Context (C1) · MVP as built, 2026-07",
   "rankdir": "LR",
   "nodes": [
-    { "id": "platform", "type": "container", "name": "Autonomous Maintenance Platform", "tech": "[Software System]", "desc": "Runs autonomous AI developers that maintain the product through GitHub" },
-    { "id": "humanOwner", "type": "person", "name": "Human Owner", "tech": "[Person]", "desc": "Triages issues, reviews & merges PRs, deploys prod" },
-    { "id": "discordUsers", "type": "person", "name": "End Users", "tech": "[Person]", "desc": "Real users; their messages are untrusted input" },
-    { "id": "bot", "type": "external", "name": "Product", "tech": "[Software System · first instance: Discord bot]", "desc": "The maintained product; live in prod" },
-    { "id": "github", "type": "external", "name": "GitHub", "tech": "[Software System]", "desc": "Issues, PRs, branch protection, CI/CD" },
-    { "id": "claude", "type": "external", "name": "Claude (Anthropic API)", "tech": "[Software System]", "desc": "LLM engine behind the dev agent & monitor" },
-    { "id": "reviewers", "type": "external", "name": "AI Code Reviewers", "tech": "[Codex + GitHub Copilot]", "desc": "Independent pre-PR & post-PR review" },
-    { "id": "telemetry", "type": "external", "name": "Product Telemetry", "tech": "[Logs / Metrics / Alertmanager]", "desc": "Runtime signals from the live bot" }
+    { "id": "platform", "type": "container", "name": "Autonomous Maintenance Platform", "tech": "[Software System]", "desc": "Runs an autonomous developer, machine reviewers and an E2E tester as ephemeral bursts; two human gates bracket the loop" },
+    { "id": "humanOwner", "type": "person", "name": "Human Owner", "tech": "[Person]", "desc": "Triages issues (ready), reviews PRs, merges — the only identity that can merge" },
+    { "id": "discordUsers", "type": "person", "name": "End Users", "tech": "[Person]", "desc": "Real users; their content is untrusted data, never instructions" },
+    { "id": "bot", "type": "external", "name": "Product", "tech": "[Software System · first instance: Discord bot]", "desc": "The maintained product; deploys via its own CI on human merge" },
+    { "id": "github", "type": "external", "name": "GitHub", "tech": "[Software System]", "desc": "Issues = queue · PRs = delivery + review · branch protection = human gate · CI" },
+    { "id": "claude", "type": "external", "name": "Claude (Anthropic)", "tech": "[owner-subscription OAuth]", "desc": "Agent engine for dev, reviewer and tester bursts" },
+    { "id": "copilot", "type": "external", "name": "GitHub Copilot", "tech": "[optional review provider]", "desc": "Extra machine reviewer, requested per PR on the owner's PAT" },
+    { "id": "sandbox", "type": "external", "name": "Product Sandbox", "tech": "[disposable · first instance: test Discord app + empty guild]", "desc": "Where the tester drives the running product E2E" },
+    { "id": "monitor", "type": "external", "name": "Monitor", "tech": "[phase 1+ — NOT BUILT]", "desc": "Will watch prod telemetry and file auto issues; the tester already feeds that pipeline" }
   ],
   "edges": [
     { "from": "discordUsers", "to": "bot", "label": "Use the product" },
-    { "from": "humanOwner", "to": "github", "label": "Triages issues, reviews & merges PRs" },
-    { "from": "platform", "to": "github", "label": "Reads issues, pushes branches, opens PRs [API]" },
-    { "from": "platform", "to": "claude", "label": "Drives the agent loop [API]" },
-    { "from": "platform", "to": "telemetry", "label": "Monitors logs, metrics & alerts", "dashed": true },
-    { "from": "bot", "to": "telemetry", "label": "Emits signals", "dashed": true },
-    { "from": "reviewers", "to": "github", "label": "Review PRs" },
-    { "from": "github", "to": "bot", "label": "CI deploys on merge" }
+    { "from": "humanOwner", "to": "github", "label": "Gate 1: ready label · Gate 2: review + merge" },
+    { "from": "platform", "to": "github", "label": "Polls issues/PRs; pushes branches, opens PRs (dev App); posts reviews + test reports (reviewer App) [API]" },
+    { "from": "platform", "to": "claude", "label": "Agent loop for every burst [API]" },
+    { "from": "platform", "to": "sandbox", "label": "Tester boots the PR head, drives it E2E" },
+    { "from": "copilot", "to": "github", "label": "Reviews PRs when requested", "dashed": true },
+    { "from": "github", "to": "bot", "label": "CI deploys on human merge" },
+    { "from": "monitor", "to": "github", "label": "Files auto issues (future)", "dashed": true },
+    { "from": "monitor", "to": "bot", "label": "Watches telemetry (future)", "dashed": true }
   ]
 }

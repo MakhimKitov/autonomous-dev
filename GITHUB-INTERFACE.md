@@ -59,7 +59,8 @@ created (human|auto, no `ready`)
   → human triage: add `ready`                         [gate 1 — intake]
   → control plane assigns (internal) + `in-progress`, clears `ready`
   → dev agent opens PR linked `Closes #<n>`           [pr-open]
-  → Copilot auto-review → tester E2E run (phase 1+) → human review    [gate 2 — ship]
+  → machine review (providers, REVIEWERS.md) → autonomous dev rounds
+       → tester E2E after a clean review (TESTER.md) → human review   [gate 2 — ship]
        ├─ changes requested → new burst (resume) → push → re-review
        ├─ approve + merge → issue auto-closes [done] (deploy later, via the Release PR)
        └─ secrets/prod/policy hit → dev agent sets `blocked` + comments → human
@@ -121,9 +122,10 @@ the gate, never label `ready`.
 - Opened **ready for review** (not draft): green local tests + a full diff re-read
   happen *before* opening. Machine review lands **on the PR** (REVIEWERS.md) — there is
   no pre-PR review subsystem (dropped: its output wasn't a platform artifact).
-- **Review requests are deterministic control-plane steps** (M2): Copilot + the owner
-  are requested on PR open (auto-review proved unreliable) and re-requested after every
-  review-round push. **Copilot requests need a user token**: GitHub grants them only to
+- **Review requests are deterministic control-plane steps**: on PR open and after
+  every review-round push the control plane fires every **active review provider**
+  (spawn providers queue an assess burst; request providers call GitHub — REVIEWERS.md);
+  the owner is re-requested only on owner rounds. **Copilot requests need a user token**: GitHub grants them only to
   a user with a Copilot seat and silently drops them from an App/bot token — the 201 lies
   (falsified 2026-07-03 on PR #6; two earlier "successful" App re-requests never landed).
   The control plane sends the Copilot request on the owner's fine-grained PAT
@@ -185,22 +187,23 @@ App approvals satisfy a bare count, which would quietly dissolve the human gate.
 | Actor | Creates | Sets/clears | Never |
 |---|---|---|---|
 | **Human owner** | `human` issues | `ready`, clears `blocked`, **merges** | — |
-| **Monitor** | `auto` issues | (none after creation) | comment-as-instruction, set `ready` |
-| **Control plane** | — | assignment (internal), `in-progress` | push code, merge |
+| **Monitor** (phase 1+, not built) | `auto` issues | (none after creation) | comment-as-instruction, set `ready` |
+| **Control plane** | machine reviews + test reports (as the reviewer App); relayed `auto` issues | assignment (internal), `in-progress` | push code, merge |
 | **Dev agent** | branches, PRs, issue comments | `blocked` (+ reason) | merge, push to default, set `ready` |
-| **Tester** (phase 1+) | test reports (PR comments) | — | write code, merge, set labels |
-| **Copilot** | PR reviews | — | write to code |
+| **Reviewer burst / Tester** | findings & reports **via harvest only** (no GitHub credential — the control plane posts) | — | write code, merge, set labels |
+| **Copilot** (optional provider) | PR reviews | — | write to code |
 
 ## Identities & scopes
 
 | Component | GitHub identity | Permissions | Cannot |
 |---|---|---|---|
 | Dev agent | App "dev" | `contents:write`, `pull_requests:write`, `issues:write` (comment + `blocked`) | merge, admin, secrets, settings |
-| Control plane | service token / App | `issues:write` (labels), `pull_requests:read`, `contents:read` | merge, push to default |
-| Tester (phase 1+) | App "tester" (separate) | `contents:read`, `pull_requests:write` (comments only) | write code, merge, labels |
-| Monitor | App "monitor" (separate) | `issues:write` | anything else |
+| Control plane | the dev App (shared) + the reviewer App for posting | labels, comments, reviews, test reports, relayed `auto` issues | merge, push to default |
+| Reviewer App | App `<product>-ai-reviewer` (separate — GitHub forbids a PR's author reviewing it) | `pull_requests:write` (reviews) + `issues:write` (symptom relay) | write code, merge, satisfy the CODEOWNERS gate |
+| Reviewer burst / Tester | **none** — findings/reports return via harvest; the control plane posts them | — | any GitHub call at all |
+| Monitor (phase 1+, not built) | App "monitor" (separate) | `issues:write` | anything else |
 | Human owner | maintainer account | full, incl. merge | — |
-| Copilot | GitHub Copilot review | read (PR diff) | write |
+| Copilot (optional) | GitHub Copilot review, requested on the owner's PAT | read (PR diff) | write |
 
 No production credentials (product tokens, DB) exist in any platform identity — the
 deploy path is human-merge → CI only. **Sandbox** creds (a disposable instance of the

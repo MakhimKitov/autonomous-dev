@@ -4,9 +4,18 @@ Source of truth for the whole experiment. Spans three repos; sits above all of
 them. Each repo's own `CLAUDE.md`/`AGENTS.md` governs work *inside* that repo;
 this document defines how the pieces fit and what we're testing.
 
-> Status: **architecture defined, not yet built.** Today's `autonomous-dev` code
-> is a PoC that only proves `claude-agent-sdk` can drive the Claude Code CLI. It
-> will be reworked to match this document.
+> Status: **MVP built and proven end-to-end** (2026-07). A human-`ready` issue became
+> a merged, deployed feature through work bursts, autonomous machine-review rounds,
+> and a live E2E test burst — unattended between the two human gates (discord-bot
+> task 17 / PR #18 was the proving run). This document remains the *design*; where
+> the build deviated, the subsystem docs are authoritative for as-built behavior:
+> **`SCHEDULER.md`** (loop, state machine, rails), **`REVIEWERS.md`** (review
+> providers), **`TESTER.md`** (E2E test bursts), **`GITHUB-INTERFACE.md`** (protocol).
+> Known as-built deltas: stores are SQLite + a filesystem session archive (§6's
+> Postgres/SeaweedFS is the scale-up design, not built); OTel/Phoenix tracing is not
+> wired yet (structlog + the ledger stand in); the monitor is not built (the tester's
+> symptom relay already exercises its `auto`-issue pipeline); pre-PR self-review was
+> dropped in favor of reviewer bursts (decision record in REVIEWERS.md).
 
 ---
 
@@ -40,7 +49,7 @@ The experiment tests three things at once. Each maps to a metric family (§9):
 |---|---|---|---|
 | **Control plane** (scheduler) | platform repo (`autonomous-dev`) | long-lived | spawns Docker containers, holds run state |
 | **Dev agent** (the developer) | same platform repo (payload image) | ephemeral, per-issue | GitHub App scoped to product repo: `contents`+`pull_requests` write, **no merge/admin/secrets** |
-| **Tester** (QA) | same platform repo (**same image**, different contract) | ephemeral, per test-burst | own identity: `contents` **read** + `pull_requests` write (test reports only) · **product-sandbox creds** (which the dev never has) |
+| **Tester** (QA) | same platform repo (**same image**, different contract) | ephemeral, per test-burst | **no GitHub credential** (as built — the report returns via harvest and the control plane posts it as the reviewer App; a dedicated tester App is deferred) · **product-sandbox creds** (`TEST_*` intersection, which the dev never has) |
 | **Monitor** | **separate** repo | long-lived | telemetry-read + `issues:write` only |
 | **Product** | its own repo (first instance: `discord-bot`) | runs in prod (human-operated) | n/a — the thing maintained |
 
@@ -55,21 +64,22 @@ credential set (§6 "Testing", §8).
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │ PLATFORM repo                                                         │
-│  ┌───────────────┐  spawn (Docker) + assign issue  ┌──────────────┐  │
-│  │ Control plane │ ───────────────────────────────▶│ Dev container│  │
-│  │  scheduler    │   track run / budget / killswitch│ clone+agent+ │  │
-│  │  owns issue→  │ ◀─────────────────────────────── │ product tool │  │
-│  │  dev mapping  │            PR opened / done       │ chain        │  │
+│  ┌───────────────┐  spawn (Docker) per burst        ┌──────────────┐  │
+│  │ Control plane │ ───────────────────────────────▶│ Burst        │  │
+│  │  scheduler    │   track run / budget / killswitch│ container    │  │
+│  │  owns issue→  │ ◀─────────────────────────────── │ dev·reviewer │  │
+│  │  burst mapping│      result via harvest           │ ·tester roles│  │
 │  └───────────────┘                                   └──────────────┘  │
 └───────────────────────────┬───────────────────────────────────────────┘
                             │  (all interaction via GitHub API)
-   MONITOR repo  ───────────┤
-   logs·metrics·Alertmanager│  files issues (provenance = auto)
+   MONITOR repo (phase 1+, ─┤
+   not built) logs·metrics  │  files issues (provenance = auto —
+                            │  today fed by the tester's symptom relay)
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │ GITHUB  — integration substrate / source of truth                    │
-│  Issues  queue: human-filed = trusted · monitor-filed = auto/tainted │
-│  PRs     work output + Copilot review + test report + HUMAN gate     │
+│  Issues  queue: human-filed = trusted · machine-filed = auto/tainted │
+│  PRs     work output + machine review + test report + HUMAN gate     │
 │  Branch protection  no merge without human approval                  │
 │  CI/CD   tests + deploy-on-merge   (owned by product repo)           │
 └───────────────────────────┬───────────────────────────────────────────┘
@@ -108,11 +118,12 @@ Two human gates bracket an autonomous middle: a human approves *what* to work on
 issue (open)
   ─▶ HUMAN triage: approve via `ready` label            ◀── gate 1 (intake)
   ─▶ control plane assigns + spawns a BURST container
-  ─▶ agent: reproduce ─▶ branch ─▶ code ─▶ run tests ─▶ in-container Codex review
+  ─▶ agent: reproduce ─▶ branch ─▶ code ─▶ run tests
   ─▶ open PR ─▶ container tears down                     ◀── burst ends
-  ─▶ post-PR: GitHub Copilot reviews the PR, posts findings
-  ─▶ TEST burst (phase 1+): tester designs test scenarios from the spec,
-       runs them against a sandbox deploy of the branch, posts a test report
+  ─▶ machine review (REVIEWERS.md): an assess burst posts findings as the
+       reviewer App; findings drive autonomous dev rounds (resume), capped
+  ─▶ TEST burst (TESTER.md): after a clean machine review, the tester boots the
+       PR head, runs invented scenarios in the sandbox, report posted
   ─▶ HUMAN review                                        ◀── gate 2 (ship)
        ├─ changes requested ─▶ control plane spawns a NEW burst (resume from branch+PR)
        └─ approve + merge ─▶ CI deploys ─▶ issue closed
@@ -144,12 +155,15 @@ states: open · ready · assigned · in-progress · pr-open · needs-review ·
 - **Crash recovery:** a dead burst releases its issue/PR back (lease + heartbeat on
   the control plane); respawn re-derives state from GitHub + session.
 - **Kill switch + budgets:** instant stop + per-burst caps enforced by the control
-  plane (independent of the agent behaving). Under **subscription billing** the real
-  levers are `max_turns` + wall-clock + a daily burst ceiling; tokens (not USD) are
-  the consumption metric, and `max_budget_usd` is advisory (cost figures are
-  estimates). The SDK surfaces **rate-limit events/status** — the scheduler backs off
-  spawning when the subscription window is near exhaustion instead of burning bursts
-  into 429s.
+  plane (independent of the agent behaving). Under **subscription billing** tokens
+  (not USD) are the consumption metric, and cost figures are estimates — but
+  `max_budget_usd` is a **hard cap regardless**: the SDK kills the burst mid-stream
+  when estimated cost crosses it ("advisory" was falsified on task 17). Because the
+  worker captures its session id from the init message and writes its result file
+  even on a dying stream, a budget-killed burst **resumes** where it died — attempts
+  × per-burst budget behaves as an installment plan, never a restart from zero. The
+  SDK surfaces **rate-limit events/status** — the scheduler backs off spawning when
+  the subscription window is near exhaustion instead of burning bursts into 429s.
 
 ### Session continuity (confirmed, SDK v0.2.110)
 
@@ -194,6 +208,12 @@ The control plane owns both stores **and all I/O to them**; the dev agent holds 
 storage credentials and touches only a mounted working dir. Nothing durable lives in
 the ephemeral container.
 
+> **As built (MVP):** the control DB is **SQLite** (`data/ledger.db` — tasks, bursts,
+> violations) and the object store is a **filesystem archive** (`data/sessions/` for
+> task-keyed resumable transcripts, `data/volumes/` for per-burst forensics). Same
+> split, same walls, zero services to operate at experiment scale. Postgres +
+> SeaweedFS below are the scale-up design.
+
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,
   provenance, the violations ledger (§9), and each transcript's object key + checksum.
@@ -208,37 +228,49 @@ the write-amplification bloat that per-entry relational checkpoints are known fo
 keeps raw agent context (code, tool output, secrets that may leak into logs) out of the
 operational DB — consistent with the walls (§8).
 
-### Review — two independent stages
+### Review — a policy of providers (`REVIEWERS.md`)
 
-1. **Pre-PR — Codex, in-container.** Before opening the PR the agent runs Codex on
-   its own diff and addresses findings (bounded rounds — no infinite loop). The
-   procedure ships as an **image-baked skill** (root-owned plugin; the agent invokes
-   it, can't edit it): pinned safe invocation — credential-scrubbed env, read-only
-   sandbox — plus the rounds cap and verbatim-verdict rule. Burst prompts carry the
-   task; procedures live in the image.
-2. **Post-PR — GitHub Copilot, on the PR.** Copilot is configured as an automatic
-   reviewer on the product repo, so it reviews the diff and posts findings on PR
-   creation — independently of platform compute (the burst container is already torn
-   down at PR-open), with no custom Action to maintain.
+Machine review is a **toggle + provider selector**, declared in the platform config
+and verified loudly at startup. Every provider delivers the same artifact — a PR
+review with inline findings, on GitHub — so there is one review surface, one trigger,
+one etiquette:
 
-Two *different* reviewers — Codex then Copilot — both read-only and distinct from the
-implementing agent, so each is a genuine independent check. The human remains the
-final gate.
+- **`claude`** — a **reviewer burst** (`assess`): same image, reviewer role, fresh
+  session, clone mounted read-only at the PR head, **no GitHub credential** — findings
+  return via the harvest and the control plane posts them as a second GitHub App (the
+  reviewer App; findings → `REQUEST_CHANGES`, clean → `APPROVE`).
+- **`codex`** — the same reviewer envelope with the codex CLI as the engine (slice 3,
+  not yet built).
+- **`copilot`** — a request to GitHub's reviewer, sent on the owner's PAT and
+  echo-verified (App tokens are silently dropped — the 201 lies).
 
-### Testing — the tester role (phase 1+)
+Findings drive **autonomous dev rounds**: the dev burst resumes its session, fixes,
+and replies in every thread; a push re-queues assess. The earlier design's **pre-PR
+in-container Codex self-review was dropped** (decision record in `REVIEWERS.md`): its
+output wasn't a platform artifact, and it put a second vendor's credential inside the
+dev's box. The human remains the final gate regardless of policy.
+
+### Testing — the tester role (shipped 2026-07; `TESTER.md`)
 
 Reviewers read diffs; **nobody has run the thing**. The tester is **QA, not a third
 reviewer** — the goal is to behave like a human tester. Same image as the dev, booted
-with a tester contract, spawned as a **test burst** once a PR is CI-green:
+with a tester contract, spawned as a **test burst** after a clean machine review
+(only a clean assess queues a test — no sandbox boot for a diff that's about to
+change):
 
-- **Designs its own test scenarios** from the issue + PR description (the spec) —
-  happy path, edge cases, "what would a user actually try" — rather than executing a
-  checklist someone else wrote.
-- **Runs them against a live system**: deploys the PR branch into the **sandbox** (a
-  disposable instance of the product's runtime with throwaway creds) and drives the
-  running product end-to-end.
-- **Reports** structured results on the PR: scenarios attempted, pass/fail, repro
-  steps for failures. Advisory input to the human at gate 2 — not a required check.
+- **Designs its own test scenarios** from the product's specs and its `TESTING.md`
+  (the product-owned testing contract: frontmatter names the env it needs, prose
+  tells the tester how this product is driven) — happy path, edge cases, "what would
+  a user actually try" — rather than executing a checklist someone else wrote.
+- **Runs them against a live system**: boots the product from the read-only PR-head
+  clone and drives it end-to-end in the **sandbox** (a disposable instance of the
+  product's runtime; creds provisioned platform-side under `TEST_*` and injected
+  only as the intersection with what the manifest requests).
+- **Reports** structured results returned via the harvest (it holds **no GitHub
+  credential**); the control plane posts them: PR-caused defects as a
+  `REQUEST_CHANGES` review that drives a normal dev round, pre-existing defects
+  relayed as `auto` issues behind the human `ready` gate, a clean run as an advisory
+  comment. Advisory input to the human at gate 2 — not a required check.
 
 Explicitly *not* CI's job re-done by an agent: deterministic unit/integration/smoke
 tests stay in CI as the reproducible floor. The tester covers what scripted tests
@@ -376,21 +408,27 @@ Same architecture throughout — exposure is graduated, not the design.
 
 0. **Walls-first:** single dev container, human-filed issues only, static/staging
    product. Prove **0 wall failures** over N runs. → build plan in `PHASE-0.md`.
-1. **Loop:** add the **tester** (test bursts + sandbox — first thing in the phase, so
-   capability metrics mean something), then the monitor + auto issues (provenance gate
-   live) on staging / recorded traffic. Watch the laundering path specifically.
+   **Status: built and running** — the loop is proven end-to-end; the systematic
+   red-team suite (M4) is still to run.
+1. **Loop:** add the **tester** (test bursts + sandbox — **pulled forward and shipped
+   2026-07**, so capability metrics mean something), then the monitor + auto issues
+   on staging / recorded traffic (the provenance gate and the `auto` relay pipeline
+   are already live via the tester). Watch the laundering path specifically.
 2. **Live:** real user traffic, then horizontal scaling. Only after 0–1 show
    zero successful breaches.
 
 ## 11. Scope: now vs. future
 
-- **Build now:** control plane spawning **one** dev container per work-burst on
-  Docker; human-triaged intake (`ready` label); GitHub-native flow (issue → PR →
-  human review → merge → CI deploy); two-stage review (Codex pre-PR + Copilot
-  post-PR); monitor that **files** issues; the wall set in §8.
-- **Designed-for, not built:** the **tester role** (same image + tester contract +
-  sandbox; §6 "Testing"); horizontal scaling (N containers); monitor
-  **reaction** (auto-remediation); k8s as the runtime when N>1 is real.
+- **Built (MVP):** control plane spawning **one** container per burst on Docker;
+  human-triaged intake (`ready` label); GitHub-native flow (issue → PR → human
+  review → merge → CI deploy); machine review as a provider policy (`REVIEWERS.md`)
+  with autonomous dev rounds; the **tester role** with E2E test bursts and the
+  `auto`-issue relay (`TESTER.md`); the wall set in §8.
+- **Designed-for, not built:** the monitor (files issues from prod telemetry — its
+  pipeline is already exercised by the tester's symptom relay); the `codex` review
+  engine and the tester tools registry; Postgres/SeaweedFS stores; OTel/Phoenix
+  tracing; horizontal scaling (N containers); monitor **reaction**
+  (auto-remediation); k8s as the runtime when N>1 is real.
 
 ## 12. Decisions
 
@@ -402,15 +440,19 @@ Same architecture throughout — exposure is graduated, not the design.
 - **Container lifecycle:** ephemeral **per work-burst** with resume-from-durable-state
   (§6). Warm base image to amortize setup; warm pool only if setup is heavy.
 - **Intake:** human-triaged via a `ready` label (§6, gate 1).
-- **Review:** two independent stages — Codex in-container pre-PR, GitHub Copilot on
-  the PR post-PR (§6).
+- **Review:** a **toggle + provider selector** (`REVIEWERS.md`): `claude` reviewer
+  bursts posting as a second GitHub App, optional `codex` engine, optional `copilot`
+  request on the owner's PAT. *Supersedes* the original two-stage design — the pre-PR
+  in-container Codex self-review was dropped (its output wasn't a platform artifact;
+  it put a second vendor's credential in the dev's box).
 - **Tester:** a **QA role, not a reviewer, not a codebase** — the dev image booted with
-  a tester contract and disjoint creds (repo read-only + test reports; product-sandbox
-  creds the dev never has). Behaves like a human tester: invents scenarios from the
-  issue + PR spec and runs them against a live sandbox deploy — the non-deterministic
-  complement to CI, not a replacement for it. **Fresh context per test burst** — never
-  sees the dev's session. Advisory report, not a required check. Built in phase 1,
-  first thing in the phase.
+  a tester contract and disjoint creds (no GitHub credential — reports return via the
+  harvest; product-sandbox creds the dev never has). Behaves like a human tester:
+  invents scenarios from the product's `TESTING.md` + specs and runs them against a
+  live sandbox boot of the PR head — the non-deterministic complement to CI, not a
+  replacement for it. **Fresh context per test burst** — never sees the dev's session,
+  deliberately blind to the PR conversation. Advisory report, not a required check.
+  **Shipped 2026-07** (slices 1–2, `TESTER.md`).
 - **Staging:** the RC-validation env; product CI deploys the PR/branch there.
 - **Session continuity:** one persistent Claude session per task, externalized via a
   control-plane `SessionStore` adapter; resume by `session_id` each burst (§6).
@@ -442,9 +484,12 @@ Same architecture throughout — exposure is graduated, not the design.
   the adapter's `load()` owns truncate/summarize (and/or a turn cap). Defer until a task
   spans enough rounds to matter.
 - Warm-pool threshold — defer until per-burst setup time is measured.
-- Whether `max_budget_usd` enforces anything under subscription billing (verify in
-  M1); rate-limit backoff tuning for the scheduler (M2).
-- How the tester *drives* the product E2E in the sandbox — inherently product-specific
-  (for the first instance, a Discord bot: E2E harness vs. a second bot vs. API calls;
-  Discord ToS rules out automated user accounts). Decide when building the tester
-  (phase 1).
+- ~~Whether `max_budget_usd` enforces anything under subscription billing~~ —
+  **resolved (task 17): it's a hard cap**; the SDK kills the burst mid-stream on
+  estimated cost. Resume-on-any-death makes retries an installment plan (§6).
+  Rate-limit backoff tuning for the scheduler stays open.
+- ~~How the tester *drives* the product E2E in the sandbox~~ — **resolved: the
+  socket-and-plug model** (`TESTER.md`). "How to test this product" is product
+  knowledge and lives in the product repo's `TESTING.md` (frontmatter for the
+  platform, prose for the tester); the platform owns only the envelope and stays
+  product-agnostic.
