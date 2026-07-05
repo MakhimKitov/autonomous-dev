@@ -56,6 +56,7 @@ class BurstResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     is_error: bool = False
+    error: str | None = None  # what killed the burst, when something did
     duration_s: float | None = None
     finished_at: str = ""
     text_tail: str = ""
@@ -117,34 +118,46 @@ async def run_burst(env: BurstEnv) -> BurstResult:
     )
     chunks: list[str] = []
     final_parts: list[str] = []
-    async for message in query(prompt=env.task_prompt, options=_to_options(env)):
-        if isinstance(message, AssistantMessage):
-            final_parts = []
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    print(block.text, flush=True)
-                    chunks.append(block.text)
-                    final_parts.append(block.text)
-                elif isinstance(block, ToolUseBlock):
-                    # a silent burst looks identical to a hung one from outside —
-                    # the log must show activity, not just narration
-                    detail = json.dumps(block.input)[:160] if block.input else ""
-                    log.info("tool", name=block.name, args=detail)
-        elif isinstance(message, SystemMessage) and message.subtype == "init":
-            result.model = message.data.get("model") or result.model
-        elif isinstance(message, ResultMessage):
-            result.session_id = message.session_id
-            result.num_turns = getattr(message, "num_turns", None)
-            result.total_cost_usd = getattr(message, "total_cost_usd", None)
-            result.is_error = bool(getattr(message, "is_error", False))
-            usage = getattr(message, "usage", None) or {}
-            result.input_tokens = usage.get("input_tokens")
-            result.output_tokens = usage.get("output_tokens")
-    result.duration_s = round(time.monotonic() - started, 3)
-    result.finished_at = datetime.now(UTC).isoformat()
-    result.text_tail = "".join(chunks)[-TEXT_TAIL_CHARS:]
-    result.final_text = "".join(final_parts)[-FINAL_TEXT_CHARS:]
-    write_result(env, result)
+    try:
+        async for message in query(prompt=env.task_prompt, options=_to_options(env)):
+            if isinstance(message, AssistantMessage):
+                final_parts = []
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        print(block.text, flush=True)
+                        chunks.append(block.text)
+                        final_parts.append(block.text)
+                    elif isinstance(block, ToolUseBlock):
+                        # a silent burst looks identical to a hung one from outside —
+                        # the log must show activity, not just narration
+                        detail = json.dumps(block.input)[:160] if block.input else ""
+                        log.info("tool", name=block.name, args=detail)
+            elif isinstance(message, SystemMessage) and message.subtype == "init":
+                result.model = message.data.get("model") or result.model
+                # the init message names the session within seconds of start; the
+                # final result only confirms it — a burst killed mid-run (budget
+                # rail, crash, docker kill) must still leave a resumable trail
+                result.session_id = message.data.get("session_id") or result.session_id
+            elif isinstance(message, ResultMessage):
+                result.session_id = message.session_id
+                result.num_turns = getattr(message, "num_turns", None)
+                result.total_cost_usd = getattr(message, "total_cost_usd", None)
+                result.is_error = bool(getattr(message, "is_error", False))
+                usage = getattr(message, "usage", None) or {}
+                result.input_tokens = usage.get("input_tokens")
+                result.output_tokens = usage.get("output_tokens")
+    except BaseException as exc:
+        result.is_error = True
+        result.error = f"{type(exc).__name__}: {exc}"
+        log.error("burst stream died — result written for resume", error=result.error)
+        raise
+    finally:
+        # the result file is the burst's trail; it must exist however the burst ends
+        result.duration_s = round(time.monotonic() - started, 3)
+        result.finished_at = datetime.now(UTC).isoformat()
+        result.text_tail = "".join(chunks)[-TEXT_TAIL_CHARS:]
+        result.final_text = "".join(final_parts)[-FINAL_TEXT_CHARS:]
+        write_result(env, result)
     return result
 
 

@@ -67,6 +67,10 @@ issue `human`+`ready` ──claim──► claimed ──spawn──► working 
 Notes:
 - **"Burst ok but no PR" is a failed attempt.** The work burst's contract is a PR; anything
   less retries (with resume — the session remembers how far it got) until the rail trips.
+  Resume survives *any* death, including the budget rail killing the stream mid-run: the
+  worker captures the session id from the init message and writes its result file in a
+  `finally` (the task-17 lesson), so attempts × per-burst budget behaves as an installment
+  plan — each retry continues where the last died, never a restart from zero.
 - A **review round** triggers on reviews above the `last_review_id` cursor (GitHub
   review ids are immutable and monotonic): the owner's `changes_requested`, or a
   registered machine reviewer's **`changes_requested` or inline findings** — the
@@ -134,7 +138,7 @@ Defaults, `.env`-overridable:
 | daily burst ceiling (global) | 20 |
 | failure cooldown / task | 5 min |
 | poll interval | 60 s |
-| per-burst | `max_budget_usd` 2.0 (advisory under subscription) · `max_turns` 100 |
+| per-burst | `max_budget_usd` 2.0 (a **hard cap** on estimated cost — the SDK kills the burst mid-run; falsified "advisory" on task 17) · `max_turns` 100 |
 
 ## Kill switch & crash recovery
 

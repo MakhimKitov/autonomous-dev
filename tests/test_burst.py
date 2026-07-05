@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from claude_agent_sdk import ResultMessage, SystemMessage
 from dev_agent import burst
 from dev_agent.env import BurstEnv
@@ -13,6 +14,38 @@ def _fake_stream(*messages):
             yield message
 
     return fake_query
+
+
+def test_stream_death_still_writes_a_resumable_result(tmp_path, monkeypatch):
+    """The budget rail kills the stream mid-run (the SDK raises). The result
+    file must still land — with the session id captured from the *init*
+    message — or retries restart from zero instead of resuming (task 17)."""
+
+    def _dying_stream(*messages):
+        async def fake_query(*, prompt, options):
+            for message in messages:
+                yield message
+            raise Exception("Claude Code returned an error result: Reached maximum budget ($2)")
+
+        return fake_query
+
+    monkeypatch.setattr(
+        burst,
+        "query",
+        _dying_stream(
+            SystemMessage(subtype="init", data={"model": "m", "session_id": "sess-cut-short"}),
+        ),
+    )
+    env = BurstEnv(
+        task_id="17", burst_id="b4", task_prompt="build it",
+        repo_dir=tmp_path, session_dir=tmp_path / "session",
+    )
+    with pytest.raises(Exception, match="maximum budget"):
+        burst.run_burst_sync(env)
+    written = json.loads(env.result_path.read_text(encoding="utf-8"))
+    assert written["session_id"] == "sess-cut-short"
+    assert written["is_error"] is True
+    assert "maximum budget" in written["error"]
 
 
 def test_result_records_the_resolved_model(tmp_path, monkeypatch):
