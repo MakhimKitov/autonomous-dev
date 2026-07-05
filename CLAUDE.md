@@ -56,3 +56,6 @@ uv run pytest                # structural tests, no network
 - Python 3.12, `uv` for env/deps, type hints throughout.
 - `async` core with a thin sync wrapper for the CLI.
 - Keep the seam to the SDK in one place; layer guardrails as composable hooks.
+- Logs are structlog, slog-shaped (event phrase + `key=value`), configured once per
+  CLI entry via `dev_agent.log`: colorized console on a TTY, logfmt everywhere else.
+  `print()` is reserved for payload — command output, agent prose, container streams.

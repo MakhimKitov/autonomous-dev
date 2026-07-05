@@ -14,8 +14,13 @@ import shutil
 import sys
 from datetime import UTC, datetime
 
+import structlog
+
 from dev_agent.burst import run_burst_sync
 from dev_agent.env import BurstEnv, EnvError
+from dev_agent.log import configure_logging
+
+log = structlog.get_logger()
 
 
 def _check(env: BurstEnv) -> int:
@@ -44,21 +49,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("command", nargs="?", default="run", choices=["run", "check"])
     args = parser.parse_args(argv)
+    configure_logging()
 
     try:
         env = BurstEnv.from_environ()
     except EnvError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        log.error("environment contract unsatisfied", error=str(exc))
         return 2
 
     if args.command == "check":
         return _check(env)
 
     result = run_burst_sync(env)
-    print(
-        f"\n[burst done] task={result.task_id} burst={result.burst_id} "
-        f"session={result.session_id} turns={result.num_turns} "
-        f"cost_usd={result.total_cost_usd} error={result.is_error}"
+    log.info(
+        "burst done",
+        task=result.task_id,
+        burst=result.burst_id,
+        session=result.session_id,
+        turns=result.num_turns,
+        cost_usd=result.total_cost_usd,
+        error=result.is_error,
     )
     return 1 if result.is_error else 0
 

@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+import structlog
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -29,6 +30,8 @@ from claude_agent_sdk import (
 from dev_agent.contract import build_system_prompt
 from dev_agent.env import BurstEnv
 from dev_agent.walls import make_pre_tool_use_hook
+
+log = structlog.get_logger()
 
 TEXT_TAIL_CHARS = 4000
 FINAL_TEXT_CHARS = 16000  # the last assistant message whole — reviewer findings ride here
@@ -126,7 +129,7 @@ async def run_burst(env: BurstEnv) -> BurstResult:
                     # a silent burst looks identical to a hung one from outside —
                     # the log must show activity, not just narration
                     detail = json.dumps(block.input)[:160] if block.input else ""
-                    print(f"[tool] {block.name} {detail}", flush=True)
+                    log.info("tool", name=block.name, args=detail)
         elif isinstance(message, SystemMessage) and message.subtype == "init":
             result.model = message.data.get("model") or result.model
         elif isinstance(message, ResultMessage):

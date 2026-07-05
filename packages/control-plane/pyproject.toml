@@ -11,6 +11,7 @@ dependencies = [
     "cryptography>=42",
     "requests>=2.31",
     "python-dotenv>=1.0",
+    "structlog>=26.1.0",
 ]
 
 [project.scripts]

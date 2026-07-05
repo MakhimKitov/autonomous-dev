@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 
+import structlog
 from dotenv import load_dotenv
 from opentelemetry import trace
 
@@ -35,6 +36,9 @@ from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
 from control_plane.store import SqliteLedger
 from control_plane.telemetry import init_telemetry
 from control_plane.testing import E2EPolicy, E2EPolicyError
+from dev_agent.log import configure_logging
+
+log = structlog.get_logger()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -219,9 +223,21 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         sync_clone=sync_clone,
         sync_clone_ref=sync_clone_ref,
     )
-    print(f"[scheduler] repo={slug} owner={owner} clone={platform_clone} interval={interval}s rails={rails}")
-    reviewer_note = f" · reviewer={reviewer_login}" if reviewer_login else ""
-    print(f"[scheduler] review: {review.describe()}{reviewer_note} · e2e={testing.describe()} · gate={owner}")
+    log.info(
+        "scheduler starting",
+        repo=slug,
+        owner=owner,
+        clone=str(platform_clone),
+        interval_s=interval,
+        rails=str(rails),
+    )
+    log.info(
+        "switchboard",
+        review=review.describe(),
+        reviewer=reviewer_login,
+        e2e=testing.describe(),
+        gate=owner,
+    )
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
         scheduler.stop_path.touch()
@@ -231,7 +247,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
                 check=False,
                 capture_output=True,
             )
-        print("[scheduler] stop requested — exiting after this tick")
+        log.info("stop requested — exiting after this tick")
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -240,9 +256,9 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         try:
             scheduler.tick()
         except (GitHubApiError, GitHubAuthError) as exc:
-            print(f"[scheduler] GitHub error — retrying next tick: {exc}", file=sys.stderr)
+            log.warning("github error — retrying next tick", error=str(exc))
         if scheduler.stop_requested():
-            print("[scheduler] STOP flag present — exiting")
+            log.info("STOP flag present — exiting")
             break
         if args.once:
             break
@@ -256,18 +272,19 @@ def _stop(args: argparse.Namespace) -> int:
     flag = data_dir / STOP_FILENAME
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.touch()
-    print(f"[stop] flag written: {flag}")
+    log.info("stop flag written", flag=str(flag))
     ledger_path = data_dir / "ledger.sqlite3"
     if ledger_path.is_file():
         for burst in SqliteLedger(ledger_path).running_bursts():
             subprocess.run(["docker", "kill", f"burst-{burst.burst_id}"], check=False, capture_output=True)
-            print(f"[stop] docker kill burst-{burst.burst_id}")
-    print("[stop] the scheduler exits before its next spawn; remove the flag to allow `run` again")
+            log.info("live burst killed", container=f"burst-{burst.burst_id}")
+    log.info("the scheduler exits before its next spawn — remove the flag to allow `run` again")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()  # the platform's .env; real env vars win — bursts still get an explicit env
+    configure_logging()  # console on a TTY, logfmt everywhere else (dev_agent.log)
     args = build_parser().parse_args(argv)
     if args.command == "burst":
         return _run_burst(args)

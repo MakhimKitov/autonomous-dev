@@ -15,6 +15,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
+import structlog
+
 from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Review
@@ -35,6 +37,8 @@ from control_plane.testing import (
 )
 
 STOP_FILENAME = "STOP"
+
+log = structlog.get_logger()
 
 WORK = "work"
 REVIEW = "review"
@@ -145,7 +149,7 @@ class Scheduler:
             burst.status = BurstStatus.KILLED
             burst.finished_at = utc_now()
             self.stores.ledger.finish_burst(burst)
-            print(f"[scheduler] reconcile: burst {burst.burst_id} died without a result → killed")
+            log.warning("burst died without a result — marked killed", burst=burst.burst_id)
         # a WORKING task with no live burst is the same crash, seen from the task side
         for task in self.stores.ledger.tasks_by_status(TaskStatus.WORKING):
             self._register_failure(task, "the scheduler crashed or was killed mid-burst")
@@ -187,7 +191,12 @@ class Scheduler:
             self.stores.ledger.upsert_task(task)
             self.api.remove_label(issue.number, "ready")
             self.api.add_labels(issue.number, ["in-progress"])
-            print(f"[scheduler] claimed issue #{issue.number} ({issue.provenance}) → {task.next_burst_kind} burst")
+            log.info(
+                "issue claimed",
+                issue=issue.number,
+                provenance=issue.provenance,
+                burst=task.next_burst_kind,
+            )
 
     def _park_blocked_issues(self) -> None:
         """The agent set `blocked` (contract rule 9) — stop scheduling the task."""
@@ -197,7 +206,7 @@ class Scheduler:
                 task.status = TaskStatus.BLOCKED
                 task.next_burst_kind = None
                 self.stores.ledger.upsert_task(task)
-                print(f"[scheduler] issue #{task.task_id} is `blocked` — parked for a human")
+                log.info("issue carries `blocked` — parked for a human", issue=task.task_id)
 
     def _advance_awaiting_review(self) -> None:
         for task in self.stores.ledger.tasks_by_status(TaskStatus.AWAITING_REVIEW):
@@ -210,7 +219,7 @@ class Scheduler:
                 task.next_burst_kind = None
                 self.stores.ledger.upsert_task(task)
                 self.api.remove_label(number, "in-progress")
-                print(f"[scheduler] PR #{task.pr_number} merged — task #{task.task_id} done")
+                log.info("pr merged — task done", task=task.task_id, pr=task.pr_number)
                 continue
             if pr.state == "closed":
                 task.status = TaskStatus.BLOCKED
@@ -218,7 +227,7 @@ class Scheduler:
                 self.stores.ledger.upsert_task(task)
                 self.api.comment(number, "⛔ control plane: PR closed without merge — parking this task for a human.")
                 self.api.remove_label(number, "in-progress")
-                print(f"[scheduler] PR #{task.pr_number} closed unmerged — task #{task.task_id} blocked")
+                log.warning("pr closed unmerged — task blocked", task=task.task_id, pr=task.pr_number)
                 continue
             pending, owner_triggered = self._actionable_reviews(task)
             if not pending:
@@ -249,7 +258,7 @@ class Scheduler:
             task.next_burst_kind = REVIEW
             self.stores.ledger.upsert_task(task)
             trigger = "changes requested" if owner_triggered else "reviewer findings"
-            print(f"[scheduler] {trigger} on PR #{task.pr_number} — review round {task.review_rounds}")
+            log.info("review round queued", pr=task.pr_number, trigger=trigger, round=task.review_rounds)
 
     def _actionable_reviews(self, task: TaskRecord) -> tuple[list[Review], bool]:
         """(reviews to address, owner_triggered) above the processed cursor.
@@ -292,7 +301,7 @@ class Scheduler:
             return None
         day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         if self.stores.ledger.bursts_started_since(day_start) >= self.rails.daily_burst_ceiling:
-            print("[scheduler] rails: daily burst ceiling reached — not spawning")
+            log.warning("daily burst ceiling reached — not spawning", ceiling=self.rails.daily_burst_ceiling)
             return None
         now = datetime.now(UTC)
         for task in claimed:  # oldest first (query order)
@@ -355,7 +364,7 @@ class Scheduler:
                 burst_id=self.current_burst_id,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
-            print(f"[scheduler] burst spawn failed: {exc}")
+            log.error("burst spawn failed", error=str(exc))
             self._register_failure(task, f"burst could not start: {exc}")
             return
         finally:
@@ -373,7 +382,7 @@ class Scheduler:
                 self._register_failure(task, f"burst {outcome.burst.burst_id} succeeded but opened no PR")
                 return
             task.pr_number = pr.number
-            print(f"[scheduler] task #{task.task_id}: PR #{pr.number} open")
+            log.info("pr opened", task=task.task_id, pr=pr.number)
             # fire every active provider (REVIEWERS.md); the owner sees the PR exists
             self._request_re_review(task, [*self._active_request_providers(), self.owner])
             queue_assess = self.review.claude
@@ -390,7 +399,7 @@ class Scheduler:
         if queue_assess:
             task.status = TaskStatus.CLAIMED
             task.next_burst_kind = ASSESS
-            print(f"[scheduler] machine review queued for PR #{task.pr_number} (assess burst)")
+            log.info("machine review queued", pr=task.pr_number)
         else:
             task.status = TaskStatus.AWAITING_REVIEW
             task.next_burst_kind = None
@@ -435,7 +444,7 @@ class Scheduler:
                 burst_id=self.current_burst_id,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
-            print(f"[scheduler] burst spawn failed: {exc}")
+            log.error("burst spawn failed", error=str(exc))
             self._register_failure(task, f"burst could not start: {exc}")
             return
         finally:
@@ -456,7 +465,7 @@ class Scheduler:
         if not parsed.findings and self._test_queueable(task, repo):
             task.status = TaskStatus.CLAIMED
             task.next_burst_kind = TEST
-            print(f"[scheduler] machine test queued for PR #{task.pr_number} (test burst)")
+            log.info("machine test queued", pr=task.pr_number)
         else:
             task.status = TaskStatus.AWAITING_REVIEW
             task.next_burst_kind = None
@@ -472,7 +481,7 @@ class Scheduler:
             return False
         manifest_path = repo / MANIFEST_FILENAME
         if not manifest_path.is_file():
-            print(f"[scheduler] product ships no {MANIFEST_FILENAME} — not testable, skipping")
+            log.info("product not testable — skipping", missing=MANIFEST_FILENAME)
             return False
         try:
             manifest = parse_manifest(manifest_path.read_text(encoding="utf-8"))
@@ -488,14 +497,14 @@ class Scheduler:
         return True
 
     def _skip_test(self, task: TaskRecord, reason: str) -> None:
-        print(f"[scheduler] machine test skipped: {reason}")
+        log.info("machine test skipped", task=task.task_id, reason=reason)
         try:
             self.api.comment(
                 int(task.task_id),
                 f"ℹ️ control plane: machine test could not run ({reason}).",
             )
         except GitHubApiError as exc:
-            print(f"[scheduler] skip comment failed (advisory, continuing): {exc}")
+            log.warning("skip comment failed — advisory, continuing", error=str(exc))
 
     def _run_test_burst(self, task: TaskRecord) -> None:
         """A tester-role burst (TESTER.md): boots the product per its own
@@ -547,7 +556,7 @@ class Scheduler:
                 extra_env=sandbox_env,  # the TEST_ intersection — tester bursts only
             )
         except (GitHubAuthError, GitHubApiError) as exc:
-            print(f"[scheduler] burst spawn failed: {exc}")
+            log.error("burst spawn failed", error=str(exc))
             self._register_failure(task, f"burst could not start: {exc}")
             return
         finally:
@@ -577,7 +586,7 @@ class Scheduler:
         if not report.issues:
             return []
         if self.reviewer_api is None:
-            print("[scheduler] no reviewer App configured — auto issues not filed")
+            log.warning("no reviewer App configured — auto issues not filed")
             return []
         try:
             existing = {
@@ -585,18 +594,19 @@ class Scheduler:
                 for issue in self.reviewer_api.list_open_issues_by_label(AUTO_PROVENANCE_LABEL)
             }
         except GitHubApiError as exc:
-            print(f"[scheduler] auto-issue dedup listing failed (not filing blind): {exc}")
+            log.warning("auto-issue dedup listing failed — not filing blind", error=str(exc))
             return []
         if len(report.issues) > AUTO_ISSUES_PER_REPORT:
-            print(
-                f"[scheduler] tester authored {len(report.issues)} issues — filing the first "
-                f"{AUTO_ISSUES_PER_REPORT}, dropping the rest (per-report cap)"
+            log.warning(
+                "tester authored more issues than the per-report cap — dropping the rest",
+                authored=len(report.issues),
+                cap=AUTO_ISSUES_PER_REPORT,
             )
         filed: list[int] = []
         for issue in report.issues[:AUTO_ISSUES_PER_REPORT]:
             key = issue["title"].strip().lower()
             if key in existing:
-                print(f"[scheduler] auto issue already open, skipping: {issue['title']!r}")
+                log.info("auto issue already open — skipped", title=issue["title"])
                 continue
             body = (
                 f"{issue['body']}\n\n---\n"
@@ -609,11 +619,11 @@ class Scheduler:
                     issue["title"], body, [AUTO_PROVENANCE_LABEL]
                 )
             except GitHubApiError as exc:
-                print(f"[scheduler] filing auto issue failed (advisory, continuing): {exc}")
+                log.warning("filing auto issue failed — advisory, continuing", error=str(exc))
                 continue
             existing.add(key)
             filed.append(number)
-            print(f"[scheduler] auto issue filed: #{number} {issue['title']!r}")
+            log.info("auto issue filed", issue=number, title=issue["title"])
         return filed
 
     def _post_test_report(
@@ -629,7 +639,7 @@ class Scheduler:
         report is a plain comment, advisory to the human gate. Posting failures
         degrade, never block."""
         if self.reviewer_api is None:
-            print("[scheduler] no reviewer App configured — test report not posted")
+            log.warning("no reviewer App configured — test report not posted")
             return
         body = format_test_report(report, head_sha, model, filed=filed)
         pr_caused = report.pr_caused
@@ -638,16 +648,17 @@ class Scheduler:
                 self.reviewer_api.post_review(task.pr_number, body, [], event="REQUEST_CHANGES")
             else:
                 self.reviewer_api.comment(task.pr_number, body)
-            failed = sum(1 for s in report.scenarios if s["result"] == "fail")
-            print(
-                f"[scheduler] test report posted on PR #{task.pr_number}: "
-                f"{len(report.scenarios)} scenario(s), {failed} failed, "
-                f"{len(report.defects)} defect(s)"
-                + (f" — {len(pr_caused)} returned to the developer" if pr_caused else "")
-                + (f" — filed {', '.join(f'#{n}' for n in filed)}" if filed else "")
+            log.info(
+                "test report posted",
+                pr=task.pr_number,
+                scenarios=len(report.scenarios),
+                failed=sum(1 for s in report.scenarios if s["result"] == "fail"),
+                defects=len(report.defects),
+                returned_to_dev=len(pr_caused),
+                filed=[f"#{n}" for n in filed] if filed else None,
             )
         except GitHubApiError as exc:
-            print(f"[scheduler] posting the test report failed (advisory, continuing): {exc}")
+            log.warning("posting the test report failed — advisory, continuing", error=str(exc))
 
     def _post_assessment(
         self, task: TaskRecord, parsed, head_sha: str = "", model: str | None = None
@@ -655,7 +666,7 @@ class Scheduler:
         """Posting is advisory — a failure degrades to 'no machine review this
         round' (logged), never a blocked task."""
         if self.reviewer_api is None:
-            print("[scheduler] no reviewer App configured — assessment not posted")
+            log.warning("no reviewer App configured — assessment not posted")
             return
         # The verdict is the review state: findings block, a clean pass approves.
         # A later review by the same App supersedes, so the red chip clears when
@@ -666,12 +677,9 @@ class Scheduler:
         body = format_review_body(parsed.verdict, head_sha, model)
         try:
             self.reviewer_api.post_review(task.pr_number, body, parsed.findings, event=event)
-            print(
-                f"[scheduler] review posted on PR #{task.pr_number}: "
-                f"{event} · {len(parsed.findings)} finding(s)"
-            )
+            log.info("review posted", pr=task.pr_number, verdict=event, findings=len(parsed.findings))
         except GitHubApiError as exc:
-            print(f"[scheduler] posting the review failed (advisory, continuing): {exc}")
+            log.warning("posting the review failed — advisory, continuing", error=str(exc))
 
     def _active_request_providers(self) -> list[str]:
         """Request-driver providers to fire on PR events (REVIEWERS.md) — today
@@ -686,19 +694,20 @@ class Scheduler:
         try:
             dropped = self.api.request_reviewers(task.pr_number, reviewers)
         except GitHubApiError as exc:
-            print(f"[scheduler] re-request failed (advisory, continuing): {exc}")
+            log.warning("re-request failed — advisory, continuing", error=str(exc))
             return
         requested = [r for r in reviewers if r not in dropped]
         if requested:
-            print(f"[scheduler] review requested on PR #{task.pr_number}: {', '.join(requested)}")
+            log.info("review requested", pr=task.pr_number, reviewers=requested)
         if COPILOT_REVIEWER in dropped:
-            print(
-                f"[scheduler] PR #{task.pr_number}: Copilot request dropped — GitHub only grants it "
-                f"to a user with a Copilot seat; set {COPILOT_TOKEN_ENV} in .env"
+            log.warning(
+                "Copilot request dropped — GitHub only grants it to a user with a Copilot seat",
+                pr=task.pr_number,
+                fix=f"set {COPILOT_TOKEN_ENV} in .env",
             )
             dropped = [r for r in dropped if r != COPILOT_REVIEWER]
         if dropped:
-            print(f"[scheduler] PR #{task.pr_number}: review request silently dropped for: {', '.join(dropped)}")
+            log.warning("review request silently dropped", pr=task.pr_number, reviewers=dropped)
 
     # --- failure rail ---
 
@@ -719,7 +728,7 @@ class Scheduler:
                     f"ℹ️ control plane: machine {stage} could not run ({reason}) — "
                     "left for the owner's review.",
                 )
-                print(f"[scheduler] task #{task.task_id}: machine {stage} given up: {reason}")
+                log.warning("machine stage given up", task=task.task_id, stage=stage, reason=reason)
             else:
                 task.status = TaskStatus.BLOCKED
                 task.next_burst_kind = None
@@ -729,8 +738,8 @@ class Scheduler:
                     "A human can re-add `ready` to retry.",
                 )
                 self.api.remove_label(number, "in-progress")
-                print(f"[scheduler] task #{task.task_id} blocked after {task.attempts} attempts: {reason}")
+                log.error("task blocked", task=task.task_id, attempts=task.attempts, reason=reason)
         else:
             task.status = TaskStatus.CLAIMED  # next_burst_kind unchanged — retry the same kind
-            print(f"[scheduler] task #{task.task_id} attempt {task.attempts} failed: {reason} — will retry")
+            log.warning("attempt failed — will retry", task=task.task_id, attempt=task.attempts, reason=reason)
         self.stores.ledger.upsert_task(task)

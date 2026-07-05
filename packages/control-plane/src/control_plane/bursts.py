@@ -11,6 +11,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import structlog
+
 from control_plane.github_auth import (
     AppCredentials,
     bot_git_identity,
@@ -21,6 +23,8 @@ from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, resolve
 from control_plane.store import LocalSessionArchive, SqliteLedger
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
+
+log = structlog.get_logger()
 
 
 @dataclass(slots=True)
@@ -93,7 +97,7 @@ def execute_burst(
     model = resolve_model(model)
     codex_auth = codex_auth_dir() if mount_codex else None
     if mode == "run":
-        print(f"[model] {model}")
+        log.info("burst starting", task=task.task_id, kind=kind, role=role, model=model)
 
     github_token = git_name = git_email = None
     if mode == "run" and with_github:
@@ -102,7 +106,7 @@ def execute_burst(
             minted = mint_installation_token(creds)
             github_token = minted.token
             git_name, git_email = bot_git_identity(minted, creds.app_id)
-            print(f"[github] burst pushes as {git_name} (token expires {minted.expires_at})")
+            log.info("github token minted", pushes_as=git_name, expires=minted.expires_at)
 
     burst_id = burst_id or uuid.uuid4().hex[:12]
     # fresh = amnesiac: no resume, and the volume isn't seeded with the task's
@@ -159,9 +163,15 @@ def execute_burst(
             task.transcript_checksum = outcome.transcript_checksum
         stores.ledger.upsert_task(task)
 
-    print(
-        f"[burst {burst_id}] exit={exit_code} status={burst.status} "
-        f"model={burst.model} session={burst.session_id} violations={outcome.violation_count} "
-        f"transcript={outcome.transcript_key} log={log_path}"
+    log.info(
+        "burst finished",
+        burst=burst_id,
+        exit=exit_code,
+        status=str(burst.status),
+        model=burst.model,
+        session=burst.session_id,
+        violations=outcome.violation_count,
+        transcript=outcome.transcript_key,
+        log=str(log_path),
     )
     return BurstOutcome(burst=burst, harvest=outcome, exit_code=exit_code, log_path=log_path)

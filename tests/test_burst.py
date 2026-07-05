@@ -111,6 +111,6 @@ def test_tool_use_is_logged_but_never_contaminates_final_text(tmp_path, monkeypa
                    session_dir=tmp_path / "session")
     result = burst.run_burst_sync(env)
     out = capsys.readouterr().out
-    assert '[tool] Bash {"command": "git diff"}' in out
+    assert "Bash" in out and "git diff" in out  # the structured tool event reaches the log
     assert result.final_text == '{"verdict": "ok", "findings": []}'
-    assert "[tool]" not in result.text_tail
+    assert "Bash" not in result.text_tail
