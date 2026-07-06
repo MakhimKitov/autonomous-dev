@@ -2,38 +2,179 @@
   "title": "Autonomous Maintenance Platform — Containers (C2) · MVP as built, 2026-07",
   "rankdir": "LR",
   "nodes": [
-    { "id": "scheduler", "type": "container", "name": "Control Plane / Scheduler", "tech": "[Python · reconciler]", "desc": "Tick: observe GitHub → advance the task state machine → run one burst (serial). Rails: attempts, review rounds, daily ceiling, hard budget cap; kill switch; crash recovery" },
-    { "id": "devBurst", "type": "container", "name": "Dev Burst", "tech": "[Docker · dev image · role: dev]", "desc": "Resumes the per-task session; clone rw; branch → code → test → open PR; replies in review threads (fix/reply/defer)" },
-    { "id": "assessBurst", "type": "container", "name": "Reviewer Burst (assess)", "tech": "[same image · role: reviewer]", "desc": "Fresh session; clone read-only at PR head; NO GitHub credential — findings return via harvest" },
-    { "id": "testBurst", "type": "container", "name": "Test Burst (tester)", "tech": "[same image · role: tester]", "desc": "Fresh session; NO GitHub credential; boots the product from the PR head, invents scenarios from TESTING.md + specs, runs them E2E" },
-    { "id": "ledger", "type": "database", "name": "Ledger", "tech": "[SQLite · data/ledger.db]", "desc": "tasks · bursts · violations: status, attempts, rounds, review cursor, session ids" },
-    { "id": "archive", "type": "database", "name": "Session Archive", "tech": "[filesystem · data/sessions + volumes]", "desc": "Task-keyed resumable transcripts; burst volumes kept for forensics. (Postgres + SeaweedFS = the designed scale-up, not built)" },
-
-    { "id": "humanOwner", "type": "person", "name": "Human Owner", "tech": "[Person]", "desc": "ready label (gate 1); review + merge (gate 2, CODEOWNERS)" },
-    { "id": "discordUsers", "type": "person", "name": "End Users", "tech": "[Person]", "desc": "Untrusted content source" },
-    { "id": "bot", "type": "external", "name": "Product", "tech": "[first instance: Discord bot]", "desc": "Maintained product; own repo, own CI" },
-    { "id": "github", "type": "external", "name": "GitHub", "tech": "[Issues · PRs · branch protection · CI]", "desc": "Integration substrate / source of truth for task + delivery state" },
-    { "id": "claude", "type": "external", "name": "Claude (Anthropic)", "tech": "[owner-subscription OAuth]", "desc": "Engine for all three burst roles" },
-    { "id": "copilot", "type": "external", "name": "GitHub Copilot", "tech": "[optional review provider]", "desc": "Requested per PR on the owner's PAT (echo-verified — App tokens are silently dropped)" },
-    { "id": "sandbox", "type": "external", "name": "Product Sandbox", "tech": "[test Discord app + empty guild]", "desc": "Disposable by construction; creds provisioned platform-side under TEST_*, injected into tester bursts only" },
-    { "id": "monitor", "type": "external", "name": "Monitor", "tech": "[phase 1+ — NOT BUILT]", "desc": "Will file auto issues from prod telemetry; the tester's symptom relay already exercises that pipeline" }
+    {
+      "id": "scheduler",
+      "type": "container",
+      "name": "Control Plane / Scheduler",
+      "tech": "Python",
+      "desc": "Reconciler: observes GitHub, advances per-task state machines, runs one burst at a time; enforces rails + kill switch"
+    },
+    {
+      "id": "devBurst",
+      "type": "container",
+      "name": "Dev Burst",
+      "tech": "Docker · claude-agent-sdk",
+      "desc": "Resumes the per-task session; clones rw, branches, codes, tests, opens the PR; replies in review threads"
+    },
+    {
+      "id": "assessBurst",
+      "type": "container",
+      "name": "Reviewer Burst (assess)",
+      "tech": "Docker · claude-agent-sdk",
+      "desc": "Same image, reviewer role: fresh session, read-only PR-head clone, no GitHub credential; findings return via harvest"
+    },
+    {
+      "id": "testBurst",
+      "type": "container",
+      "name": "Test Burst (tester)",
+      "tech": "Docker · claude-agent-sdk",
+      "desc": "Same image, tester role: fresh session, no GitHub credential; invents scenarios from TESTING.md, drives the product E2E"
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "name": "Ledger",
+      "tech": "SQLite",
+      "desc": "Run state: tasks, bursts, violations — status, attempts, review cursors, session ids"
+    },
+    {
+      "id": "archive",
+      "type": "database",
+      "name": "Session Archive",
+      "tech": "Local filesystem",
+      "desc": "Task-keyed resumable transcripts + per-burst volumes kept for forensics"
+    },
+    {
+      "id": "humanOwner",
+      "type": "person",
+      "name": "Human Owner",
+      "desc": "Approves work (ready label, gate 1); reviews and merges PRs (gate 2)"
+    },
+    {
+      "id": "discordUsers",
+      "type": "person",
+      "name": "End Users",
+      "desc": "Real users of the product; untrusted content source"
+    },
+    {
+      "id": "bot",
+      "type": "external",
+      "name": "Product",
+      "desc": "The maintained product (first instance: a Discord bot); own repo, own CI"
+    },
+    {
+      "id": "github",
+      "type": "external",
+      "name": "GitHub",
+      "desc": "Source of truth: issues = queue, PRs = delivery + review, branch protection = human gate, CI"
+    },
+    {
+      "id": "claude",
+      "type": "external",
+      "name": "Claude (Anthropic)",
+      "desc": "Agent engine for all three burst roles; owner-subscription OAuth token"
+    },
+    {
+      "id": "copilot",
+      "type": "external",
+      "name": "GitHub Copilot",
+      "desc": "Optional extra reviewer; requested per PR on the owner's PAT, echo-verified"
+    },
+    {
+      "id": "sandbox",
+      "type": "external",
+      "name": "Product Sandbox",
+      "desc": "Disposable test Discord app + empty guild; TEST_* creds injected into tester bursts only"
+    },
+    {
+      "id": "monitor",
+      "type": "external",
+      "name": "Monitor",
+      "desc": "Not built (phase 1+): will file auto issues from prod telemetry; the tester's relay already exercises this path"
+    }
   ],
   "edges": [
-    { "from": "discordUsers", "to": "bot", "label": "Use the product" },
-    { "from": "humanOwner", "to": "github", "label": "Triage (ready), review, merge" },
-    { "from": "scheduler", "to": "github", "label": "Polls issues/PRs/reviews; labels; posts reviews + test reports as the reviewer App; relays tester auto issues; requests Copilot (owner PAT)" },
-    { "from": "scheduler", "to": "devBurst", "label": "Spawns work/review bursts: task prompt + dev App token + seeded session volume [Docker]" },
-    { "from": "scheduler", "to": "assessBurst", "label": "Spawns on PR open + after every push" },
-    { "from": "scheduler", "to": "testBurst", "label": "Spawns after a clean assess (APPROVE); injects TESTING.md ∩ TEST_* env" },
-    { "from": "scheduler", "to": "ledger", "label": "Run state (claims, attempts, cursors)" },
-    { "from": "scheduler", "to": "archive", "label": "Seed volume before boot; harvest result + session after" },
-    { "from": "devBurst", "to": "github", "label": "Clone, push dev/<n>-*, open PR, reply in threads [dev App token]" },
-    { "from": "devBurst", "to": "claude", "label": "Agent loop [API]" },
-    { "from": "assessBurst", "to": "claude", "label": "Agent loop [API]" },
-    { "from": "testBurst", "to": "claude", "label": "Agent loop [API]" },
-    { "from": "testBurst", "to": "sandbox", "label": "Boots the product, drives scenarios E2E" },
-    { "from": "copilot", "to": "github", "label": "Reviews when requested", "dashed": true },
-    { "from": "github", "to": "bot", "label": "CI deploys on human merge" },
-    { "from": "monitor", "to": "github", "label": "Files auto issues (future)", "dashed": true }
+    {
+      "from": "discordUsers",
+      "to": "bot",
+      "label": "Use the product"
+    },
+    {
+      "from": "humanOwner",
+      "to": "github",
+      "label": "Triage (ready), review, merge"
+    },
+    {
+      "from": "scheduler",
+      "to": "github",
+      "label": "Polls state; posts reviews, reports + labels [API]"
+    },
+    {
+      "from": "scheduler",
+      "to": "devBurst",
+      "label": "Spawns with prompt + seeded session [Docker]"
+    },
+    {
+      "from": "scheduler",
+      "to": "assessBurst",
+      "label": "Spawns per PR push [Docker]"
+    },
+    {
+      "from": "scheduler",
+      "to": "testBurst",
+      "label": "Spawns after clean assess [Docker]"
+    },
+    {
+      "from": "scheduler",
+      "to": "ledger",
+      "label": "Reads/writes run state [SQL]"
+    },
+    {
+      "from": "scheduler",
+      "to": "archive",
+      "label": "Seeds volume; harvests result + session"
+    },
+    {
+      "from": "devBurst",
+      "to": "github",
+      "label": "Clones, pushes, opens PRs [dev App token]"
+    },
+    {
+      "from": "devBurst",
+      "to": "claude",
+      "label": "Agent loop [API]"
+    },
+    {
+      "from": "assessBurst",
+      "to": "claude",
+      "label": "Agent loop [API]"
+    },
+    {
+      "from": "testBurst",
+      "to": "claude",
+      "label": "Agent loop [API]"
+    },
+    {
+      "from": "testBurst",
+      "to": "sandbox",
+      "label": "Boots the product, drives scenarios E2E"
+    },
+    {
+      "from": "copilot",
+      "to": "github",
+      "label": "Reviews when requested",
+      "dashed": true
+    },
+    {
+      "from": "github",
+      "to": "bot",
+      "label": "CI deploys on human merge"
+    },
+    {
+      "from": "monitor",
+      "to": "github",
+      "label": "Files auto issues (future)",
+      "dashed": true
+    }
   ]
 }
