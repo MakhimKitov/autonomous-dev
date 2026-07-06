@@ -1,0 +1,48 @@
+{
+  "title": "Autonomous Maintenance Platform — Containers (C2) · TO-BE target, org-wide",
+  "rankdir": "LR",
+  "nodes": [
+    { "id": "controlPlane", "type": "container", "name": "Control Plane", "tech": "[k8s Deployment · leader-elected reconciler]", "desc": "Per-task state machines; fair share across products × token availability; rails at burst/task/product/subscription/org level; webhook wake-up, poll for truth" },
+    { "id": "runners", "type": "container", "name": "Burst Runners", "tech": "[k8s Jobs · microVM runtime (Kata / e2b — DR) · dev / reviewer / tester]", "desc": "One Job per burst; warm image per product family; no k8s API, egress allowlist; session materialized before boot, harvested after" },
+    { "id": "webhookRx", "type": "container", "name": "Webhook Receiver", "tech": "[stateless · behind ingress · the ONLY public surface]", "desc": "Verifies HMAC per App secret, dedups by delivery id, emits wake events — holds no other credential; forgery ≤ one extra poll" },
+    { "id": "console", "type": "container", "name": "Console + CLI", "tech": "[web GUI · live · Fermata SSO]", "desc": "LIVE fleet state + streaming burst logs (SSE/WS); task timelines, usage per subscription, violations feed, memory browser; audited operator actions" },
+    { "id": "monitor", "type": "container", "name": "Monitor", "tech": "[k8s Deployment · per-product watchers · wave T4]", "desc": "Files structured auto issues from telemetry (integration-breakage detectors first); rate-limited, behind the ready gate" },
+    { "id": "ledger", "type": "database", "name": "Ledger", "tech": "[Postgres]", "desc": "tasks · bursts · violations + products, quotas, subscriptions, audit log — same protocol as the MVP's SQLite" },
+    { "id": "archive", "type": "database", "name": "Session Archive", "tech": "[S3-compatible object store]", "desc": "Task-keyed resumable transcripts, checksummed; retention policy applies here" },
+    { "id": "memory", "type": "database", "name": "Platform Memory", "tech": "[per-product namespaces · provenance on every entry]", "desc": "Product + platform tiers; written only via harvest (agent proposes), read only via prompt assembly as auto-class data; gardener + human browser" },
+    { "id": "otel", "type": "container", "name": "Observability", "tech": "[OTel collector → org backend]", "desc": "Trace-per-burst, task correlation; feeds the console's live streams and the standing dashboards; agents emit, never read" },
+
+    { "id": "owners", "type": "person", "name": "Product Teams", "tech": "[Person · per repo]", "desc": "Own both gates in GitHub: ready label + review & merge; watch their products live in the console; contribute subscriptions to the pool" },
+    { "id": "operators", "type": "person", "name": "Platform Team", "tech": "[Person]", "desc": "Registers products, sets quotas, manages the pool, handles incidents — through the console, never SQL" },
+    { "id": "github", "type": "external", "name": "GitHub (Fermata org)", "tech": "[4 org Apps: dev · reviewer · tester · monitor]", "desc": "Issues, PRs, reviews, branch protection, CI — per-repo-scoped tokens minted per burst" },
+    { "id": "products", "type": "external", "name": "Product Repos ×N", "tech": "[fermata/* · own CI]", "desc": "Each carries its contracts: CLAUDE.md + TESTING.md (socket and plug)" },
+    { "id": "sandboxes", "type": "external", "name": "Product Sandboxes", "tech": "[per product · declared · disposable]", "desc": "TEST_* creds from the secret manager, injected into tester bursts only" },
+    { "id": "anthropic", "type": "external", "name": "Claude (Anthropic)", "tech": "[team subscription pool — NOT API billing]", "desc": "Opt-in member tokens with usage caps; rate-limit-aware rotation; every burst attributed to its subscription" },
+    { "id": "secrets", "type": "external", "name": "Secret Manager", "tech": "[Vault / External Secrets]", "desc": "Platform creds + registered subscription tokens + per-product TEST_* sets; injected at spawn, never archived" },
+    { "id": "slack", "type": "external", "name": "Slack", "tech": "[per-team channels]", "desc": "Ball-is-with-you nudges + budget/violation alerts; deep links only, never actionable" },
+    { "id": "telemetry", "type": "external", "name": "Org Telemetry", "tech": "[logs · metrics · Alertmanager]", "desc": "Existing signals from running products; the monitor's input" }
+  ],
+  "edges": [
+    { "from": "owners", "to": "github", "label": "Gate 1: ready · Gate 2: review + merge" },
+    { "from": "owners", "to": "console", "label": "Live view of their products; pool opt-in + caps" },
+    { "from": "operators", "to": "console", "label": "Register products, quotas, pool, overrides (audited)" },
+    { "from": "console", "to": "controlPlane", "label": "Operator API + live event stream [SSO, audit]" },
+    { "from": "controlPlane", "to": "ledger", "label": "Run state, quotas, audit" },
+    { "from": "controlPlane", "to": "archive", "label": "Materialize / harvest sessions" },
+    { "from": "controlPlane", "to": "memory", "label": "Recall at spawn (scope-filtered) · store proposals at harvest" },
+    { "from": "controlPlane", "to": "github", "label": "Polls for truth; posts reviews + reports; mints per-repo tokens" },
+    { "from": "github", "to": "webhookRx", "label": "App webhook events (HMAC-signed) — zero per-repo config", "dashed": true },
+    { "from": "webhookRx", "to": "controlPlane", "label": "Wake events (repo, kind) — never truth", "dashed": true },
+    { "from": "controlPlane", "to": "runners", "label": "Spawns Jobs: prompt + role envelope + memory context + rails" },
+    { "from": "controlPlane", "to": "secrets", "label": "Fetch creds + pool token at spawn" },
+    { "from": "controlPlane", "to": "slack", "label": "Nudges + alerts", "dashed": true },
+    { "from": "runners", "to": "github", "label": "Dev role only: clone, push, PR [scoped App token]" },
+    { "from": "runners", "to": "anthropic", "label": "Agent loop [pooled token; mechanism B keeps it on the member's device]" },
+    { "from": "runners", "to": "sandboxes", "label": "Tester role: boots product, drives E2E" },
+    { "from": "runners", "to": "otel", "label": "Traces, metrics, events", "dashed": true },
+    { "from": "monitor", "to": "telemetry", "label": "Watches [read-only]" },
+    { "from": "monitor", "to": "github", "label": "Files auto issues (rate-limited)" },
+    { "from": "products", "to": "telemetry", "label": "Emit signals", "dashed": true },
+    { "from": "github", "to": "products", "label": "CI deploys on human merge" }
+  ]
+}
