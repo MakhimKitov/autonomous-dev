@@ -12,7 +12,7 @@ Postgres DDL below is authoritative and the SQLite schema derives from it.
 
 | Store | Owns | Service backend | Single-node variant |
 |---|---|---|---|
-| **Ledger** | queryable run state: products, tasks, bursts, violations, audit, subscriptions, events, memory, roles | `PostgresLedger` (A3) | `SqliteLedger`, as built |
+| **Ledger** | queryable run state: repositories, tasks, bursts, violations, audit, subscriptions, events, memory, roles | `PostgresLedger` (A3) | `SqliteLedger`, as built |
 | **SessionArchive** | immutable transcript snapshots, one per burst | S3-compatible bucket (A5) | local directory |
 
 Rules that hold across both, carried over from the MVP:
@@ -49,7 +49,7 @@ RETURNING *;
 
 Anyone may reclaim a lapsed lease; renewal is the same statement guarded by
 `claimed_by = $replica`. The `claimed_by`/`claimed_until` pair is the one lease
-pattern; `tasks` carries it now, `products` carries it for observation ticks
+pattern; `tasks` carries it now, `repositories` carries it for observation ticks
 (fanned out at E2).
 
 **Transition — compare-and-set.** Rowcount decides, never a read-then-write:
@@ -66,9 +66,9 @@ commit atomically or not at all:
 WITH moved AS (
     UPDATE tasks SET status = 'blocked', updated_at = now()
     WHERE task_id = $1 AND status = 'working'
-    RETURNING task_id, repo)
+    RETURNING task_id, repository)
 INSERT INTO events (kind, payload)
-SELECT 'task_blocked', jsonb_build_object('task_id', task_id, 'repo', repo)
+SELECT 'task_blocked', jsonb_build_object('task_id', task_id, 'repository', repository)
 FROM moved;
 ```
 
@@ -101,11 +101,12 @@ walls (below). Migrations are numbered SQL files applied by the
 (A2).
 
 ```sql
--- products — the tenancy unit (TO-BE §2). Defaults are materialized, not
--- inherited: `product register` fills every policy/quota column from platform
+-- repositories — one row per registered repository; implements TO-BE §2's
+-- product model (product:repository is 1:1 by DR). Defaults are materialized,
+-- not inherited: registration fills every policy/quota column from platform
 -- config; the row is the entire truth, no NULL-means-inherit.
-CREATE TABLE products (
-    repo            text PRIMARY KEY,          -- 'owner/name'
+CREATE TABLE repositories (
+    repository      text PRIMARY KEY,          -- 'owner/name'
     team            text NOT NULL,
     state           text NOT NULL CHECK (state IN ('active', 'paused')),
     review_enabled  boolean NOT NULL,
@@ -162,7 +163,7 @@ CREATE TABLE subscriptions (
 -- and joins the GitHub world for free.
 CREATE TABLE tasks (
     task_id         text PRIMARY KEY,          -- '{owner}/{repo}#{issue_number}'
-    repo            text NOT NULL REFERENCES products (repo),
+    repository      text NOT NULL REFERENCES repositories (repository),
     issue_number    integer NOT NULL,
     status          text NOT NULL CHECK (status IN
                       ('open', 'claimed', 'working', 'awaiting_review', 'blocked', 'done')),
@@ -176,7 +177,7 @@ CREATE TABLE tasks (
     claimed_until   timestamptz,
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (repo, issue_number)
+    UNIQUE (repository, issue_number)
 );
 
 -- bursts — history-preserving, not append-only: a row transitions while
@@ -250,15 +251,15 @@ CREATE TABLE events (
 CREATE TABLE memory_entries (
     id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     scope             text NOT NULL CHECK (scope IN ('product', 'platform', 'role')),
-    repo              text REFERENCES products (repo),
+    repository        text REFERENCES repositories (repository),
     role              text REFERENCES roles (role),
     claim             text NOT NULL,
     evidence          text NOT NULL,
     proposed_by_burst text REFERENCES bursts (burst_id),  -- provenance
-    status            text NOT NULL CHECK (status IN ('active', 'retired', 'contradicted')),
+    status            text NOT NULL CHECK (status IN ('proposed', 'active', 'retired')),
     created_at        timestamptz NOT NULL DEFAULT now(),
     updated_at        timestamptz NOT NULL DEFAULT now(),
-    CHECK ((scope = 'product') = (repo IS NOT NULL)),
+    CHECK ((scope = 'product') = (repository IS NOT NULL)),
     CHECK ((scope = 'role') = (role IS NOT NULL))
 );
 
@@ -279,7 +280,7 @@ INSERT INTO org_state DEFAULT VALUES;
 |---|---|
 | One running burst per task | `bursts_one_running_per_task` partial unique index |
 | A burst finalizes exactly once | CAS: `UPDATE bursts SET … WHERE burst_id = $1 AND status = 'running'` — rowcount 0 means already finalized or killed; plus the `running ⟺ finished_at IS NULL` CHECK |
-| One task per issue | `UNIQUE (repo, issue_number)`; the derived `task_id` makes collisions unrepresentable |
+| One task per issue | `UNIQUE (repository, issue_number)`; the derived `task_id` makes collisions unrepresentable |
 | `violations` / `audit` / `events` are append-only | grants: `platform_app` gets `SELECT, INSERT` only — append-only is a grant, not a promise |
 | Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows; CHECKs pin the `identity`/`sink` enumerations for every row |
 | No secret values at rest | nothing to enforce — no column exists for a value; refs only |
@@ -351,7 +352,7 @@ What Stage A moves, and where:
 
 | MVP shape | Target shape | Issue |
 |---|---|---|
-| `tasks.task_id` = bare issue number | derived `owner/repo#n` + `repo` FK + `issue_number` | A6 |
+| `tasks.task_id` = bare issue number | derived `owner/repo#n` + `repository` FK + `issue_number` | A6 |
 | `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5, backfilled at A6 |
 | ISO-`TEXT` timestamps everywhere | `timestamptz` columns, strings at the edge | A3 |
 | `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb | A2 |

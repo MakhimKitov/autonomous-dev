@@ -1,0 +1,475 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="data-model-to-be" name="Data model TO-BE">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1560" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="&lt;b&gt;Autonomous Maintenance Platform — Data model · TO-BE block 1 (the state block), 2026-07&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;GitHub owns task &amp;amp; delivery state · Postgres owns run + org state (Ledger protocol) · the object store owns transcripts (SessionArchive protocol) · tokens stay in the secret manager — correlated by ids, never mirrored · (new) = lands empty in block 1, filled by later blocks&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=16;" vertex="1" parent="1">
+          <mxGeometry x="30" y="15" width="1200" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bGithub" value="GITHUB — task + delivery state, referenced by id · unchanged" style="rounded=1;dashed=1;fillColor=none;strokeColor=#666666;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#666666;html=1;" vertex="1" parent="1">
+          <mxGeometry x="25" y="80" width="300" height="590" as="geometry" />
+        </mxCell>
+        <mxCell id="bLedger" value="POSTGRES LEDGER — run + org state · same Ledger protocol, real types (was SQLite: data/ledger.db)" style="rounded=1;dashed=1;fillColor=none;strokeColor=#6c8ebf;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#6c8ebf;html=1;" vertex="1" parent="1">
+          <mxGeometry x="415" y="80" width="710" height="1440" as="geometry" />
+        </mxCell>
+        <mxCell id="bStore" value="OBJECT STORE — S3-compatible · same SessionArchive protocol (was data/sessions/ tarballs)" style="rounded=1;dashed=1;fillColor=none;strokeColor=#82b366;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#82b366;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="80" width="390" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="bFs" value="FILESYSTEM — runner-local working state · ephemeral, unchanged" style="rounded=1;dashed=1;fillColor=none;strokeColor=#82b366;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#82b366;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="310" width="390" height="310" as="geometry" />
+        </mxCell>
+        <mxCell id="bSecrets" value="SECRET MANAGER — Vault / External Secrets · org-owned" style="rounded=1;dashed=1;fillColor=none;strokeColor=#d79b00;verticalAlign=bottom;align=left;spacingLeft=8;fontSize=10;fontColor=#d79b00;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="660" width="390" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="issue" value="Issue #N" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="260" height="126" as="geometry" />
+        </mxCell>
+        <mxCell id="i1" value="PK  number — = tasks.task_id" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="issue">
+          <mxGeometry y="30" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="i2" value="provenance label — human | auto" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="issue">
+          <mxGeometry y="54" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="i3" value="lifecycle labels — ready · in-progress · blocked" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="issue">
+          <mxGeometry y="78" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="i4" value="body — the spec; trust follows provenance" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="issue">
+          <mxGeometry y="102" width="260" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pr" value="Pull Request #P" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="40" y="300" width="260" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="p1" value="PK  number — = tasks.pr_number" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="pr">
+          <mxGeometry y="30" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="p2" value="head branch — dev/{n}-{slug}" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="pr">
+          <mxGeometry y="54" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="p3" value="body — Closes #N · evidence per FR" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="pr">
+          <mxGeometry y="78" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="p4" value="review threads — the round conversation" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="pr">
+          <mxGeometry y="102" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="p5" value="merge — human only (gate 2)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="pr">
+          <mxGeometry y="126" width="260" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rev" value="PR Review" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="40" y="520" width="260" height="126" as="geometry" />
+        </mxCell>
+        <mxCell id="r1" value="PK  id — immutable, monotonic" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="rev">
+          <mxGeometry y="30" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="r2" value="author — owner · reviewer App · Copilot" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="rev">
+          <mxGeometry y="54" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="r3" value="state — request-changes · approve · commented" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="rev">
+          <mxGeometry y="78" width="260" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="r4" value="inline findings — drive dev rounds" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="rev">
+          <mxGeometry y="102" width="260" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="tasks" value="tasks" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="430" y="110" width="310" height="342" as="geometry" />
+        </mxCell>
+        <mxCell id="t1" value="PK  task_id — {owner}/{repo}#{n} · derived" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="30" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t2" value="FK  repository  TEXT → repositories — the tenancy key" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="54" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t3" value="issue_number  INTEGER — unique per repository" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="78" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t4" value="status  TEXT — the state machine (see domains)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="102" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t5" value="session_id  TEXT — the resumable Claude session" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="126" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t6" value="transcript_key · checksum — head snapshot (leaf)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="150" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t7" value="FK  pr_number  INTEGER → Pull Request" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="174" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t8" value="attempts · review_rounds  INTEGER — rail counters" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="198" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t9" value="claimed_by · claimed_until — replica lease (§5)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="222" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t10" value="next_burst_kind  TEXT — the queued burst" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="246" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t11" value="last_review_id  INTEGER — the review cursor" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="270" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t12" value="last_burst_at  TIMESTAMPTZ — cooldown anchor" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="294" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="t13" value="created_at · updated_at  TIMESTAMPTZ" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="tasks">
+          <mxGeometry y="318" width="310" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bursts" value="bursts  (history-preserving)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="430" y="496" width="310" height="414" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" value="PK  burst_id  TEXT" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="30" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b2" value="FK  task_id  TEXT → tasks" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="54" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" value="FK  subscription_id → subscriptions — NULL until pool" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="78" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b4" value="FK  resumed_from_burst_id → bursts — session-tree edge" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="102" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b5" value="kind  TEXT — work · review · assess · test" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="126" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b6" value="FK  role → roles — dev · reviewer · tester · custom" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="150" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b7" value="status  TEXT — running · succeeded · failed · killed" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="174" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b8" value="trace_id  TEXT — per-burst trace correlation" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="198" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b9" value="started_at · finished_at  TIMESTAMPTZ" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="222" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b10" value="exit_code · num_turns  INTEGER" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="246" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b11" value="model  TEXT — resolved beats requested" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="270" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b12" value="cost_usd  NUMERIC — advisory under subscriptions" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="294" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b13" value="input_tokens · output_tokens  BIGINT" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="318" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b14" value="session_id  TEXT — captured from the init message" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="342" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b15" value="unique(task_id) WHERE running — serialization wall (DR)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=10;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="366" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="b16" value="finalized once: running → terminal · never deleted" style="text;strokeColor=none;fillColor=none;html=1;fontSize=10;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="bursts">
+          <mxGeometry y="390" width="310" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="violations" value="violations  (the tripwire dataset)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="430" y="944" width="310" height="222" as="geometry" />
+        </mxCell>
+        <mxCell id="v1" value="PK  id  BIGSERIAL" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="30" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v2" value="FK  task_id  TEXT → tasks" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="54" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v3" value="FK  burst_id  TEXT → bursts" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="78" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v4" value="tool  TEXT — the blocked tool call" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="102" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v5" value="reason  TEXT — which wall / tripwire" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="126" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v6" value="detail  TEXT — the offending input" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="150" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v7" value="at  TIMESTAMPTZ" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="174" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="v8" value="append-only — INSERT/SELECT grants only" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="violations">
+          <mxGeometry y="198" width="310" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="products" value="repositories  (new — §2 tenancy unit)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="780" y="110" width="330" height="246" as="geometry" />
+        </mxCell>
+        <mxCell id="pd1" value="PK  repository  TEXT — {owner}/{name}" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="30" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd2" value="team  TEXT — owning team · gate authority" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="54" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd3" value="slack_channel  TEXT — notifications" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="78" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd4" value="review_enabled · review_provider — toggle + selector" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="102" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd5" value="e2e_enabled  BOOLEAN" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="126" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd6" value="concurrency · daily_bursts  INTEGER — quotas" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="150" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd7" value="usage_share  NUMERIC — fair-share weight" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="174" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd8" value="state  TEXT — active · paused" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="198" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="pd9" value="registered_at  TIMESTAMPTZ · registered_by  TEXT" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="products">
+          <mxGeometry y="222" width="330" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="subs" value="subscriptions  (new — §4 token pool)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="780" y="400" width="330" height="174" as="geometry" />
+        </mxCell>
+        <mxCell id="s1" value="PK  subscription_id  TEXT" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="subs">
+          <mxGeometry y="30" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="member  TEXT — SSO identity of the contributor" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="subs">
+          <mxGeometry y="54" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="secret_ref  TEXT — reference only · token never lands here" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="subs">
+          <mxGeometry y="78" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="usage_cap · backoff_until — member&#39;s cap · rate-limit CAS" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="subs">
+          <mxGeometry y="102" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="s5" value="state  TEXT — active · revoked · expired" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="subs">
+          <mxGeometry y="126" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="s6" value="registered_at · expires_at  TIMESTAMPTZ — 1-year tokens" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="subs">
+          <mxGeometry y="150" width="330" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="events" value="events  (new — the outbox)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="780" y="618" width="330" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="PK  id  BIGSERIAL — the console&#39;s replay cursor" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="events">
+          <mxGeometry y="30" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="kind  TEXT — see domains" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="events">
+          <mxGeometry y="54" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="repository · task_id · burst_id  TEXT — correlation, no FKs" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="events">
+          <mxGeometry y="78" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="at  TIMESTAMPTZ" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="events">
+          <mxGeometry y="102" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="same txn as the mutation · NOTIFY = liveness (DR)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="events">
+          <mxGeometry y="126" width="330" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="audit" value="audit  (new)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="780" y="812" width="330" height="174" as="geometry" />
+        </mxCell>
+        <mxCell id="au1" value="PK  id  BIGSERIAL" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="audit">
+          <mxGeometry y="30" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="au2" value="actor  TEXT — SSO identity" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="audit">
+          <mxGeometry y="54" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="au3" value="action  TEXT · target_kind · target_id  TEXT" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="audit">
+          <mxGeometry y="78" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="au4" value="reason  TEXT — who/when/why (finding #9)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="audit">
+          <mxGeometry y="102" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="au5" value="at  TIMESTAMPTZ" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="audit">
+          <mxGeometry y="126" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="au6" value="append-only — every mutating operator action" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="audit">
+          <mxGeometry y="150" width="330" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="memory" value="memory_entries  (new — §9)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="780" y="1030" width="330" height="198" as="geometry" />
+        </mxCell>
+        <mxCell id="m1" value="PK  id  BIGSERIAL" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="30" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m2" value="scope  TEXT — product · platform" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="54" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m3" value="repository · role  TEXT — recall filters" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="78" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m4" value="claim · evidence  TEXT — a datum, not an instruction" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="102" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m5" value="task_id · burst_id  TEXT — provenance to the proposing burst" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="126" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m6" value="status  TEXT — proposed · active · retired" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="150" width="330" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="m7" value="created_at · verified_at  TIMESTAMPTZ" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="memory">
+          <mxGeometry y="174" width="330" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="archive" value="sessions/{task_id}/{burst_id}/" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="110" width="360" height="126" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" value="session.tar.gz — immutable snapshot = tree node" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="archive">
+          <mxGeometry y="30" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="sha256 — object metadata, verified on get" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="archive">
+          <mxGeometry y="54" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="credentials excluded unconditionally" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="archive">
+          <mxGeometry y="78" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="lifecycle — retention is bucket policy, not code (§15)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="archive">
+          <mxGeometry y="102" width="360" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="volume" value="volumes/{burst_id}/" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="340" width="360" height="126" as="geometry" />
+        </mxCell>
+        <mxCell id="w1" value="= the mounted CLAUDE_CONFIG_DIR" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="volume">
+          <mxGeometry y="30" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="w2" value="session JSONL — SDK-owned local storage" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="volume">
+          <mxGeometry y="54" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="w3" value="burst-result.json — written in finally" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="volume">
+          <mxGeometry y="78" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="w4" value="violations.jsonl — harvested into the ledger" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="volume">
+          <mxGeometry y="102" width="360" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="clone" value="clones/{owner}__{repo}/" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="506" width="360" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" value="working tree — rw for dev · ro at PR head for assess + test" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="clone">
+          <mxGeometry y="30" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" value="re-synced to origin before every mount" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="clone">
+          <mxGeometry y="54" width="360" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="secrets" value="secret manager (Vault / ESO)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#333333;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="690" width="360" height="102" as="geometry" />
+        </mxCell>
+        <mxCell id="sm1" value="subscription tokens — resolved by secret_ref" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="secrets">
+          <mxGeometry y="30" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="sm2" value="TEST_* sandbox sets — injected at spawn, per product" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="secrets">
+          <mxGeometry y="54" width="360" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="sm3" value="never in the ledger, images, or archive" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="secrets">
+          <mxGeometry y="78" width="360" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;Domains&lt;/b&gt;&lt;br&gt;tasks.status — open · claimed · working · awaiting_review · blocked · done&lt;br&gt;bursts.kind — work · review · assess · test · bursts.role — dev · reviewer · tester&lt;br&gt;bursts.status — running · succeeded · failed · killed&lt;br&gt;repositories.state — active · paused · subscriptions.state — active · revoked · expired&lt;br&gt;memory_entries.status — proposed · active · retired&lt;br&gt;events.kind — task_changed · burst_started · burst_finished · violation&lt;br&gt;roles.kind — pipeline · custom · roles.sink — pr · review · report · issue · event" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;fontSize=11;align=left;verticalAlign=top;fillColor=#fff2cc;strokeColor=#d6b656;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="700" width="350" height="178" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend2" value="&lt;b&gt;Schema now, features later&lt;/b&gt;&lt;br&gt;Block 1 ships every table; later blocks fill them — repositories (block 3, registry), subscriptions (block 7, pool), events → console (block 8), memory_entries (T1 write path). audit records from the first operator API call.&lt;br&gt;Session tree: per-burst snapshots + lineage land in block 1; fork rails (retry-vs-branch, branch summaries) in T1.&lt;br&gt;Roles: pipeline rows seeded in block 1; custom roles + triggers arrive with T4 event machinery." style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;fontSize=11;align=left;verticalAlign=top;fillColor=#fff2cc;strokeColor=#d6b656;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="900" width="350" height="178" as="geometry" />
+        </mxCell>
+
+        <mxCell id="roles" value="roles  (new — §4 ceilings in code)" style="swimlane;childLayout=stackLayout;horizontal=1;startSize=30;horizontalStack=0;rounded=1;fontSize=13;fontStyle=1;strokeWidth=1;resizeParent=0;resizeLast=1;shadow=0;dashed=0;align=center;arcSize=4;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;swimlaneFillColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="430" y="1210" width="310" height="294" as="geometry" />
+        </mxCell>
+        <mxCell id="ro1" value="PK  name  TEXT — dev · reviewer · tester · monitor seeded" style="text;strokeColor=none;fillColor=none;html=1;fontSize=10;fontStyle=5;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="30" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro2" value="kind  TEXT — pipeline (walls frozen) · custom" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="54" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro3" value="prompt  TEXT — role preamble" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="78" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro4" value="tools  TEXT[] — subset of code allowlist · walls = floor" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="102" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro5" value="model · max_budget · max_turns — defaults" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="126" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro6" value="identity  TEXT — none · automation (pipeline: code-bound)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=11;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="150" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro7" value="mount  TEXT — ro · rw" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="174" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro8" value="sink  TEXT — see domains" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="198" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro9" value="trigger  TEXT — funnel · schedule · event (T4)" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="222" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro10" value="state  TEXT — active · disabled" style="text;strokeColor=none;fillColor=none;html=1;fontSize=12;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="246" width="310" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="ro11" value="wall fields frozen for pipeline rows — CHECK + grants" style="text;strokeColor=none;fillColor=none;html=1;fontSize=10;fontStyle=2;align=left;verticalAlign=middle;spacingLeft=6;spacingRight=4;whiteSpace=wrap;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="roles">
+          <mxGeometry y="270" width="310" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eTaskIssue" value="= issue #" style="edgeStyle=entityRelationEdgeStyle;fontSize=11;html=1;rounded=0;exitX=0;exitY=0.5;entryX=1;entryY=0.5;startArrow=ERzeroToOne;startFill=0;endArrow=ERmandOne;endFill=0;" edge="1" parent="1" source="t1" target="i1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskPr" value="" style="edgeStyle=entityRelationEdgeStyle;fontSize=11;html=1;rounded=0;exitX=0;exitY=0.5;entryX=1;entryY=0.5;startArrow=ERmandOne;startFill=0;endArrow=ERzeroToOne;endFill=0;" edge="1" parent="1" source="t7" target="p1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskReview" value="review cursor (last seen)" style="edgeStyle=entityRelationEdgeStyle;fontSize=11;html=1;rounded=0;exitX=0;exitY=0.5;entryX=1;entryY=0.5;startArrow=ERmandOne;startFill=0;endArrow=ERzeroToOne;endFill=0;" edge="1" parent="1" source="t11" target="r1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ePrReview" value="" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;startArrow=ERmandOne;startFill=0;endArrow=ERzeroToMany;endFill=0;" edge="1" parent="1" source="pr" target="rev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBurstTask" value="task_id" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=0;exitX=0.5;exitY=0;entryX=0.5;entryY=1;startArrow=ERzeroToMany;startFill=0;endArrow=ERmandOne;endFill=0;" edge="1" parent="1" source="bursts" target="tasks">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eViolBurst" value="burst_id (+ task_id)" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=0;exitX=0.5;exitY=0;entryX=0.5;entryY=1;startArrow=ERzeroToMany;startFill=0;endArrow=ERmandOne;endFill=0;" edge="1" parent="1" source="violations" target="bursts">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskProduct" value="repository" style="edgeStyle=entityRelationEdgeStyle;fontSize=11;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;startArrow=ERzeroToMany;startFill=0;endArrow=ERmandOne;endFill=0;" edge="1" parent="1" source="t2" target="pd1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBurstSubs" value="" style="edgeStyle=entityRelationEdgeStyle;fontSize=11;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.95;startArrow=ERzeroToMany;startFill=0;endArrow=ERzeroToOne;endFill=0;" edge="1" parent="1" source="b3" target="subs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eTaskArchive" value="transcript_key — the leaf" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;startArrow=ERmandOne;startFill=0;endArrow=ERzeroToOne;endFill=0;" edge="1" parent="1" source="t6" target="archive">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="760" y="95" />
+              <mxPoint x="1150" y="95" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="eBurstVolume" value="one volume per burst" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=0;exitX=1;exitY=0.26;entryX=0;entryY=0.5;startArrow=ERmandOne;startFill=0;endArrow=ERmandOne;endFill=0;" edge="1" parent="1" source="bursts" target="volume">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1140" y="597" />
+              <mxPoint x="1140" y="403" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="eVolArchive" value="harvest — dev sessions only; reviewer/tester never archived" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=1;dashed=1;exitX=0.5;exitY=0;entryX=0.5;entryY=1;endArrow=open;" edge="1" parent="1" source="volume" target="archive">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eSubsSecret" value="resolved at spawn" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;html=1;rounded=1;dashed=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;endArrow=open;" edge="1" parent="1" source="s3" target="secrets">
+          <mxGeometry x="0.85" relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1130" y="502" />
+              <mxPoint x="1130" y="741" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
