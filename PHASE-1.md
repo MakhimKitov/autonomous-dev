@@ -24,7 +24,7 @@ the checkpoints below.
 
 Regressions have nowhere to hide at:
 
-- **A7 (#18)** — the MVP runs byte-for-byte on Postgres + MinIO.
+- **A7 (#18)** — the MVP runs byte-for-byte on Postgres + SeaweedFS.
 - **C4 (#26)** — the registry-driven scheduler runs two products serially; with one
   product registered, behavior is byte-for-byte the MVP's.
 - **E6 (#37)** — the laptop retires: two stateless replicas + the public receiver

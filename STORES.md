@@ -361,7 +361,7 @@ What Stage A moves, and where:
 
 The `Ledger` protocol keeps its nine MVP methods; new verbs (claim, CAS
 transition, finalize) arrive additively at A3 so `SqliteLedger` callers never
-change. Gate A7: the MVP scenario runs byte-for-byte on Postgres + MinIO with
+change. Gate A7: the MVP scenario runs byte-for-byte on Postgres + SeaweedFS with
 `LEDGER_DSN`/`ARCHIVE_URL` set, and identically with them unset.
 
 ## Deliberately out
