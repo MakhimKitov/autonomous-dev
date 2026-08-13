@@ -72,6 +72,29 @@ declare quotas, provision sandbox creds. **No platform code changes per product*
 if a product needs platform code, the socket-and-plug boundary was violated and the
 design review should catch it.
 
+Registration mechanics *(DR)*:
+
+- **Defaults are materialized, not inherited.** `product register` fills every
+  policy/quota column from `.env`-shaped platform defaults unless overridden —
+  the row is the entire truth about a product; no NULL-means-inherit, no
+  resolution logic. A changed platform default never retro-propagates: changing
+  a live product is an operator action against that product, audited.
+- **Preflight = operability gate + socket lint.** Hard refusals only for
+  declarations the platform cannot execute: the App not installed / no repo
+  access; `e2e on` with `TESTING.md` absent, unparseable, or its declared env
+  unsatisfiable by the provided `TEST_*` set; a review provider declared
+  without its credentials (today's startup error, relocated to registration).
+  Everything else — `CLAUDE.md`, issue/PR templates, commitlint — is **socket
+  lint**: checked, warned, recorded in the registration's audit row, and
+  re-runnable on demand (`product check`) to catch drift. A socket-poor repo
+  registers and works conservatively; the socket improves while the platform
+  runs. Optional `--lint-issue` files the gaps as a `human` issue in the
+  product repo — the socket becomes the product's own first backlog.
+- **The audit log starts here.** `product register|pause|resume|set` are the
+  platform's first operator mutations and write the first audit rows (actor,
+  action, target, reason — pause requires one). The console (§8) inherits a
+  working audit trail, never introduces one.
+
 Teams own their products' gates and PRs through GitHub, exactly like the MVP's owner.
 The platform team owns the service: quotas, capacity, incidents, the fleet view.
 
@@ -87,32 +110,67 @@ The platform team owns the service: quotas, capacity, incidents, the fleet view.
 | **Ledger** | Postgres (managed) | — | replaces SQLite behind the existing `Ledger` protocol |
 | **Session archive** | S3-compatible object store | — | replaces the filesystem behind the existing `SessionArchive` protocol |
 | **Platform memory** | Postgres + object store (§9) | written only via harvest; read only via prompt assembly | **new — core subsystem** |
-| **Observability** | OTel collector + backend (OTLP-swappable) | agents emit, never read | wired for real (was designed-only) |
+| **Observability** | the adopter's stack, behind an OTLP endpoint + ledger reporting views | agents emit, never read | capabilities shipped, instruments not (§12) |
 
 ## 4. Identities & the subscription pool *(DR)*
 
-- **GitHub: four org-level Apps, one per role** — `fermata-ai-dev`,
-  `fermata-ai-reviewer`, `fermata-ai-tester`, `fermata-ai-monitor` — installed
-  org-wide, **tokens minted per-burst and scoped to the single target repo**. This
-  replaces per-product App pairs (2 Apps × N products → 4 Apps total) and finally
-  gives the tester its own provenance (deferred in the MVP, where it rode the
-  reviewer App). Scopes as in `GITHUB-INTERFACE.md`; the dev App still cannot merge;
-  no App satisfies the CODEOWNERS gate.
+- **GitHub: four org-level Apps, one per pipeline role** — dev, reviewer,
+  tester, monitor — installed org-wide. **App names are the adopter's choice;
+  the platform's contract is the env-prefix scheme** (`GITHUB_APP_ID`,
+  `REVIEWER_…`, `TESTER_…`, `MONITOR_…` — the monitor prefix is reserved now,
+  its App created at T4). This replaces per-product App pairs (2 Apps × N
+  products → 4 Apps total) and finally gives the tester its own provenance
+  (deferred in the MVP, where it rode the reviewer App). Scopes as in
+  `GITHUB-INTERFACE.md`; the dev App still cannot merge; no App satisfies the
+  CODEOWNERS gate.
+
+- **Two token tiers** *(DR)*: **control-plane tokens** (polling, posting
+  reviews/reports) are minted broad and cached; the private key and broad
+  tokens never cross the container boundary. **Burst tokens** are minted fresh
+  per spawn and **downscoped below the App's grant at mint**
+  (`repositories: [the task's repo]` + a per-role `permissions` subset) — so
+  §13's "a burst can't reach another product" becomes a per-token fact,
+  live-tested: a dev token for product A is rejected on product B by
+  construction. Reviewer and tester bursts still hold no GitHub credential at
+  all; the control plane posts their findings under the matching App identity.
+  The Copilot PAT stays the documented oddity (only a seated user's token may
+  request Copilot review).
 
 - **Anthropic: the team subscription pool.** Every team member has a Claude
   subscription; the platform runs on that pooled capacity. Two mechanisms, not
   mutually exclusive:
 
   **A — registered token pool (the backbone).** A member opts in with
-  `claude setup-token` (a 1-year, **inference-only** OAuth token) and registers it
-  under their name with a **usage cap** ("the platform may use up to X of my
-  window"). Tokens live in the secret manager; each burst is stamped with whose
-  subscription powered it. The scheduler is **rate-limit-aware per token**: the SDK
-  surfaces rate-limit status/events, the pool tracks each token's window, picks the
-  least-loaded eligible token, and backs off a token near exhaustion instead of
-  burning bursts into 429s. Revocation and cap changes are one console action;
-  contribution is always visible to the contributor ("your subscription ran N
-  bursts / M tokens this week").
+  `claude setup-token` (a 1-year, **inference-only** OAuth token),
+  **materializes it themselves** per the adopter's runbook, and registers
+  **only a ref** (`subscription register --member x --ref env:… --cap N`) —
+  **the platform never holds a token value** *(DR)*: the ledger stores a
+  name, resolution happens at spawn, the token lives in the container env and
+  dies with it. Custody never leaves the member's materialization, and
+  deleting the secret at its source is a revocation lever the platform cannot
+  override. Mechanics *(DR)*:
+  - **Usage is derived, backoff is state**: per-subscription consumption is a
+    rolling-window SQL aggregate over `bursts` (never a mirrored counter —
+    §12's ledger-as-metrics rule); the only new pool state is
+    `subscriptions.backoff_until`, set by CAS when a burst reports rate
+    limiting, cleared by time. Caps are **tokens per rolling window** — one
+    number per subscription; `max_budget_usd` keeps its runaway-hard-stop
+    role untouched.
+  - **The pick happens inside admission** (§5's fenced aggregate step):
+    eligibility is a pure predicate (active ∧ unexpired ∧ not backing off ∧
+    headroom > 0), pick is max-headroom-first, `subscription_id` stamped at
+    `record_burst`. No eligible token → idle + `capacity_exhausted` event
+    (adopters route it — capacity stays a people question). A rate-limited
+    burst → backoff by CAS, and the attempt rail retries on another token
+    (sessions are local transcripts; any valid token resumes them). The pick
+    outputs `(subscription_id, affinity)`; affinity is `any` until mechanism
+    B, whose runners are just claimers filtered to their owner's bursts.
+  - **Lifecycle is events + CAS, no daemons**: `subscription_expiring` events
+    through the final N days (renewal = re-materialize at the same ref + one
+    CLI verb updating `expires_at`); an auth-failed burst marks `expired` by
+    CAS; `revoke` is CAS + audit + event — immediate ineligibility, in-flight
+    bursts finish. Every verb audited. Contribution ("your subscription ran N
+    bursts / M tokens this week") is a `reporting.*` view (§12).
 
   **B — member-hosted runners (the extension).** Not a separate component — the
   **same burst runner, deployed on a member's own machine** (a deployment-diagram
@@ -137,18 +195,76 @@ The platform team owns the service: quotas, capacity, incidents, the fleet view.
   lands in an **audit log** (the ledger-surgery lesson: the override path must be
   first-class and attributable, finding #9).
 
-- **Secrets**: platform credentials, registered subscription tokens, and
-  per-product `TEST_*` sets live in the org's secret manager (Vault/External
-  Secrets); injected at spawn, never in images, never in the archive (the MVP's
-  unconditional credential-exclusion rule survives).
+- **Secrets — materialized by the adopter, resolved by ref** *(DR)*: the
+  platform never speaks to a secret manager. It ships a `SecretResolver`
+  protocol over opaque refs — `env:NAME`, `file:PATH`, plus one helper binary
+  configured out-of-band (the git-credential-helper pattern) for anything
+  else. How secrets reach env/files is the adopter's instrument (§12:
+  capabilities, not instruments). Refs stored in the ledger
+  (`subscriptions.secret_ref`, per-product `TEST_*`) are names, never
+  commands. Injected at spawn, never in images, never in the archive (the
+  MVP's unconditional credential-exclusion rule survives). The pool's runtime
+  write path is decided with the pool itself: helper store verb vs
+  registration through the adopter's materialization.
+
+### Roles — ceilings in code, composition in data *(DR)*
+
+Roles live in the ledger (`roles` table) as declarative execution contracts —
+prompt preamble, tool selection, model, budget/turn defaults, mount mode,
+identity binding, result sink — creatable and editable at runtime (CLI, later
+console), every mutation audited. The safety model is the database's own:
+grants are runtime data, the engine is code, and no row composes past the
+engine's ceilings.
+
+- **Ceilings (code):** a role's tools are a subset of a code-defined
+  allowlist, and the `walls.py` deny-hook floor runs beneath whatever the row
+  says — narrowing is data, widening is impossible. Identity binding accepts
+  `none` or the dedicated **automation App** only; the pipeline Apps are not
+  values the column accepts. Sinks come from an enumerated,
+  platform-implemented set (post issue/comment · ledger artifact · emitted
+  event for external systems).
+- **The funnel's trust slots stay closed:** the four pipeline roles are seeded
+  rows whose wall-bearing fields are frozen (CHECK + grants); no runtime role
+  can occupy the assess slot or review platform-authored PRs. The
+  author/reviewer separation and the pipeline's credential asymmetry are code,
+  not policy.
+- **Custom roles** automate everything outside the funnel — business-process
+  bursts with a `schedule` or `event` trigger (trigger machinery arrives with
+  T4's monitor), same container walls as every burst, delivering through
+  their sink. New automation = new row, zero deploys; a new *trust position*
+  in the pipeline = a platform release, deliberately.
+- **§10's review lenses are this mechanism:** a lens is a custom-role row
+  constrained to the reviewer's identity-less execution profile — one
+  mechanism, not two.
 
 ## 5. Control plane as a service
 
 The **reconciler model survives unchanged** — observe GitHub, derive events, advance
 per-task state machines, run bursts. What changes is where and how much at once.
 
-- **Deployment**: k8s, leader-elected single active reconciler (the state machine
-  stays simple); horizontal scale comes from runners, not schedulers.
+- **Deployment — stateless peers, no leader** *(DR)*: the control plane ships as
+  an OCI image + 12-factor env and runs as N identical replicas on any
+  substrate (reference k8s manifests and a compose file are examples, not
+  dependencies — no orchestrator client in platform code). There is no
+  election and no failover window: per-row work (observe a product, advance a
+  task, harvest a burst) is **claimed through the ledger as a lease** — one
+  atomic `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED) RETURNING`,
+  lease = visible data with expiry, reclaimed by anyone when it lapses. The
+  only serialized section is **admission** (rails + spawn allocation — an
+  aggregate computation, later fair share × token availability): a short
+  advisory lock fencing in-memory math and single-statement writes, never
+  held across I/O. Schema walls (§5-of-block-1: one running burst per task,
+  finalize-once) backstop any claiming bug as a constraint violation, never a
+  doubled burst.
+
+- **Ledger discipline — transactional, but not interactive** *(DR)*: no
+  transaction ever spans application logic, network I/O, or think-time. Every
+  ledger interaction is a single atomic statement: claims are leases (above),
+  state transitions are compare-and-set (`UPDATE … WHERE status='expected'`,
+  rowcount decides), mutation + outbox ride one data-modifying CTE, and work
+  always runs with no transaction open. Locks live for microseconds inside
+  statements; replica death leaves expired leases (debuggable data), never
+  held locks.
 - **Stores**: Postgres implements the existing `Ledger` protocol (tasks, bursts,
   violations — plus products, quotas, subscriptions, memory index, audit); the
   object store implements `SessionArchive` (task-keyed transcript blobs,
@@ -161,14 +277,20 @@ per-task state machines, run bursts. What changes is where and how much at once.
     `pull_request_review`, and `push` events to the App's webhook URL
     automatically. Registering product #30 configures **zero** webhooks — the App
     installation *is* the subscription.
-  - **A dedicated receiver, deliberately dumb.** The platform's **only public
-    surface** is a small stateless deployment behind the ingress that does exactly
-    three things: verify the HMAC signature against the App's webhook secret,
-    dedup by delivery id, and enqueue a *wake event* (`repo`, `kind`) for the
-    reconciler. It holds no other credential, writes nothing but wake events, and
-    shares no process with the scheduler — the MVP skipped webhooks precisely
-    because a public endpoint next to the App private key was a bad trade on a
-    laptop; the receiver is how that objection is retired.
+  - **A dedicated receiver, deliberately dumb — and credential-free** *(DR)*.
+    The platform's **only public surface** is a small stateless deployment
+    (the third workspace package, `packages/webhook-receiver`; never imports
+    control-plane) that does exactly three things: verify the HMAC signature
+    against the App's webhook secret (a `SecretResolver` ref — its only
+    secret), dedup delivery ids in an in-memory LRU, and forward a *wake
+    event* (`repo`, `kind`) to the control plane over an **internal,
+    unauthenticated endpoint**. No DB credential, no GitHub credential, no
+    state: because forgery is harmless by construction (below), the wake path
+    needs no trust anywhere — the public process degrades to a stateless HMAC
+    filter. Receiver restart loses dedup (one duplicate poll); control plane
+    down loses the wake (the poll catches up). The MVP skipped webhooks
+    precisely because a public endpoint next to the App private key was a bad
+    trade on a laptop; the receiver is how that objection is retired.
   - **Forgery is harmless by construction.** Because polls remain the only source
     of truth, the worst a forged/replayed webhook can cause is one extra poll of
     real GitHub state — never a state transition. The wake path needs availability,
@@ -179,7 +301,10 @@ per-task state machines, run bursts. What changes is where and how much at once.
   runner ceiling — now intersected with **token availability** from the
   subscription pool (a burst needs both a runner slot and an eligible token). No
   priority knobs until fair-share demonstrably fails (config-taste: add controls
-  when a real scheduling failure demands them).
+  when a real scheduling failure demands them). Fair share's trivial predecessor
+  ships first: the registry-driven serial loop iterates active products
+  **least-recently-served** (`last_burst_at`, nulls first) — zero knobs, and
+  byte-for-byte MVP behavior when one product is registered.
 - **Rails, now three-level**: per-burst (hard budget cap, max_turns, wall-clock —
   plus a default **per-tool-call timeout** inside the burst; an 18-minute hung Bash
   call burned a round in the MVP, finding #6) · per-task (attempts, review rounds —
@@ -188,13 +313,42 @@ per-task state machines, run bursts. What changes is where and how much at once.
   product at registration.
 - **Kill switches**: burst, task, product (pause), and org STOP — all through the
   operator API with audit, all converging on the same mechanics the MVP proved
-  (mark killed, roll back task state, re-derive on resume).
+  (mark killed, roll back task state, re-derive on resume). **The STOP flag
+  moves from the filesystem into the ledger** *(DR)*: an org-scoped state row,
+  checked at the top of every tick and before every spawn — identical
+  semantics from any replica, any host; the console later writes the same row.
 
 ## 6. Burst execution
 
-- **k8s Jobs** replace local Docker: one Job per burst, `activeDeadlineSeconds` =
-  the wall-clock rail, no retries at the k8s layer (retries are the scheduler's
-  decision, informed by the result file).
+- **The runner is a protocol** *(DR)*: `Runner` joins `Ledger`/`SessionArchive`
+  as a seam — `DockerRunner` (as built) and `JobsRunner` (T1, after the
+  isolation bake-off). This resolves T0's "where do bursts run": the control
+  plane deploys **wherever Docker is available** — a VM with the image and the
+  compose file is a first-class T0 deployment; k8s arrives at T1 *with* the
+  runners, when it pays for itself. **k8s Jobs** then replace local Docker:
+  one Job per burst, `activeDeadlineSeconds` = the wall-clock rail, no retries
+  at the k8s layer (retries are the scheduler's decision, informed by the
+  result file).
+- **The Job is a three-container pod** *(DR)*: **init** (platform image)
+  materializes the session snapshot + clone into an `emptyDir`; **agent** (the
+  dev-agent image, unchanged) runs against it — dev holds its downscoped
+  GitHub token, reviewer/tester hold nothing, as ever; **harvester** (native
+  sidecar) uploads result + violations (+ the dev session snapshot) after
+  agent exit. Under `DockerRunner` the same three phases are
+  prepare/run/harvest in-process; mechanism B's member-hosted runner reuses
+  the pattern verbatim.
+- **Zero standing storage credentials in the pod** *(DR)*: init and harvester
+  hold **presigned URLs minted at spawn** — a GET for the one snapshot key,
+  PUTs for the exact result keys, time-boxed to the wall-clock rail. A
+  capability for one object, never a credential for a store; works on any
+  S3-compatible backend. Clone sync for credential-less roles rides a
+  `contents:read`, single-repo token confined to init — the reviewer/tester
+  agent process still never sees a GitHub credential.
+- **The k8s client lives in `JobsRunner` and nowhere else**: its service
+  account is scoped to Jobs-in-one-namespace; the burst pod mounts **no
+  service-account token at all** (`automountServiceAccountToken: false`) —
+  "no k8s API access" becomes an absence-of-credential fact, not a
+  NetworkPolicy promise.
 - **Isolation runtime** *(DR — bake-off in wave T1)*: bursts execute arbitrary
   code an agent wrote seconds earlier; container-grade isolation is the floor, not
   the target. Candidates:
@@ -209,20 +363,45 @@ per-task state machines, run bursts. What changes is where and how much at once.
   Bake-off criteria: boot latency on warm images · bind-mount support for the
   session volume choreography · egress policy enforcement · snapshot/restore ·
   ops burden on our cluster. Decision wanted before T1 exit; the Jobs abstraction
-  isolates the choice.
-- **Session choreography unchanged**: the control plane materializes the task's
-  transcript from the archive into the Job's volume before boot, harvests
-  result + violations + session (+ memory proposals, §9) after; reviewer/tester
-  volumes are never seeded and never archived. `burst-result.json` written in
-  `finally` + session id captured from the init message — resume survives any
-  death, including budget kills.
+  isolates the choice. **Method** *(DR)*: a **golden-replay harness** — the
+  same archived session node + task replayed as an identical burst under each
+  `RuntimeClass` (the session tree's fixtures), emitting the criteria matrix;
+  the decision lands as a DR with data attached, and the M4 red-team suite
+  replays through the same harness.
+- **Session choreography — sessions become a tree *(DR)***: the archive keeps
+  **one immutable snapshot per burst** (`sessions/<task>/<burst>`) instead of one
+  mutable blob per task, and `bursts.resumed_from_burst_id` records which snapshot
+  a burst grew from. Session history is a tree whose nodes are burst boundaries;
+  the engine stays opaque — branching is the SDK's `fork_session` from an archived
+  snapshot, never transcript surgery. What the tree buys:
+  - **retry ≠ branch** — an environment flake re-runs the same node unchanged; an
+    approach failure branches from the last good node, with a short **branch
+    summary** of the abandoned attempt injected as auto-class data and proposed
+    to product memory (§9). Retries keep the lesson, not the poisoned tail
+    (finding #6's hung-call transcript never haunts attempt N+1 again).
+  - **exploration** — fork one explored node into N strategy branches on wide
+    tasks (judge-panel; opt-in per task, costs N×; no cache reuse across bursts).
+  - **golden replay** — archived nodes are immutable fixtures: replay a node
+    through a prompt/model/wall change and diff outcomes; the M4 red-team suite
+    replays attack scenarios from pinned nodes and measures breach rate.
+  - **forensics** — the console timeline (§8) renders true lineage; every burst's
+    exact input context is a named, retained object in the archive.
+  Everything else carries over: the control plane materializes the chosen
+  snapshot into the Job's volume before boot, harvests result + violations +
+  session (+ memory proposals, §9) after; reviewer/tester volumes are never
+  seeded and never archived; `burst-result.json` in `finally` + session id from
+  the init message — resume survives any death, including budget kills.
 - **Warm images per product family**: a base agent image + product toolchain layers
   (uv/python, node, …), built by the platform's CI, pinned per product. A burst is
   `git fetch/checkout` + agent boot, as designed in the MVP.
-- **Network walls**: no k8s API access, NetworkPolicy egress allowlist — GitHub,
-  the Anthropic API, and (tester bursts only) the product's declared sandbox
-  endpoints. The MVP's walls carry over; the network wall gets real enforcement
-  instead of trust-by-construction.
+- **Network walls — egress declared as data** *(DR)*: the platform emits a
+  per-burst egress declaration as structured Job metadata — GitHub, the
+  inference API, the adopter's OTLP endpoint (§12), and (tester bursts only)
+  the product's declared sandbox endpoints from its `TESTING.md` manifest.
+  Reference FQDN policies ship as examples; enforcement belongs to the
+  adopter's CNI (capabilities, not instruments), and the M4 suite validates
+  it on *their* cluster: a request to an undeclared host must fail there,
+  not in our docs.
 - **The clone** becomes a per-runner cache keyed by repo, synced before every mount —
   same invariant ("whatever a burst leaves behind is erased before the next look"),
   now safe under concurrency because a task's bursts are serialized and caches are
@@ -323,7 +502,8 @@ MVP already has three memory layers in embryo — the TO-BE makes them explicit:
   Serial rounds proved to be sampling (~1.6 of ~7 present defects per pass); lenses
   attack coverage, and the round machinery (cursor, caps, threads) is unchanged —
   it just receives better rounds. A **verify round** after fixes stays irreducible
-  (fix-induced defects were real in the MVP). Lenses read product memory (§9).
+  (fix-induced defects were real in the MVP). Lenses read product memory (§9)
+  and are runtime role rows (§4 — ceilings in code, composition in data).
 - **Tester tools registry** (TESTER.md slice 3): `playwright` and friends baked in
   the image, enabled per product manifest. The plug declares needs; the platform
   ships capabilities.
@@ -348,13 +528,41 @@ case). Monitor findings that repeat become product memory (§9).
 
 ## 12. Observability
 
-OTel end-to-end as designed: trace-per-burst, `task.id`/`burst.id`/`role`
-attributes, span links across a task's bursts, `TRACEPARENT` into the Job so the
-agent's native spans nest. Backend: whatever the org runs (OTLP keeps it
-swappable); Phoenix remains the dev-scale default. structlog logfmt feeds both the
-org's log aggregation and the console's live streams. The §9-of-ARCHITECTURE metric
-families (reliability / containment / capability) become standing dashboards;
-violations alert.
+**The platform ships capabilities, never instruments** *(DR)*: no collector,
+log store, dashboard, or alerting component is part of the shipment — adopters
+plug the capabilities into whatever monitoring stack they already run. Four
+capabilities:
+
+- **Traces** — OTLP push to a configurable endpoint
+  (`OTEL_EXPORTER_OTLP_ENDPOINT`), as built: trace-per-burst,
+  `task.id`/`burst.id`/`role` attributes, `TRACEPARENT` into the Job so the
+  agent's native spans nest. Gaps to close in the build: span links to the
+  predecessor burst (one ledger lookup via `resumed_from_burst_id`), and the
+  agent's own OTel enabled in the image with `OTEL_RESOURCE_ATTRIBUTES`
+  stamping the correlation ids. The burst egress wall widens by exactly one
+  adopter-configured endpoint (§13).
+- **Logs** — structured logfmt on stdout + the per-burst teed files, with
+  `trace_id`/`burst_id`/`task_id` bound into every line. That is the whole
+  contract: 12-factor out, correlation in-band, consumable by any log
+  pipeline; no shipper is shipped or assumed. (The console's live streams (§8)
+  read the same structlog events over the ledger's event feed, not through a
+  log backend.)
+- **Metrics** — the ledger *is* the metrics store: the §9-of-ARCHITECTURE
+  families (reliability / containment / capability) ship as documented
+  read-only SQL **reporting views** over `tasks`/`bursts`/`violations`. Any
+  dashboard tool with a Postgres driver renders them; reference dashboards are
+  examples, not components. No emitted-metrics pipeline — that would mirror
+  ledger facts and drift (labels reflect, the ledger locks). Emitted OTel
+  metrics stay reserved for process-local facts (tick latency, queue depth)
+  when a real operational question demands them.
+- **The alert signal** — the violations feed itself (append-only table + its
+  `events` outbox row) plus the documented condition: any new violations row
+  is a page. Adopters wire it into their own alerting; the platform emits,
+  never routes.
+
+> **Testing rig** (dev-only, never shipped, swappable by a compose edit): OTel
+> collector + VictoriaLogs for logs + Phoenix for LLM-native trace views;
+> `lnav` over the logfmt files as the no-server default for laptop work.
 
 ## 13. Containment at org scale
 
@@ -364,7 +572,8 @@ Everything in `ARCHITECTURE.md` §8 survives. New surface, new walls:
 |---|---|---|
 | Burst escapes its box | microVM isolation (§6 DR) — hardware virtualization, not just namespaces | wall |
 | The public webhook endpoint | receiver verifies HMAC + dedups, holds no creds, emits wake events only — a forged webhook can at worst trigger one poll of real state | wall |
-| Burst can't touch the cluster | no service account, no k8s API, NetworkPolicy egress allowlist | wall |
+| Burst can't touch the cluster | no SA token mounted (`automountServiceAccountToken: false`); k8s client only in `JobsRunner`, scoped to Jobs-in-one-namespace; declared-egress allowlist | wall |
+| Burst can't reach the stores | presigned per-object URLs minted at spawn, time-boxed to the rail; no store credential in any burst container | wall |
 | Burst can't reach another product | per-repo-scoped App token minted per burst; sandbox creds injected per product; memory scope-filtered | wall |
 | A member's subscription is protected | per-token usage cap + one-click revoke + full attribution; token B never leaves its owner's machine (mechanism B) | wall |
 | Memory poisoning | write only via harvest with provenance; injected as auto-class data; gardener + human browser | tripwire (data) |
@@ -377,18 +586,32 @@ Everything in `ARCHITECTURE.md` §8 survives. New surface, new walls:
 
 Waves, not phases (rollout phases 0–2 in `ARCHITECTURE.md` stay the *exposure*
 story; waves are the *build* story). Each wave ships alone and is useful alone.
+The PR-sized decomposition of these waves — steps, gates, dependency spine —
+lives in **`PHASE-1.md`**.
 
 - **T0 — the service** *(ops hardening)*: Postgres + object store behind the
-  existing protocols; control plane containerized on k8s; the webhook receiver
-  (App-delivered events, HMAC-verified, wake-only); org Apps (4 roles, per-repo
-  token scoping); secrets via the org manager; **subscription pool v1** (token
-  registry, per-token caps, rate-limit-aware pick, attribution).
+  existing protocols; control plane shipped as an OCI image, run as stateless
+  peer replicas on any Docker-capable host (leases + CAS through the ledger;
+  k8s waits for T1's runners); the webhook receiver
+  (App-delivered events, HMAC-verified, credential-free, wake-only); org Apps (4 pipeline roles,
+  downscoped per-burst tokens); the role registry seeded; secrets resolved by
+  ref, materialized by the adopter; **subscription pool v1** (ref-only
+  registry — the platform never holds token values; per-token caps,
+  headroom-ordered pick in admission, attribution); **the session
+  tree's storage layer** (snapshot-per-burst archive + `resumed_from_burst_id`
+  lineage in the ledger); **the product registry** (materialized defaults,
+  operability gate + socket lint, audit-first operator verbs, registry-driven
+  least-recently-served scheduling).
   Exit: the laptop is retired; two products registered; MVP behavior byte-for-byte
   on pooled tokens.
-- **T1 — concurrency + isolation**: k8s Jobs runners; **isolation runtime bake-off
-  decided** (Kata / e2b / gVisor) and adopted; per-task serialization + weighted
+- **T1 — concurrency + isolation**: k8s Jobs runners (three-container pods;
+  presigned materialize/harvest); **isolation runtime bake-off decided**
+  (Kata / e2b / gVisor, via the golden-replay harness) and adopted; per-task
+  serialization + weighted
   fair share × token availability + quotas; per-tool-call timeout; clone caches;
-  **memory store + write path** (harvest-side, entries accumulate with provenance).
+  **fork rails** (retry-vs-branch from archived nodes; branch summaries at
+  harvest); **memory store + write path** (harvest-side, entries accumulate with
+  provenance).
   Exit: 5+ products active, ≥5 concurrent bursts, zero cross-task interference,
   bursts running under the chosen runtime.
 - **T2 — human surfaces**: the live console (fleet, live burst logs, task
@@ -408,18 +631,22 @@ story; waves are the *build* story). Each wave ships alone and is useful alone.
 
 ## 15. Open questions (for team review)
 
-- **Subscription pooling posture**: mechanism A moves a member's inference-only
-  token into the org secret manager — acceptable to everyone, or do some members
-  want mechanism B (token never leaves their machine) from day one? Consent UX
-  matters more than the tech here.
-- **Token lifecycle ops**: `setup-token` credentials live 1 year — renewal
-  reminders, expiry handling mid-task, revocation drills.
+- **Subscription pooling posture**: resolved (§4 mechanism A) — registration
+  is **ref-only**; the platform never holds a token value, custody stays with
+  the member's own materialization, and source-side deletion is a revocation
+  lever the platform can't override. Members wanting device-local custody
+  graduate to mechanism B at T3.
+- **Token lifecycle ops**: resolved (§4 mechanism A) — expiry warnings and
+  renewals are events + one CLI verb; mid-task expiry falls to the attempt
+  rail on another token; the revocation drill is: delete the secret at its
+  source, then `subscription revoke` (CAS + audit + event).
 - **Isolation bake-off owner**: who runs the Kata vs e2b vs gVisor evaluation, and
   on which cluster.
 - **Object store**: SeaweedFS self-hosted vs the org's existing S3-compatible
   storage — pure ops preference, the protocol doesn't care.
-- **Observability backend**: org standard (Grafana stack?) vs Phoenix — OTLP either
-  way.
+- **Observability backend**: resolved (§12) — no backend is shipped. The
+  platform emits OTLP + logfmt + SQL reporting views; backends are the
+  adopter's instruments. VictoriaLogs/Phoenix are testing-rig choices only.
 - **Transcript + memory retention**: transcripts contain code and tool output;
   retention and access policy is a security/compliance call (proposal: transcripts
   hot 90 days then delete; memory entries and the violations ledger retained —

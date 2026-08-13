@@ -1,0 +1,187 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Deployment TO-BE" id="c4-deployment-to-be">
+    <mxGraphModel dx="1600" dy="1000" grid="0" page="1" pageScale="1" pageWidth="2040" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="&lt;b&gt;Autonomous Maintenance Platform — Deployment (C4) · TO-BE reference environment&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;T1 target shown (k8s); T0 runs the same containers on any Docker-capable host — the platform ships images and protocols, the substrate is the adopter&amp;#39;s&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="30" y="10" width="1400" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cluster" value="&lt;font style=&quot;font-size: 14px&quot;&gt;&lt;b&gt;Adopter&amp;#39;s k8s cluster&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[Deployment Node: any distro — reference; T0 = a Docker-capable host]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=10;arcSize=4;absoluteArcSize=1;metaEdit=1;connectable=0;" vertex="1" parent="1">
+          <mxGeometry x="340" y="80" width="780" height="980" as="geometry" />
+        </mxCell>
+        <mxCell id="ingress" value="&lt;b&gt;Ingress&lt;/b&gt;&lt;div&gt;[Infrastructure Node: adopter&amp;#39;s edge · TLS]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;align=center;arcSize=8;absoluteArcSize=1;metaEdit=1;" vertex="1" parent="1">
+          <mxGeometry x="400" y="140" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ns" value="&lt;font style=&quot;font-size: 14px&quot;&gt;&lt;b&gt;namespace: platform&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[Deployment Node: k8s]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=10;arcSize=4;absoluteArcSize=1;metaEdit=1;connectable=0;" vertex="1" parent="1">
+          <mxGeometry x="370" y="260" width="720" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="rcvNode" value="&lt;b&gt;Deployment ×N&lt;/b&gt;&lt;div&gt;[Deployment Node: k8s · behind the ingress]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=8;arcSize=4;absoluteArcSize=1;metaEdit=1;connectable=0;" vertex="1" parent="1">
+          <mxGeometry x="400" y="320" width="280" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="cpNode" value="&lt;b&gt;Deployment ×N&lt;/b&gt;&lt;div&gt;[Deployment Node: k8s]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=8;arcSize=4;absoluteArcSize=1;metaEdit=1;connectable=0;" vertex="1" parent="1">
+          <mxGeometry x="760" y="320" width="280" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="jobNode" value="&lt;b&gt;Job: burst — ×M ephemeral, one per burst&lt;/b&gt;&lt;div&gt;[Deployment Node: k8s Job · RuntimeClass from the bake-off · automountServiceAccountToken: false]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=8;arcSize=4;absoluteArcSize=1;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.33,0],[1,0.5,0],[1,0.75,0]];" vertex="1" parent="1">
+          <mxGeometry x="400" y="590" width="640" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="podnote" value="shared emptyDir — session-volume choreography · egress per the burst&amp;#39;s declaration" style="text;html=1;fontSize=10;fontStyle=2;fontColor=#666666;align=left;" vertex="1" parent="1">
+          <mxGeometry x="430" y="850" width="580" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pgNode" value="&lt;b&gt;Managed PostgreSQL&lt;/b&gt;&lt;div&gt;[Deployment Node: adopter&amp;#39;s choice]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=8;arcSize=4;absoluteArcSize=1;metaEdit=1;connectable=0;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="120" width="300" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="s3Node" value="&lt;b&gt;Object store&lt;/b&gt;&lt;div&gt;[Deployment Node: S3-compatible · adopter&amp;#39;s choice]&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=none;strokeColor=#666666;fontColor=#333333;align=left;verticalAlign=top;spacing=8;arcSize=4;absoluteArcSize=1;metaEdit=1;connectable=0;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="420" width="300" height="220" as="geometry" />
+        </mxCell>
+
+        <object placeholders="1" c4Name="Webhook Receiver" c4Type="Container instance" c4Technology="Python · stateless" c4Description="Only public surface: HMAC verify, dedup, wake forward; sole secret = webhook-secret ref" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="rcv">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#0E7DAD;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.75,1,0],[0.5,1,0],[0.25,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="420" y="380" width="240" height="130" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="Control Plane" c4Type="Container instance" c4Technology="Python · OCI image" c4Description="Stateless peer: leases + CAS, fenced admission, presigns URLs, mints downscoped tokens" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="cp">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#0E7DAD;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.33,0],[1,0.5,0],[1,0.66,0],[1,0.75,0],[0.75,1,0],[0.5,1,0],[0.25,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="780" y="380" width="240" height="130" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="init" c4Type="Container instance" c4Technology="platform image" c4Description="Materializes snapshot + clone; presigned GET · scoped read token, dies with it" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="ini">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#0E7DAD;metaEdit=1;points=[[0.5,0,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[0,0.5,0],[1,0.5,0]];" vertex="1" parent="1">
+            <mxGeometry x="430" y="690" width="180" height="140" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="agent" c4Type="Container instance" c4Technology="dev-agent image" c4Description="The burst; no SA token; reviewer/tester runs hold no credential at all" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="agt">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#0E7DAD;metaEdit=1;points=[[0.5,0,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[0,0.5,0],[1,0.5,0]];" vertex="1" parent="1">
+            <mxGeometry x="640" y="690" width="180" height="140" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="harvester" c4Type="Container instance" c4Technology="platform image · sidecar" c4Description="Uploads result, violations, snapshot after agent exit; presigned PUTs" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="hrv">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#0E7DAD;metaEdit=1;points=[[0.5,0,0],[0.25,1,0],[0.5,1,0],[0.75,1,0],[0,0.5,0],[1,0.5,0]];" vertex="1" parent="1">
+            <mxGeometry x="850" y="690" width="180" height="140" as="geometry" />
+          </mxCell>
+        </object>
+
+        <object placeholders="1" c4Name="Ledger" c4Type="Container instance" c4Technology="PostgreSQL" c4Description="All platform state + reporting views (read RO by the adopter&#39;s dashboards)" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="led">
+          <mxCell style="shape=cylinder3;size=15;whiteSpace=wrap;html=1;fontSize=11;boundedLbl=1;rounded=0;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;strokeColor=#0E7DAD;metaEdit=1;points=[[0.5,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.5,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="1280" y="180" width="240" height="160" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="Session Archive" c4Type="Container instance" c4Technology="bucket" c4Description="Immutable per-burst snapshots — the session tree; retention = lifecycle policy" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%: %c4Technology%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#E6E6E6&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="arc">
+          <mxCell style="shape=cylinder3;size=15;whiteSpace=wrap;html=1;fontSize=11;boundedLbl=1;rounded=0;labelBackgroundColor=none;fillColor=#23A2D9;fontColor=#ffffff;align=center;strokeColor=#0E7DAD;metaEdit=1;points=[[0.5,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.5,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="1280" y="480" width="240" height="140" as="geometry" />
+          </mxCell>
+        </object>
+
+        <object placeholders="1" c4Name="GitHub" c4Type="Software System" c4Description="4 org Apps (adopter-named); webhooks ride the Apps; polls remain truth" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#cccccc&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="gh">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#8C8496;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#736782;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.75,1,0],[0.5,1,0],[0.25,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="1680" y="300" width="240" height="120" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="Inference API (Claude)" c4Type="Software System" c4Description="Reached with member subscription tokens resolved by ref at spawn" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#cccccc&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="inf">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#8C8496;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#736782;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.75,1,0],[0.5,1,0],[0.25,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="1680" y="680" width="240" height="120" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="Adopter&#39;s Monitoring Stack" c4Type="Software System" c4Description="OTLP endpoint, log pipeline, dashboards, alerting — their instruments" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#cccccc&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="mon">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#8C8496;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#736782;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.75,1,0],[0.5,1,0],[0.25,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="1680" y="480" width="240" height="140" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Name="Adopter&#39;s Secret Materialization" c4Type="Software System" c4Description="Env/files placed by their tooling; the platform resolves refs, never speaks to a manager" label="&lt;font style=&quot;font-size: 16px&quot;&gt;&lt;b&gt;%c4Name%&lt;/b&gt;&lt;/font&gt;&lt;div&gt;[%c4Type%]&lt;/div&gt;&lt;br&gt;&lt;div&gt;&lt;font style=&quot;font-size: 11px&quot; color=&quot;#cccccc&quot;&gt;%c4Description%&lt;/font&gt;&lt;/div&gt;" id="sec">
+          <mxCell style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;labelBackgroundColor=none;fillColor=#8C8496;fontColor=#ffffff;align=center;arcSize=10;strokeColor=#736782;metaEdit=1;points=[[0.25,0,0],[0.5,0,0],[0.75,0,0],[1,0.25,0],[1,0.5,0],[1,0.75,0],[0.75,1,0],[0.5,1,0],[0.25,1,0],[0,0.75,0],[0,0.5,0],[0,0.25,0]];" vertex="1" parent="1">
+            <mxGeometry x="1680" y="100" width="240" height="140" as="geometry" />
+          </mxCell>
+        </object>
+
+        <object placeholders="1" c4Type="Relationship" c4Technology="HMAC" c4Description="App webhooks" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e1">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="gh" target="ingress">
+            <mxGeometry x="0.35" relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="1620" y="330" /><mxPoint x="1620" y="60" /><mxPoint x="500" y="60" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="HTTPS" c4Description="routes" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e2">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="ingress" target="rcv">
+            <mxGeometry relative="1" width="240" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="internal HTTP" c4Description="Wake (repo, kind) — never truth" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e3">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="rcv" target="cp">
+            <mxGeometry relative="1" width="240" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="API" c4Description="Polls truth; posts; mints tokens" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e4">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="cp" target="gh">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="900" y="90" /><mxPoint x="1740" y="90" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="single-statement SQL" c4Description="Leases + CAS" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e5">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=1;exitY=0.33;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="cp" target="led">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="1160" y="423" /><mxPoint x="1160" y="260" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Description="Presigns per-object URLs; reads harvests" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;" id="e6">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=1;exitY=0.66;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="cp" target="arc">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="1190" y="466" /><mxPoint x="1190" y="515" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="scoped SA — Jobs only" c4Description="Spawns via Runner protocol" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e7">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="cp" target="jobNode">
+            <mxGeometry relative="1" width="240" as="geometry" />
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="presigned" c4Description="init GET · harvester PUT" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e8">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=1;exitY=0.33;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="jobNode" target="arc">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="1150" y="699" /><mxPoint x="1150" y="585" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="downscoped token" c4Description="Dev role only: push, PR" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e9">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="agt" target="gh">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="685" y="1090" /><mxPoint x="1800" y="1090" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="member token" c4Description="Agent loop" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e10">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="agt" target="inf">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="775" y="1120" /><mxPoint x="1620" y="1120" /><mxPoint x="1620" y="740" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="OTLP" c4Description="Traces" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e11">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="agt" target="mon">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="730" y="1060" /><mxPoint x="1600" y="1060" /><mxPoint x="1600" y="550" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Description="Traces [OTLP] · logfmt out" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;" id="e12">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.75;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="cp" target="mon">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="960" y="30" /><mxPoint x="1950" y="30" /><mxPoint x="1950" y="550" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+        <object placeholders="1" c4Type="Relationship" c4Technology="env: · file:" c4Description="Resolves refs" label="&lt;div style=&quot;text-align: center&quot;&gt;&lt;b&gt;%c4Description%&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center&quot;&gt;[%c4Technology%]&lt;/div&gt;" id="e13">
+          <mxCell style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=blockThin;endFill=1;endSize=14;startSize=14;strokeColor=#828282;strokeWidth=1;fontSize=10;fontColor=#404040;labelBackgroundColor=#ffffff;whiteSpace=wrap;metaEdit=1;jumpStyle=arc;jumpSize=16;exitX=0.25;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="cp" target="sec">
+            <mxGeometry relative="1" width="240" as="geometry">
+              <Array as="points"><mxPoint x="840" y="45" /><mxPoint x="1655" y="45" /><mxPoint x="1655" y="170" /></Array>
+            </mxGeometry>
+          </mxCell>
+        </object>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
