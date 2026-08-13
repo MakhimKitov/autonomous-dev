@@ -15,3 +15,36 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest
+
+  # The state block's per-PR proof: the schema applies from nothing, twice, and
+  # the suite then runs against a real Postgres rather than SQLite alone.
+  migrate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.4 # pinned to the dev rig (docker/compose.yaml)
+        env:
+          POSTGRES_USER: platform_admin
+          POSTGRES_PASSWORD: platform
+          POSTGRES_DB: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform_admin -d platform"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      LEDGER_DSN: postgresql://platform_admin:platform@localhost:5432/platform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: from zero
+        run: uv run control-plane migrate
+      - name: again — idempotent
+        run: uv run control-plane migrate
+      - name: no pending migrations left
+        run: uv run control-plane migrate --check
+      - name: the suite, against Postgres
+        run: uv run pytest

@@ -3,6 +3,7 @@
 ``burst`` — the M0/M1 manual driver: one burst, by hand. ``run`` — the M2
 scheduler: the same choreography, driven unattended by the reconciler loop
 (SCHEDULER.md). ``stop`` — the kill switch. ``github-check`` — App preflight.
+``migrate`` — the Postgres ledger's schema, from numbered SQL (STORES.md).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import psycopg
 import structlog
 from dotenv import load_dotenv
 from opentelemetry import trace
@@ -29,11 +31,12 @@ from control_plane.github_auth import (
     bot_git_identity,
     mint_installation_token,
 )
+from control_plane.migrate import MigrationError, migrate, status
 from control_plane.models import TaskRecord
 from control_plane.review import REVIEWER_APP_PREFIX, ReviewPolicy, ReviewPolicyError
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
-from control_plane.store import SqliteLedger
+from control_plane.store import LEDGER_DSN_ENV, SqliteLedger
 from control_plane.telemetry import init_telemetry
 from control_plane.testing import E2EPolicy, E2EPolicyError
 from dev_agent.log import configure_logging
@@ -79,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     stop = sub.add_parser("stop", help="kill switch: write the STOP flag and kill the live burst")
     stop.add_argument("--data-dir", type=Path, default=Path("data"))
+
+    migrate_cmd = sub.add_parser("migrate", help="apply pending schema migrations to the Postgres ledger")
+    migrate_cmd.add_argument("--dsn", default=None, help=f"Postgres DSN (default: ${LEDGER_DSN_ENV})")
+    migrate_cmd.add_argument(
+        "--check",
+        action="store_true",
+        help="report applied/pending and exit 1 if anything is pending; writes nothing",
+    )
 
     sub.add_parser(
         "github-check",
@@ -282,6 +293,34 @@ def _stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _migrate(args: argparse.Namespace) -> int:
+    dsn = args.dsn or os.environ.get(LEDGER_DSN_ENV, "").strip()
+    if not dsn:
+        print(
+            f"error: no Postgres DSN — pass --dsn or set {LEDGER_DSN_ENV}. "
+            "Unset means the single-node SQLite ledger, which needs no migration.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        if args.check:
+            applied, todo = status(dsn)
+            for version in applied:
+                print(f"applied  {version}")
+            for migration in todo:
+                print(f"pending  {migration}")
+            return 1 if todo else 0
+        applied_now = migrate(dsn)
+    except (MigrationError, psycopg.Error) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if applied_now:
+        log.info("schema migrated", applied=len(applied_now), head=str(applied_now[-1]))
+    else:
+        log.info("schema up to date — nothing to apply")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()  # the platform's .env; real env vars win — bursts still get an explicit env
     configure_logging()  # console on a TTY, logfmt everywhere else (dev_agent.log)
@@ -292,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_scheduler(args)
     if args.command == "stop":
         return _stop(args)
+    if args.command == "migrate":
+        return _migrate(args)
     if args.command == "github-check":
         return _github_check()
     return 2

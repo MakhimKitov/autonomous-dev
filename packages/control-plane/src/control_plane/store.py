@@ -22,6 +22,12 @@ from typing import Protocol
 
 from control_plane.models import BurstRecord, TaskRecord, Violation, utc_now
 
+# The ledger's presence toggle (STORES.md): set to a Postgres DSN, the ledger is
+# the service database, whose schema `control-plane migrate` owns; unset, it is
+# the single-node SQLite variant below, which self-bootstraps. Not a mode flag —
+# the same design, minus contention.
+LEDGER_DSN_ENV = "LEDGER_DSN"
+
 
 class SessionArchive(Protocol):
     def put(self, task_id: str, session_dir: Path) -> tuple[str, str]:

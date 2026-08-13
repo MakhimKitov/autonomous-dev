@@ -12,6 +12,7 @@ dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
     "structlog>=26.1.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.scripts]
