@@ -479,6 +479,34 @@ Same architecture throughout — exposure is graduated, not the design.
   the burst span; Phoenix as the phase-0 OTLP backend (single container, swappable);
   agents emit but never read telemetry (§9, "Tracing").
 
+- **Scope — code maintenance only (2026-08).** What the platform generalizes over is
+  not "code" but its gate structure: the agent's output is an **inert artifact until a
+  human promotes it**, and the promoter (CI), never the agent, holds the effectful
+  credentials. Anything expressible as a repo + CI fits — operational work (e.g. a
+  client-onboarding runbook) enters only as **config-as-code repos, i.e. additional
+  product instances** (multi-product, not a new execution paradigm). A plan/apply
+  "operator role" for effects that can't be repo-mediated was considered and
+  **rejected**: business ops has no state model, so a reviewed plan's staleness is
+  undetectable (Terraform's plan/apply works only because state makes drift
+  detectable) — the industry's per-action-approval default (2026 survey) is the honest
+  fallback there, and importing it would dissolve the reviewable-artifact gate this
+  platform is built on.
+- **Intake — a port, not a substrate (2026-08; design settled, build parked below).**
+  A task lives in exactly **one home** — the company's tracker — never mirrored. The
+  control plane reads it through a small **intake port** (~6 ops: list ready · reflect
+  status · comment · transition · file · observe re-approval) speaking a
+  **tracker-agnostic task contract** (the issue template's fields + provenance + the
+  ready act) — the contract replaces "a GitHub issue" as the narrow waist. GitHub
+  Issues becomes the default in-process adapter and the executable spec; user-built
+  connectors plug in out-of-process behind one `remote` adapter, held to a conformance
+  kit. **Delivery (branch/PR/review/merge) stays native GitHub, never abstracted.**
+  Wake channel: one generic authenticated endpoint whose payload is **discarded** —
+  poll-for-truth (`SCHEDULER.md`) makes it tracker-agnostic for free. Trust:
+  provenance = *authorship*, not transport; the human `ready` act may live in the
+  tracker, which makes the connector gate-1 load-bearing — so connectors are stateless
+  translators that decide nothing and hold tracker creds only, and the control plane
+  snapshots the task contract into the ledger at claim time (auditable).
+
 **Still open**
 
 - Transcript-growth policy — **gated on the auto-compaction re-verify (§6).** If the SDK
@@ -495,3 +523,25 @@ Same architecture throughout — exposure is graduated, not the design.
   knowledge and lives in the product repo's `TESTING.md` (frontmatter for the
   platform, prose for the tester); the platform owns only the envelope and stays
   product-agnostic.
+
+**Parked (2026-08)** — recorded so they aren't relitigated; deliberately unscheduled.
+M4 (the red-team suite) is the open milestone; nothing here jumps that queue.
+
+- **Intake docs:** an `INTAKE.md` (task contract, port ops, wake rule, connector
+  discipline) subsuming the intake half of `GITHUB-INTERFACE.md`, which trims to the
+  pure delivery protocol (labels become the GitHub adapter's *encoding* of contract
+  concepts, not the concepts).
+- **Intake-port refactor** (first post-M4 code task; pure refactor, no behavior
+  change): `github_api.py` behind the port; `observe_github()` splits into
+  `observe_tasks()` (port) + `observe_delivery()` (native GitHub); ledger task keys →
+  `(source, external_id)` with a branch-safe encoding replacing `dev/<n>-`;
+  `Closes #n` auto-close → port `transition(done)` on observed merge; claim-time task
+  snapshot into the ledger.
+- **Linear adapter** — gated on a second tracker being real.
+- **Remote connector protocol + conformance kit** — gated on a second operator being
+  real ("users plug their own connectors").
+- **Automations / scheduled bursts** — two distinct ideas if revived: a **time
+  trigger** as a third reconciler trigger kind (first candidate: a daily digest over
+  the burst + violations ledgers), and the **monitor**, whose first form is likely a
+  scheduled report burst. Read-only reporting needs no gates; anything filing issues
+  goes through the existing `auto` pipeline.
