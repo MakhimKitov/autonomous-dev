@@ -7,7 +7,8 @@ code, test, open a PR — through GitHub. Built on
 [`claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python).
 
 Design docs live here: **`ARCHITECTURE.md`** (the full design), **`GITHUB-INTERFACE.md`**
-(the GitHub protocol), **`PHASE-0.md`** (the first build slice).
+(the GitHub protocol), **`PHASE-0.md`** (the first build slice), **`TO-BE.md`** (the
+org-scale target), **`PHASE-1.md`** (the TO-BE build plan).
 
 ## Quick start
 
