@@ -159,6 +159,39 @@ def test_schema_speaks_the_ledger_vocabulary(fresh_dsn, table, record, extra):
 
 
 @needs_postgres
+def test_a_migration_that_cannot_get_its_lock_fails_instead_of_queueing(
+    fresh_dsn, tmp_path, monkeypatch
+):
+    """lock_timeout is the point: a DDL statement waiting on a lock blocks every
+    query that arrives behind it, so failing fast is the kind thing to do."""
+    monkeypatch.setattr("control_plane.migrate.LOCK_TIMEOUT", "200ms")
+    with psycopg.connect(fresh_dsn, autocommit=True) as setup:
+        setup.execute("CREATE TABLE probe (id integer)")
+    (tmp_path / "0001_alter-probe.sql").write_text(
+        "ALTER TABLE probe ADD COLUMN added text;", encoding="utf-8"
+    )
+
+    with psycopg.connect(fresh_dsn) as holder:
+        holder.execute("LOCK TABLE probe IN ACCESS EXCLUSIVE MODE")  # held until commit
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            migrate(fresh_dsn, tmp_path)
+
+    applied, todo = status(fresh_dsn, tmp_path)
+    assert applied == []  # rolled back whole: the state after a failure is a prefix
+    assert [str(m) for m in todo] == ["0001_alter-probe"]
+
+
+@needs_postgres
+def test_a_runaway_migration_is_cut_off(fresh_dsn, tmp_path, monkeypatch):
+    monkeypatch.setattr("control_plane.migrate.STATEMENT_TIMEOUT", "200ms")
+    (tmp_path / "0001_slow.sql").write_text("SELECT pg_sleep(5);", encoding="utf-8")
+
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        migrate(fresh_dsn, tmp_path)
+    assert status(fresh_dsn, tmp_path)[0] == []
+
+
+@needs_postgres
 def test_timestamps_are_timestamptz(fresh_dsn):
     """Real temporal types in the database, ISO strings at the adapter edge (A3)."""
     migrate(fresh_dsn)

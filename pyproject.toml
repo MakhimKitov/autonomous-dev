@@ -22,6 +22,7 @@ dev-agent = { workspace = true }
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "squawk-cli>=2.62.0",
 ]
 
 [tool.pytest.ini_options]

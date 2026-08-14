@@ -74,7 +74,16 @@ atlas schema diff --env local --from "$LEDGER_DSN" --to file://schema.sql
 # 3. save that SQL as the next migrations/NNNN_slug.sql, then apply it
 uv run control-plane migrate
 # 4. re-run step 2 — "Schemas are synced" is what CI checks
+# 5. and check what the DDL *does*, not just what it declares:
+uv run squawk packages/control-plane/src/control_plane/migrations/*.sql
 ```
+
+`squawk` catches DDL that is correct and still stalls a live replica — the FK and
+`UNIQUE` constraints Stage A adds both need the two-step `NOT VALID` +
+`VALIDATE CONSTRAINT` form, and it will say so. Rules live in `.squawk.toml`, each
+exclusion carrying the claim that justifies it; the two timeout rules are satisfied
+by the runner (`LOCK_TIMEOUT` / `STATEMENT_TIMEOUT` in `migrate.py`), so no
+migration has to remember them.
 
 Atlas is a development instrument, never a runtime dependency: it diffs and it
 lints, `control-plane migrate` applies. Two things it cannot see — triggers and
