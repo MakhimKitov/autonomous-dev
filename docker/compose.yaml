@@ -1,0 +1,63 @@
+# The dev rig: the two service stores Stage A introduces — Postgres (the
+# ledger) and SeaweedFS (the session archive, through its S3 gateway). Single
+# node, throwaway, laptop-only: the same two *capabilities* a deployment buys
+# from managed services, which is why nothing above this file names either
+# product (capabilities, not instruments — TO-BE.md §12).
+#
+#   docker compose -f docker/compose.yaml up -d --wait
+#   export LEDGER_DSN=postgresql://platform_admin:platform@localhost:5432/platform
+#   uv run control-plane migrate            # from zero, then a no-op
+#   docker compose -f docker/compose.yaml down -v     # -v: empty volumes again
+#
+# With LEDGER_DSN / ARCHIVE_URL unset the platform runs on SQLite and a local
+# directory exactly as before — the rig is never required to run the MVP.
+
+name: autonomous-dev-rig
+
+services:
+  postgres:
+    image: postgres:18.4 # pinned to CI's service container (.github/workflows/ci.yml)
+    environment:
+      # platform_admin owns the schema and runs migrations; platform_app — what
+      # replicas connect as, whose grants are walls — is created by ./postgres/init.
+      POSTGRES_USER: platform_admin
+      POSTGRES_PASSWORD: platform # dev-only, and the rig publishes to localhost
+      POSTGRES_DB: platform
+    ports:
+      - "5432:5432"
+    volumes:
+      # 18+ wants the whole directory, not .../data: the image lays data out in
+      # major-version subdirectories so pg_upgrade --link can work across them.
+      - postgres-data:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform_admin -d platform"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.41
+    # `server` runs master + volume + filer + S3 in one process: the whole store
+    # as one node, which is why no advertised address (-ip) needs setting — the
+    # components find each other on the container's own network.
+    command: >
+      server -dir=/data -master.volumeSizeLimitMB=256
+      -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    ports:
+      - "8333:8333" # S3 gateway — the archive endpoint (consumed at A5)
+      - "9333:9333" # master UI, for looking at what the rig is holding
+    volumes:
+      - seaweed-data:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # 127.0.0.1, not localhost: the container resolves localhost to ::1 first
+      # and the master listens on IPv4 only, so the name never connects.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9333/cluster/status"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+  seaweed-data:

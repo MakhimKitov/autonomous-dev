@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "The rig's S3 identities. Dev-only credentials: the gateway publishes to",
+    "localhost and the volumes are throwaway. The platform reads its archive",
+    "credentials from ARCHIVE_URL (A5) — the ledger never stores a secret value,",
+    "only refs (STORES.md), and no burst ever holds these at all."
+  ],
+  "identities": [
+    {
+      "name": "platform",
+      "credentials": [
+        {
+          "accessKey": "platform",
+          "secretKey": "platform-dev-secret"
+        }
+      ],
+      "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+    }
+  ]
+}

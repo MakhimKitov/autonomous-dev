@@ -1,0 +1,12 @@
+-- The rig's second role. STORES.md gives the ledger two: platform_admin (this
+-- database's owner, created by POSTGRES_USER — owns the schema, runs migrations
+-- and retention) and platform_app, which is what replicas connect as. The split
+-- is what makes the append-only tables append-only: platform_app's grants are
+-- walls, not promises.
+--
+-- Created empty-handed on purpose. A4 hands it its grants along with the tables
+-- that need them; until then the platform connects as platform_admin.
+--
+-- Runs once, on an empty volume (docker-entrypoint-initdb.d). Dev-only password:
+-- the rig publishes to localhost and its volumes are throwaway.
+CREATE ROLE platform_app LOGIN PASSWORD 'platform_app';

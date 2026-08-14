@@ -45,6 +45,22 @@ uv run control-plane run --repo ../discord-bot     # loop (--once for a single t
 uv run control-plane stop                          # kill switch: STOP flag + docker kill
 ```
 
+## Stores
+
+SQLite + a local directory by default; the service backends are presence toggles,
+not modes (`STORES.md`). The dev rig supplies both:
+
+```bash
+docker compose -f docker/compose.yaml up -d --wait   # Postgres + SeaweedFS
+export LEDGER_DSN=postgresql://platform_admin:platform@localhost:5432/platform
+uv run control-plane migrate                         # numbered SQL; idempotent
+uv run control-plane migrate --check                 # exit 1 if anything is pending
+```
+
+Schema changes are `packages/control-plane/src/control_plane/migrations/NNNN_slug.sql`
+— never ad-hoc DDL in the store layer. With `LEDGER_DSN` set, `uv run pytest` also
+runs the Postgres-backed tests (each in a throwaway database).
+
 ## Test
 
 ```bash

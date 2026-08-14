@@ -23,6 +23,16 @@ uv run control-plane burst --task-id t1 --repo ../discord-bot --mode check --dat
 uv run pytest          # structural tests, no network
 ```
 
+The service stores are optional and off by default. To run against them, bring up
+the dev rig (Postgres + SeaweedFS) and point `LEDGER_DSN` at it:
+
+```bash
+docker compose -f docker/compose.yaml up -d --wait
+export LEDGER_DSN=postgresql://platform_admin:platform@localhost:5432/platform
+uv run control-plane migrate          # apply the schema; a second run is a no-op
+docker compose -f docker/compose.yaml down -v
+```
+
 ## Status
 
 **Phase 0, M0 done** — the `control-plane` / `dev-agent` workspace seam
