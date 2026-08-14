@@ -28,7 +28,7 @@ the dev rig (Postgres + SeaweedFS) and point `LEDGER_DSN` at it:
 
 ```bash
 docker compose -f docker/compose.yaml up -d --wait
-export LEDGER_DSN=postgresql://platform_admin:platform@localhost:5432/platform
+export LEDGER_DSN='postgresql://platform_admin:platform@localhost:5432/platform?sslmode=disable'
 uv run control-plane migrate          # apply the schema; a second run is a no-op
 docker compose -f docker/compose.yaml down -v
 ```

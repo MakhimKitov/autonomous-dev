@@ -100,6 +100,14 @@ walls (below). Migrations are numbered SQL files applied by the
 `control-plane migrate` verb against `schema_migrations(version, applied_at)`
 (A2).
 
+**The executable copy of this section is `schema.sql`**, and CI proves the two
+agree — a migrated database diffed against that file must come back empty
+(`ARCHITECTURE.md` §12, "Schema authoring"). Until Stage A lands, `schema.sql`
+holds the MVP shape rather than the target below, and converges as A4–A6 land; at
+A6 they are the same thing and this block becomes a pointer to the file. Three
+walls are outside what a schema diff can see — the `roles_pipeline_guard` trigger
+and the append-only grants — and are verified by provoking them instead.
+
 ```sql
 -- repositories — one row per registered repository; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
