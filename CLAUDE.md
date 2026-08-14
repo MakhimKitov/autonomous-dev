@@ -52,14 +52,34 @@ not modes (`STORES.md`). The dev rig supplies both:
 
 ```bash
 docker compose -f docker/compose.yaml up -d --wait   # Postgres + SeaweedFS
-export LEDGER_DSN=postgresql://platform_admin:platform@localhost:5432/platform
+export LEDGER_DSN='postgresql://platform_admin:platform@localhost:5432/platform?sslmode=disable'
 uv run control-plane migrate                         # numbered SQL; idempotent
 uv run control-plane migrate --check                 # exit 1 if anything is pending
 ```
 
-Schema changes are `packages/control-plane/src/control_plane/migrations/NNNN_slug.sql`
-— never ad-hoc DDL in the store layer. `open_ledger` is the one place the backend is
-chosen; nothing else may name a backend.
+`sslmode=disable` is in the DSN so the same string works for psycopg and for Atlas,
+which refuses to guess. `open_ledger` is the one place a backend is chosen; nothing
+else may name one.
+
+### Changing the schema
+
+`schema.sql` states what the schema should be; the numbered migrations are the path
+that gets a database there. Never write ad-hoc DDL in the store layer, and never
+edit an applied migration.
+
+```bash
+# 1. edit schema.sql — the desired state
+# 2. ask Atlas what would have to change (read-only; ~30s, it spins its own dev db)
+atlas schema diff --env local --from "$LEDGER_DSN" --to file://schema.sql
+# 3. save that SQL as the next migrations/NNNN_slug.sql, then apply it
+uv run control-plane migrate
+# 4. re-run step 2 — "Schemas are synced" is what CI checks
+```
+
+Atlas is a development instrument, never a runtime dependency: it diffs and it
+lints, `control-plane migrate` applies. Two things it cannot see — triggers and
+grants — so walls of that kind are tested by provoking them, not by diffing
+(`ARCHITECTURE.md` §12).
 
 With `LEDGER_DSN` set, `uv run pytest` additionally runs the ledger contract
 (`test_ledger_contract.py`) against Postgres as well as SQLite, in a throwaway

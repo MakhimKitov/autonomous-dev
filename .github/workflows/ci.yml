@@ -33,12 +33,18 @@ jobs:
           --health-cmd "pg_isready -U platform_admin -d platform"
           --health-interval 2s --health-timeout 3s --health-retries 30
     env:
-      LEDGER_DSN: postgresql://platform_admin:platform@localhost:5432/platform
+      # sslmode is explicit so this one string works for psycopg and for Atlas,
+      # which refuses to guess (the rig speaks no TLS).
+      LEDGER_DSN: postgresql://platform_admin:platform@localhost:5432/platform?sslmode=disable
+      ATLAS_DEV_URL: postgresql://platform_admin:platform@localhost:5432/atlas_dev?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+      - uses: ariga/setup-atlas@v0
+        with:
+          version: v1.2.1 # pinned: the drift check below reads Atlas's output
       - run: uv sync --locked
       - name: from zero
         run: uv run control-plane migrate
@@ -46,5 +52,28 @@ jobs:
         run: uv run control-plane migrate
       - name: no pending migrations left
         run: uv run control-plane migrate --check
+      - name: an empty database for Atlas to normalize schema.sql in
+        # A database on the service we already have, rather than Atlas's
+        # docker:// default — no second image to pull. psycopg, not psql, so the
+        # step depends on nothing the project doesn't already install.
+        run: |
+          uv run python - <<'PY'
+          import os, psycopg
+          psycopg.connect(os.environ["LEDGER_DSN"], autocommit=True).execute("CREATE DATABASE atlas_dev")
+          PY
+      - name: schema.sql and the migrations agree
+        # The gate #58 bought: what `migrate` just built, compared against what
+        # schema.sql declares. Anything but "synced" is drift between the two.
+        # `atlas schema diff` exits 0 either way, so the message is the signal —
+        # which means a wording change in Atlas fails this closed, on purpose.
+        run: |
+          out=$(atlas schema diff --env local \
+            --var dev_url="$ATLAS_DEV_URL" \
+            --from "$LEDGER_DSN" --to "file://schema.sql" 2>&1)
+          echo "$out"
+          case "$out" in
+            *"Schemas are synced"*) ;;
+            *) echo "::error::schema.sql and the migration directory have drifted — see the plan above"; exit 1 ;;
+          esac
       - name: the suite, against Postgres
         run: uv run pytest

@@ -507,6 +507,37 @@ Same architecture throughout — exposure is graduated, not the design.
   translators that decide nothing and hold tracker creds only, and the control plane
   snapshots the task contract into the ledger at claim time (auditable).
 
+- **Schema authoring — a declared desired state, diffed (2026-08).** The schema is
+  stated once, in `schema.sql`, and **Atlas** computes the difference between it and
+  what the migration directory actually builds; CI asserts that difference is empty
+  on every PR. Before this, "the canonical DDL is authoritative" (`STORES.md`) was a
+  claim about a markdown block that nothing verified, and Stage A roughly triples the
+  schema (A4–A6) — the drift would have been found at gate A7 or by a reader, not by
+  a test. **Alembic was rejected**: it brings SQLAlchemy into a store layer whose
+  design is no ORM and four hand-written statement shapes, and its autogenerate wants
+  ORM metadata this repo will never declare. `migra`, the pure-Python schema-diff
+  route, has been deprecated since 2022, so declarative diffing in Python is Atlas or
+  nothing.
+
+  Three boundaries make this cheap rather than a dependency:
+
+  - **Atlas never applies anything.** `control-plane migrate` still owns the apply
+    path and `schema_migrations`, so no server needs the binary — only a developer's
+    machine and CI. `atlas.hcl` deliberately omits `url`/`src` so that
+    `atlas schema apply`, which would rewrite a database to match `schema.sql` and
+    skip migrations entirely, fails for want of a target instead of working.
+  - **Atlas never owns the migration directory.** It wants its own `atlas.sum` and
+    its own timestamped file names; the directory already has an owner with a
+    different convention (`NNNN_slug.sql`, contiguous, enforced at discovery). Atlas
+    computes the SQL and a human puts it in the next numbered file.
+  - **Its view has a documented hole.** The community version reads tables, columns,
+    indexes and constraints, and **skips triggers, functions and privileges** — which
+    is three of `STORES.md`'s walls, including `roles_pipeline_guard` and the
+    append-only grants. Those are verified by provoking them (A4's *done when*),
+    which is the better proof anyway; the schema diff is not to be read as the whole
+    truth about the database. The advanced `migrate lint` suite is Pro; the
+    unsafe-DDL niche it covers is #56's, free.
+
 **Still open**
 
 - Transcript-growth policy — **gated on the auto-compaction re-verify (§6).** If the SDK
