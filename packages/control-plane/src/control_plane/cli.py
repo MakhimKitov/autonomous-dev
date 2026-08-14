@@ -36,7 +36,7 @@ from control_plane.models import TaskRecord
 from control_plane.review import REVIEWER_APP_PREFIX, ReviewPolicy, ReviewPolicyError
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
-from control_plane.store import LEDGER_DSN_ENV, SqliteLedger
+from control_plane.store import LEDGER_DSN_ENV, LEDGER_FILENAME, open_ledger
 from control_plane.telemetry import init_telemetry
 from control_plane.testing import E2EPolicy, E2EPolicyError
 from dev_agent.log import configure_logging
@@ -284,9 +284,11 @@ def _stop(args: argparse.Namespace) -> int:
     flag.parent.mkdir(parents=True, exist_ok=True)
     flag.touch()
     log.info("stop flag written", flag=str(flag))
-    ledger_path = data_dir / "ledger.sqlite3"
-    if ledger_path.is_file():
-        for burst in SqliteLedger(ledger_path).running_bursts():
+    # Ask whichever ledger this deployment has. Guarded so `stop` before any run
+    # doesn't create an empty SQLite file just to find nothing in it.
+    dsn_configured = bool(os.environ.get(LEDGER_DSN_ENV, "").strip())
+    if dsn_configured or (data_dir / LEDGER_FILENAME).is_file():
+        for burst in open_ledger(data_dir).running_bursts():
             subprocess.run(["docker", "kill", f"burst-{burst.burst_id}"], check=False, capture_output=True)
             log.info("live burst killed", container=f"burst-{burst.burst_id}")
     log.info("the scheduler exits before its next spawn — remove the flag to allow `run` again")

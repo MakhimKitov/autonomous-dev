@@ -20,7 +20,7 @@ from control_plane.github_auth import (
 )
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, resolve_model
-from control_plane.store import LocalSessionArchive, SqliteLedger
+from control_plane.store import Ledger, LocalSessionArchive, open_ledger
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
 
@@ -33,7 +33,7 @@ class PlatformStores:
 
     data_dir: Path
     archive: LocalSessionArchive
-    ledger: SqliteLedger
+    ledger: Ledger
 
     @classmethod
     def open(cls, data_dir: Path) -> PlatformStores:
@@ -41,7 +41,7 @@ class PlatformStores:
         return cls(
             data_dir=data_dir,
             archive=LocalSessionArchive(data_dir / "sessions"),
-            ledger=SqliteLedger(data_dir / "ledger.sqlite3"),
+            ledger=open_ledger(data_dir),
         )
 
 

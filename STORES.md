@@ -356,7 +356,7 @@ What Stage A moves, and where:
 | `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5, backfilled at A6 |
 | ISO-`TEXT` timestamps everywhere | `timestamptz` columns, strings at the edge | A3 |
 | `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb — for Postgres; the single-node SQLite variant keeps self-bootstrapping until A6 retires it as an origin | A2 |
-| no claim verbs (single process) | lease + CAS statements in the `Ledger` protocol | A3 (shapes), E2 (used in anger) |
+| no claim verbs (single process) | lease + CAS statements in the `Ledger` protocol | A3 (the finalize CAS), E1 (`claimed_by`/`claimed_until` + the claim verbs), E2 (used in anger) |
 | STOP flag on the filesystem | `org_state` row | E3 |
 
 The `Ledger` protocol keeps its nine MVP methods; new verbs (claim, CAS

@@ -7,20 +7,28 @@ stores, two protocols:
 - ``SessionArchive`` — the raw-transcript blob store. Phase-0 backend is a local
   directory of tarballs; the SeaweedFS (S3) backend implements the same protocol
   later without touching callers.
-- ``Ledger`` — the queryable index (tasks, burst ledger, violations). Phase-0
-  backend is SQLite (stdlib); Postgres later, same protocol.
+- ``Ledger`` — the queryable index (tasks, burst ledger, violations). Two backends
+  behind one protocol: ``SqliteLedger`` here, ``PostgresLedger`` in ``postgres.py``.
+  ``open_ledger`` picks by the presence of ``LEDGER_DSN`` — the same design with
+  and without contention, never a mode flag.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import sqlite3
 import tarfile
 from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Protocol
 
+import structlog
+
 from control_plane.models import BurstRecord, TaskRecord, Violation, utc_now
+
+log = structlog.get_logger()
 
 # The ledger's presence toggle (STORES.md): set to a Postgres DSN, the ledger is
 # the service database, whose schema `control-plane migrate` owns; unset, it is
@@ -89,10 +97,38 @@ class Ledger(Protocol):
     def tasks_by_status(self, *statuses: str) -> list[TaskRecord]: ...
     def record_burst(self, burst: BurstRecord) -> None: ...
     def finish_burst(self, burst: BurstRecord) -> None: ...
+    def get_burst(self, burst_id: str) -> BurstRecord | None: ...
     def running_bursts(self) -> list[BurstRecord]: ...
     def bursts_started_since(self, since_iso: str) -> int: ...
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
+    def close(self) -> None: ...
+
+
+LEDGER_FILENAME = "ledger.sqlite3"
+
+
+def open_ledger(data_dir: Path) -> Ledger:
+    """The ledger this deployment has: Postgres if ``LEDGER_DSN`` is set, else the
+    SQLite file under ``data_dir``. The one place that choice is made."""
+    dsn = os.environ.get(LEDGER_DSN_ENV, "").strip()
+    if not dsn:
+        return SqliteLedger(data_dir / LEDGER_FILENAME)
+    from control_plane.postgres import PostgresLedger  # local: keeps the seam one-way
+
+    log.info("ledger backend is postgres", dsn=_redact(dsn))
+    return PostgresLedger(dsn)
+
+
+def _redact(dsn: str) -> str:
+    """A DSN is loggable; the password inside it is not.
+
+    Both forms psycopg accepts: the URL's ``//user:pass@host`` (a password must
+    percent-encode ``@``, so matching to the last one is safe) and the key=value
+    conninfo's ``password=``.
+    """
+    url_form = re.sub(r"//([^:/@]+):[^@]*@", r"//\1:***@", dsn)
+    return re.sub(r"(password\s*=\s*)\S+", r"\1***", url_form)
 
 
 _SCHEMA = """
@@ -200,14 +236,33 @@ class SqliteLedger:
         self._conn.commit()
 
     def finish_burst(self, burst: BurstRecord) -> None:
-        self._conn.execute(
+        """Finalize exactly once, by the same CAS the Postgres backend uses.
+
+        One process can't race itself, so this guard buys nothing here today —
+        it exists because the two backends have to be indistinguishable to
+        callers (gate A7), and because the semantics should be settled in the
+        cheap place before E1 makes them load-bearing.
+        """
+        cursor = self._conn.execute(
             "UPDATE bursts SET status=:status, finished_at=:finished_at, exit_code=:exit_code, "
             "model=:model, cost_usd=:cost_usd, input_tokens=:input_tokens, output_tokens=:output_tokens, "
             "num_turns=:num_turns, session_id=:session_id "
-            "WHERE burst_id=:burst_id",
+            "WHERE burst_id=:burst_id AND status='running'",
             asdict(burst),
         )
         self._conn.commit()
+        if cursor.rowcount == 0:
+            log.warning(
+                "burst already finalized — result not overwritten",
+                burst=burst.burst_id,
+                attempted_status=burst.status,
+            )
+
+    def get_burst(self, burst_id: str) -> BurstRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM bursts WHERE burst_id = ?", (burst_id,)
+        ).fetchone()
+        return BurstRecord(**dict(row)) if row else None
 
     def running_bursts(self) -> list[BurstRecord]:
         rows = self._conn.execute("SELECT * FROM bursts WHERE status = 'running'").fetchall()
@@ -230,9 +285,11 @@ class SqliteLedger:
         names = [f.name for f in fields(Violation)]
         select = f"SELECT {', '.join(names)} FROM violations"
         if task_id is None:
-            rows = self._conn.execute(select).fetchall()
+            rows = self._conn.execute(f"{select} ORDER BY id").fetchall()
         else:
-            rows = self._conn.execute(f"{select} WHERE task_id = ?", (task_id,)).fetchall()
+            rows = self._conn.execute(
+                f"{select} WHERE task_id = ? ORDER BY id", (task_id,)
+            ).fetchall()
         return [Violation(**dict(row)) for row in rows]
 
     def close(self) -> None:
