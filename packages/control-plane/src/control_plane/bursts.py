@@ -117,6 +117,12 @@ def execute_burst(
     resume = None if fresh else task.session_id
 
     burst = BurstRecord(burst_id=burst_id, task_id=task.task_id, kind=kind, role=role, model=model)
+    # The task row goes in before the burst row that points at it. A4's
+    # bursts.task_id foreign key is what makes the order load-bearing, but the
+    # order was always the honest one: the CLI can be handed a task the ledger has
+    # never seen, and a burst is evidence about a task, so the task exists first.
+    # The second upsert after the harvest is what records the burst's results.
+    stores.ledger.upsert_task(task)
     with burst_span(task.task_id, burst_id, role, kind, model=model) as (span, traceparent):
         burst.trace_id = f"{span.get_span_context().trace_id:032x}"
         stores.ledger.record_burst(burst)

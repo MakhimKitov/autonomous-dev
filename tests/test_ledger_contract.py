@@ -17,6 +17,7 @@ would return it verbatim, which is a divergence no caller can currently provoke.
 """
 
 import os
+import sqlite3
 from dataclasses import asdict
 from uuid import uuid4
 
@@ -66,7 +67,10 @@ def ledger(request, tmp_path):
 
         dsn = request.getfixturevalue("pg_dsn")  # lazily: sqlite runs need no database
         with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute("TRUNCATE tasks, bursts, violations")
+            # memory_entries references bursts, so it comes along — TRUNCATE
+            # refuses to leave a referencing table out (CASCADE would take
+            # whatever else appeared later, which is not the same promise).
+            conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries")
         backend = PostgresLedger(dsn)
     yield backend
     backend.close()
@@ -182,9 +186,12 @@ def test_finalize_happens_once_and_the_first_result_stands(ledger):
 
 
 def test_running_bursts_sees_only_the_unfinished(ledger):
-    ledger.upsert_task(_task())
-    ledger.record_burst(_burst("b1"))
-    ledger.record_burst(_burst("b2"))
+    # two running bursts means two tasks: one per task is a wall on Postgres from
+    # A4, and the scheduler never wanted more than that anyway
+    ledger.upsert_task(_task("42"))
+    ledger.upsert_task(_task("43"))
+    ledger.record_burst(_burst("b1", task_id="42"))
+    ledger.record_burst(_burst("b2", task_id="43"))
     assert {b.burst_id for b in ledger.running_bursts()} == {"b1", "b2"}
 
     done = ledger.get_burst("b1")
@@ -197,9 +204,10 @@ def test_running_bursts_sees_only_the_unfinished(ledger):
 
 
 def test_bursts_started_since_counts_the_window(ledger):
-    ledger.upsert_task(_task())
-    ledger.record_burst(_burst("old", started_at="2026-08-13T09:00:00+00:00"))
-    ledger.record_burst(_burst("new", started_at="2026-08-14T09:00:00+00:00"))
+    ledger.upsert_task(_task("42"))
+    ledger.upsert_task(_task("43"))
+    ledger.record_burst(_burst("old", task_id="42", started_at="2026-08-13T09:00:00+00:00"))
+    ledger.record_burst(_burst("new", task_id="43", started_at="2026-08-14T09:00:00+00:00"))
 
     assert ledger.bursts_started_since("2026-08-14T00:00:00+00:00") == 1
     assert ledger.bursts_started_since("2026-08-01T00:00:00+00:00") == 2
@@ -221,6 +229,53 @@ def test_violations_by_task_and_in_full(ledger):
     assert for_task[1].detail == "rm -rf /"
     assert len(ledger.violations()) == 3
     assert ledger.violations("nobody") == []
+
+
+# --- the events outbox ---
+
+
+def test_every_violation_announces_itself(ledger):
+    """"Any new violations row is a page" (TO-BE §11) is implemented as an outbox
+    row, written in the same breath as the violation: one CTE on Postgres, one
+    transaction on SQLite, the same contract either way."""
+    ledger.record_violation(Violation(task_id="42", burst_id="b1", tool="Bash", reason="WALL"))
+
+    events = ledger.events()
+    assert [event.kind for event in events] == ["violation_recorded"]
+
+    payload = dict(events[0].payload)
+    # the id of the row it announces, so a consumer can read the rest of it
+    assert isinstance(payload.pop("violation_id"), int)
+    assert payload == {"task_id": "42", "burst_id": "b1", "tool": "Bash", "reason": "WALL"}
+    assert events[0].created_at  # an ISO string, like every other timestamp here
+
+
+def test_the_cursor_is_the_consumers_own_position(ledger):
+    """Read by cursor, at-least-once, replayable — no acknowledgement, no
+    deletion, and no subscription. Each consumer keeps its own place."""
+    for tool in ("Read", "Write", "Bash"):
+        ledger.record_violation(Violation(task_id="42", burst_id="b1", tool=tool, reason="WALL"))
+
+    everything = ledger.events()
+    assert [event.payload["tool"] for event in everything] == ["Read", "Write", "Bash"]
+    assert [event.id for event in everything] == sorted(event.id for event in everything)
+
+    after_first = ledger.events(after_id=everything[0].id)
+    assert [event.id for event in after_first] == [event.id for event in everything[1:]]
+    assert ledger.events(after_id=everything[-1].id) == []
+    assert ledger.events() == everything  # replayable: reading it changed nothing
+
+
+def test_a_violation_and_its_event_are_one_write(ledger):
+    """Provoked rather than asserted: a violation the database refuses must leave
+    no event behind, or the platform pages someone about a row that isn't there."""
+    with pytest.raises((sqlite3.IntegrityError, psycopg.IntegrityError)):
+        ledger.record_violation(
+            Violation(task_id=None, burst_id="b1", tool="Bash", reason="WALL")  # task_id is NOT NULL
+        )
+
+    assert ledger.violations() == []
+    assert ledger.events() == []
 
 
 # --- the adapter edge ---
@@ -292,7 +347,7 @@ def test_a_dropped_connection_costs_a_reconnect_not_the_loop(pg_dsn):
     from control_plane.postgres import PostgresLedger
 
     with psycopg.connect(pg_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE tasks, bursts, violations")
+        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries")
     ledger = PostgresLedger(pg_dsn)
     ledger.upsert_task(_task())
 

@@ -72,6 +72,14 @@ SELECT 'task_blocked', jsonb_build_object('task_id', task_id, 'repository', repo
 FROM moved;
 ```
 
+The first one in the code is `record_violation` (A4): the violation and its
+`violation_recorded` event, plus a `pg_notify` on the wake channel, in one
+statement. Note the shape — the main statement *consumes* the CTE. Postgres does
+not order an unreferenced data-modifying CTE against the statement around it, so
+two sub-statements touching the same unique index can race each other; anything
+that finalizes one row and inserts its successor has to carry the data
+dependency, as the example above does.
+
 **Aggregate — derive, don't mirror.** Anything computable from history is a
 query, never a maintained counter: subscription usage is a rolling-window
 aggregate over `bursts`, product daily counts likewise (§12's
@@ -102,11 +110,18 @@ walls (below). Migrations are numbered SQL files applied by the
 
 **The executable copy of this section is `schema.sql`**, and CI proves the two
 agree — a migrated database diffed against that file must come back empty
-(`ARCHITECTURE.md` §12, "Schema authoring"). Until Stage A lands, `schema.sql`
-holds the MVP shape rather than the target below, and converges as A4–A6 land; at
-A6 they are the same thing and this block becomes a pointer to the file. Three
-walls are outside what a schema diff can see — the `roles_pipeline_guard` trigger
-and the append-only grants — and are verified by provoking them instead.
+(`ARCHITECTURE.md` §12, "Schema authoring"). It converges on the block below as
+the stage lands: org tables and walls at A4, per-burst snapshots at A5, composite
+identity at A6, at which point the two are the same thing and this block becomes a
+pointer to the file. The claim columns and `bursts.subscription_id` arrive with the
+stages that use them (E1/E2, F).
+
+Four things here are outside what a schema diff can see, all measured rather than
+assumed: the `roles_pipeline_guard` trigger, every grant, the seeded role rows,
+and — the sharp one — whether a constraint is `NOT VALID`. Atlas calls a database
+whose validation step never ran *synced*, so a wall enforced for new rows only
+looks exactly like one that holds for all of them. Provocation tests cover the
+first three; `pg_constraint.convalidated` covers the fourth.
 
 ```sql
 -- repositories — one row per registered repository; implements TO-BE §2's
@@ -290,14 +305,22 @@ INSERT INTO org_state DEFAULT VALUES;
 | A burst finalizes exactly once | CAS: `UPDATE bursts SET … WHERE burst_id = $1 AND status = 'running'` — rowcount 0 means already finalized or killed; plus the `running ⟺ finished_at IS NULL` CHECK |
 | One task per issue | `UNIQUE (repository, issue_number)`; the derived `task_id` makes collisions unrepresentable |
 | `violations` / `audit` / `events` are append-only | grants: `platform_app` gets `SELECT, INSERT` only — append-only is a grant, not a promise |
-| Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows; CHECKs pin the `identity`/`sink` enumerations for every row |
+| Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to the wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows, plus renames of `role` itself and deletion — a row that can be dropped and re-inserted is not frozen. CHECKs pin the `identity`/`sink` enumerations for every row, and `platform_app` holds no write grant on `roles` at all, so the runtime cannot open a trust slot |
 | No secret values at rest | nothing to enforce — no column exists for a value; refs only |
 
-SQLite parity: partial unique indexes and CHECKs work identically. Grants and
-`SKIP LOCKED` don't exist there — the single-node variant runs one process, so
-claims are uncontended CAS updates with the same semantics, and append-only is
-code discipline. The walls that guard concurrency are real exactly where
-concurrency is real.
+Every one of these is provoked in `tests/test_schema_walls.py` and required to
+raise — the two that a schema diff cannot see (the trigger, the grants) have
+nothing else standing behind them.
+
+SQLite carries none of them, deliberately. It *can* express partial unique
+indexes and CHECKs, but it cannot add a constraint to a table that already
+exists, so a wall placed in its bootstrap DDL would hold in ledgers created after
+the change and be silently missing from every older file — worse than absent,
+because nothing can tell you which one you're holding. Grants and `SKIP LOCKED`
+don't exist there at all. The single-node variant runs one process, so claims are
+uncontended CAS updates with the same semantics, append-only is code discipline,
+and A6 retires that ledger as an origin. The walls that guard concurrency are
+real exactly where concurrency is real.
 
 ## The events outbox
 
@@ -308,11 +331,16 @@ instruments (`TO-BE.md` §12).
 
 - **Written atomically** with the mutation they announce, via the CTE shape
   above. An event without its mutation, or a mutation without its event,
-  cannot be observed.
+  cannot be observed. `violation_recorded` is the first kind (A4) — the alert
+  signal §11 documents; `capacity_exhausted`, `subscription_expiring` and
+  `task_blocked` arrive with the stages that raise them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
-  — at-least-once, ordered, replayable; each consumer keeps its own cursor.
-  No `LISTEN/NOTIFY` dependency: like webhooks (§5), a push channel may *wake*
-  a consumer early, but the poll is the truth.
+  — at-least-once, ordered, replayable; each consumer keeps its own cursor, and
+  the `Ledger` protocol's `events(after_id)` is that read. No `LISTEN/NOTIFY`
+  dependency: like webhooks (§5), a push channel may *wake* a consumer early, but
+  the poll is the truth. The channel is `events`, notified from inside the same
+  statement — transactional, so it is delivered at commit or not at all, and
+  dropped entirely if nobody happens to be listening.
 - **Retention** is a `platform_admin` concern (the runtime role can't delete):
   prune by age once consumers confirm cursors past the horizon.
 

@@ -19,15 +19,14 @@ schema, which is right for money and wrong for `BurstRecord.cost_usd: float | No
 — psycopg would hand back `Decimal`. It converts at the same edge.
 
 **Nothing holds a transaction open.** The connection is `autocommit`, every write
-is one statement, and the only compare-and-set is `finish_burst`'s. There is no
-method here that could keep a transaction open across application logic or I/O
-(STORES.md, "transactional, but not interactive"), and no ORM to accidentally
-introduce one.
+is one statement — including `record_violation`, which writes two rows through one
+data-modifying CTE rather than two statements in a transaction. The only
+compare-and-set is `finish_burst`'s. There is no method here that could keep a
+transaction open across application logic or I/O (STORES.md, "transactional, but
+not interactive"), and no ORM to accidentally introduce one.
 
 Deliberately still absent: the lease/claim statements, which need `claimed_by` /
-`claimed_until` columns and land with E1 (#32) where contention is real; and the
-mutation+outbox CTE with its NOTIFY, which needs the `events` table A4 (#15)
-creates. Both are shapes with nowhere to write until then.
+`claimed_until` columns and land with E1 (#32) where contention is real.
 
 Connection handling is one long-lived connection with a reconnect guard — enough
 for a single scheduler, and the seam a pool replaces when replicas arrive (E).
@@ -43,7 +42,15 @@ import psycopg
 import structlog
 from psycopg.rows import dict_row
 
-from control_plane.models import BurstRecord, TaskRecord, Violation, utc_now
+from control_plane.models import (
+    EVENT_CHANNEL,
+    EVENT_VIOLATION_RECORDED,
+    BurstRecord,
+    Event,
+    TaskRecord,
+    Violation,
+    utc_now,
+)
 
 log = structlog.get_logger()
 
@@ -53,6 +60,7 @@ log = structlog.get_logger()
 _TASK_TIMESTAMPS = ("last_burst_at", "created_at", "updated_at")
 _BURST_TIMESTAMPS = ("started_at", "finished_at")
 _VIOLATION_TIMESTAMPS = ("at",)
+_EVENT_TIMESTAMPS = ("created_at",)
 
 # numeric → float on load; see the module docstring.
 _BURST_NUMERICS = ("cost_usd",)
@@ -207,13 +215,40 @@ class PostgresLedger:
         ).fetchone()
         return int(row["n"])
 
-    # --- violations ---
+    # --- violations, and the outbox row each one announces ---
 
     def record_violation(self, violation: Violation) -> None:
+        """Record the violation and announce it, in one statement (STORES.md).
+
+        The mutation+outbox shape: a data-modifying CTE, so the row and the event
+        commit together or not at all. An event without its violation would page
+        someone about nothing; a violation without its event would go unnoticed,
+        and "any new violations row is a page" is the platform's documented alert
+        signal (TO-BE §11). Two statements could produce either.
+
+        `pg_notify` rides along as the wake channel. It is transactional — the
+        notification is delivered at commit, never before, and dropped if the
+        statement rolls back — and it is not a delivery guarantee: a consumer with
+        nobody listening loses it, which is why the cursor poll over `events` is
+        the truth and this only ever makes it prompt.
+        """
         data = _bind(violation, _VIOLATION_TIMESTAMPS)
         columns = ", ".join(data)
         placeholders = ", ".join(f"%({column})s" for column in data)
-        self._execute(f"INSERT INTO violations ({columns}) VALUES ({placeholders})", data)
+        self._execute(
+            f"WITH recorded AS ("
+            f"    INSERT INTO violations ({columns}) VALUES ({placeholders})"
+            f"    RETURNING id, task_id, burst_id, tool, reason"
+            f"), announced AS ("
+            f"    INSERT INTO events (kind, payload)"
+            f"    SELECT %(kind)s, jsonb_build_object("
+            f"        'violation_id', id, 'task_id', task_id,"
+            f"        'burst_id', burst_id, 'tool', tool, 'reason', reason)"
+            f"    FROM recorded"
+            f"    RETURNING id"
+            f") SELECT pg_notify(%(channel)s, id::text) FROM announced",
+            {**data, "kind": EVENT_VIOLATION_RECORDED, "channel": EVENT_CHANNEL},
+        )
 
     def violations(self, task_id: str | None = None) -> list[Violation]:
         # explicit columns: the table carries an identity `id` the dataclass doesn't
@@ -225,6 +260,21 @@ class PostgresLedger:
                 f"SELECT {names} FROM violations WHERE task_id = %s ORDER BY id", (task_id,)
             ).fetchall()
         return [_load(row, Violation, _VIOLATION_TIMESTAMPS) for row in rows]
+
+    # --- the events outbox ---
+
+    def events(self, after_id: int = 0) -> list[Event]:
+        """The outbox from a cursor forward — at-least-once, ordered, replayable.
+
+        `after_id` is the consumer's own position; each keeps its own. There is no
+        acknowledgement and no deletion here: rows age out under retention, run by
+        platform_admin, once consumers have confirmed cursors past the horizon.
+        """
+        rows = self._execute(
+            "SELECT id, kind, payload, created_at FROM events WHERE id > %s ORDER BY id",
+            (after_id,),
+        ).fetchall()
+        return [_load(row, Event, _EVENT_TIMESTAMPS) for row in rows]
 
     def close(self) -> None:
         self._conn.close()

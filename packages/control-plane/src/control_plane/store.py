@@ -16,6 +16,7 @@ stores, two protocols:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -26,7 +27,14 @@ from typing import Protocol
 
 import structlog
 
-from control_plane.models import BurstRecord, TaskRecord, Violation, utc_now
+from control_plane.models import (
+    EVENT_VIOLATION_RECORDED,
+    BurstRecord,
+    Event,
+    TaskRecord,
+    Violation,
+    utc_now,
+)
 
 log = structlog.get_logger()
 
@@ -102,6 +110,7 @@ class Ledger(Protocol):
     def bursts_started_since(self, since_iso: str) -> int: ...
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
+    def events(self, after_id: int = 0) -> list[Event]: ...
     def close(self) -> None: ...
 
 
@@ -173,6 +182,12 @@ CREATE TABLE IF NOT EXISTS violations (
     reason TEXT NOT NULL,
     detail TEXT NOT NULL DEFAULT '',
     at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 """
 
@@ -275,10 +290,38 @@ class SqliteLedger:
         return int(row["n"])
 
     def record_violation(self, violation: Violation) -> None:
+        """Record the violation and announce it — both rows, or neither.
+
+        Postgres does this in one data-modifying CTE; SQLite has none, so the two
+        inserts share one transaction instead. The guarantee callers get is the
+        same: no violation without its event, no event without its violation.
+        Nothing consumes the outbox in the single-node variant — there are no
+        other systems to tell — but the row is written anyway, because a backend
+        that skips it would make `events()` answer differently depending on which
+        ledger you hold, and that is the one thing these two must never do.
+        """
         data = asdict(violation)
         cols = ", ".join(data)
         placeholders = ", ".join(f":{k}" for k in data)
-        self._conn.execute(f"INSERT INTO violations ({cols}) VALUES ({placeholders})", data)
+        cursor = self._conn.execute(
+            f"INSERT INTO violations ({cols}) VALUES ({placeholders})", data
+        )
+        self._conn.execute(
+            "INSERT INTO events (kind, payload, created_at) VALUES (?, ?, ?)",
+            (
+                EVENT_VIOLATION_RECORDED,
+                json.dumps(
+                    {
+                        "violation_id": cursor.lastrowid,
+                        "task_id": violation.task_id,
+                        "burst_id": violation.burst_id,
+                        "tool": violation.tool,
+                        "reason": violation.reason,
+                    }
+                ),
+                utc_now(),
+            ),
+        )
         self._conn.commit()
 
     def violations(self, task_id: str | None = None) -> list[Violation]:
@@ -291,6 +334,23 @@ class SqliteLedger:
                 f"{select} WHERE task_id = ? ORDER BY id", (task_id,)
             ).fetchall()
         return [Violation(**dict(row)) for row in rows]
+
+    def events(self, after_id: int = 0) -> list[Event]:
+        """The outbox from a cursor forward — the same read the Postgres backend
+        answers, over a table nothing polls here yet."""
+        rows = self._conn.execute(
+            "SELECT id, kind, payload, created_at FROM events WHERE id > ? ORDER BY id",
+            (after_id,),
+        ).fetchall()
+        return [
+            Event(
+                id=row["id"],
+                kind=row["kind"],
+                payload=json.loads(row["payload"]),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     def close(self) -> None:
         self._conn.close()
