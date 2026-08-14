@@ -58,8 +58,13 @@ uv run control-plane migrate --check                 # exit 1 if anything is pen
 ```
 
 Schema changes are `packages/control-plane/src/control_plane/migrations/NNNN_slug.sql`
-— never ad-hoc DDL in the store layer. With `LEDGER_DSN` set, `uv run pytest` also
-runs the Postgres-backed tests (each in a throwaway database).
+— never ad-hoc DDL in the store layer. `open_ledger` is the one place the backend is
+chosen; nothing else may name a backend.
+
+With `LEDGER_DSN` set, `uv run pytest` additionally runs the ledger contract
+(`test_ledger_contract.py`) against Postgres as well as SQLite, in a throwaway
+database. Everything else keeps its isolated SQLite ledger regardless — see
+`tests/conftest.py` for why.
 
 ## Test
 

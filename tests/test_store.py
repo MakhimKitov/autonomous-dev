@@ -1,7 +1,11 @@
-"""Platform stores: session archive roundtrip + ledger roundtrip."""
+"""Platform stores: the session archive, and SQLite's self-bootstrapping schema.
+
+The ledger's *behavior* is in test_ledger_contract.py, which runs one suite against
+every backend. This file keeps what is specific to these two implementations.
+"""
 
 import pytest
-from control_plane.models import BurstRecord, BurstStatus, TaskRecord, Violation
+from control_plane.models import BurstRecord
 from control_plane.store import LocalSessionArchive, SqliteLedger
 
 
@@ -52,32 +56,8 @@ def test_archive_checksum_mismatch_raises(tmp_path):
         archive.get("42", tmp_path / "dest")
 
 
-def test_ledger_task_and_burst_roundtrip(tmp_path):
-    ledger = SqliteLedger(tmp_path / "ledger.sqlite3")
-    assert ledger.get_task("42") is None
-
-    ledger.upsert_task(TaskRecord(task_id="42", repo="/r"))
-    task = ledger.get_task("42")
-    assert task is not None and task.repo == "/r"
-
-    task.session_id = "sess-1"
-    ledger.upsert_task(task)
-    assert ledger.get_task("42").session_id == "sess-1"
-
-    burst = BurstRecord(burst_id="b1", task_id="42", trace_id="0" * 32, model="claude-sonnet-5")
-    ledger.record_burst(burst)
-    burst.status = BurstStatus.SUCCEEDED
-    burst.exit_code = 0
-    burst.cost_usd = 0.5
-    burst.model = "claude-sonnet-5-20260203"  # harvest overwrote requested with resolved
-    ledger.finish_burst(burst)
-    row = ledger._conn.execute("SELECT model FROM bursts WHERE burst_id='b1'").fetchone()
-    assert row["model"] == "claude-sonnet-5-20260203"
-
-    ledger.record_violation(Violation(task_id="42", burst_id="b1", tool="Read", reason="WALL"))
-    found = ledger.violations("42")
-    assert len(found) == 1 and found[0].tool == "Read"
-    assert ledger.violations("other") == []
+# The ledger's behavior lives in test_ledger_contract.py, which runs it against
+# every backend. What stays here is SQLite-only: its self-bootstrapping schema.
 
 
 def test_ledger_migrates_pre_model_schema(tmp_path):
