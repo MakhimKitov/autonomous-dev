@@ -1,0 +1,40 @@
+# squawk — the unsafe-DDL linter over the migration directory (CI, per PR).
+#
+# The runner guarantees *when* a migration is applied; it cannot see what the SQL
+# does. This catches the class it can't: DDL that is correct and still stalls a
+# live replica. Harmless on a laptop, load-bearing from E1 (#32), where two
+# replicas roll through a schema change with the receiver live.
+#
+# Every exclusion below is a claim about this repo, not a way to quiet the tool. If
+# one stops being true, the rule goes back on.
+
+# `control-plane migrate` wraps each file in one transaction. That makes two whole
+# rule families inapplicable rather than merely inconvenient:
+#   - prefer-robust-stmts wants IF NOT EXISTS so a half-applied file can be rerun.
+#     A file cannot half-apply: it rolls back whole, and the state after a failure
+#     is always a prefix of the directory.
+#   - require-concurrent-index-creation wants CREATE INDEX CONCURRENTLY, which
+#     Postgres forbids inside a transaction block. If a concurrent index is ever
+#     genuinely needed, the runner needs a non-transactional escape hatch first —
+#     and that is a change to argue for, not a flag to pass.
+assume_in_transaction = true
+
+# The rig and CI both run 18.4; version-gated advice should match what we deploy.
+pg_version = "18.4"
+
+excluded_rules = [
+  # Our `integer` columns are bounded by design, not by oversight: attempts and
+  # review_rounds are capped by the scheduler rails, exit_code is 0–255, num_turns
+  # is capped per burst, pr_number is a GitHub number. Identity keys are already
+  # bigint where the rule is right (violations.id). Widening these would be waste
+  # dressed as caution.
+  "prefer-bigint-over-int",
+
+  # Satisfied once, in the runner, instead of six times in the files: migrate()
+  # issues SET LOCAL lock_timeout and SET LOCAL statement_timeout inside each
+  # migration's transaction, so no migration can forget them and none has to
+  # remember. See LOCK_TIMEOUT / STATEMENT_TIMEOUT in migrate.py for the values
+  # and why. The rules only read the SQL, so they cannot see this.
+  "require-lock-timeout",
+  "require-statement-timeout",
+]

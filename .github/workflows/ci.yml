@@ -15,6 +15,10 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest
+      - name: migrations take no unsafe locks
+        # Needs no database — it reads the SQL. Rules and exclusions live in
+        # .squawk.toml, each exclusion with the claim that justifies it.
+        run: uv run squawk packages/control-plane/src/control_plane/migrations/*.sql
 
   # The state block's per-PR proof: the schema applies from nothing, twice, and
   # the suite then runs against a real Postgres rather than SQLite alone.

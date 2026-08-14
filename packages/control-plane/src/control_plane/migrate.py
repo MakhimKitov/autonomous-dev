@@ -18,6 +18,10 @@ The rules, all enforced below rather than documented and hoped for:
 - **One transaction per file.** Postgres DDL is transactional, so a failing
   migration leaves nothing half-applied, and the versions before it stay applied
   and recorded — the state after a failure is a prefix, always.
+- **Bounded by two timeouts**, set here rather than written into every file: a
+  migration that cannot get its lock fails instead of queueing (and blocking every
+  query behind it), and a runaway one is cut off. `squawk` checks the rest of what
+  the SQL does; see `.squawk.toml`.
 - **One migrator at a time**, under an advisory lock. This is the one place a
   lock may outlive a statement (STORES.md's discipline governs *runtime* writes;
   migrations are admin-time, run by ``platform_admin`` before replicas start).
@@ -45,6 +49,20 @@ log = structlog.get_logger()
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 REGISTRY = "schema_migrations"
 FILENAME = re.compile(r"^(\d{4})_([a-z0-9-]+)\.sql$")
+
+# Every migration runs under both timeouts, set here rather than written into each
+# file so that no file can forget them (squawk's require-lock-timeout and
+# require-statement-timeout, satisfied once instead of six times).
+#
+# lock_timeout is short on purpose. A migration that cannot get its lock should
+# fail and be retried, not queue — a DDL statement waiting on a lock blocks every
+# query that arrives behind it, which is how a two-second ALTER takes an
+# application down for a minute.
+LOCK_TIMEOUT = "3s"
+# statement_timeout bounds a runaway migration. Generous for this schema's size; a
+# migration that legitimately needs longer (a large backfill, an index on a big
+# table) is the reason to reach for an override, and this is where to add one.
+STATEMENT_TIMEOUT = "60s"
 
 # pg_advisory_lock key: derived from the registry's name so it is stable across
 # builds without a magic number to keep in sync.
@@ -110,17 +128,17 @@ def _applied_versions(conn: psycopg.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-def status(dsn: str) -> tuple[list[str], list[Migration]]:
+def status(dsn: str, directory: Path = MIGRATIONS_DIR) -> tuple[list[str], list[Migration]]:
     """(applied versions, pending migrations). Reads only — writes nothing."""
-    available = discover()
+    available = discover(directory)
     with psycopg.connect(dsn) as conn:
         applied = _applied_versions(conn)
     return sorted(applied), pending(applied, available)
 
 
-def migrate(dsn: str) -> list[Migration]:
+def migrate(dsn: str, directory: Path = MIGRATIONS_DIR) -> list[Migration]:
     """Apply every pending migration. Returns what this call applied."""
-    available = discover()
+    available = discover(directory)
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("SELECT pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
         conn.execute(
@@ -131,6 +149,10 @@ def migrate(dsn: str) -> list[Migration]:
         todo = pending(_applied_versions(conn), available)
         for migration in todo:
             with conn.transaction():  # DDL and its registry row commit together
+                # SET LOCAL, so the timeouts last exactly as long as this
+                # migration and never leak onto the connection's later statements.
+                conn.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+                conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
                 conn.execute(migration.sql)
                 conn.execute(f"INSERT INTO {REGISTRY} (version) VALUES (%s)", (migration.version,))
             log.info("migration applied", version=migration.version, name=migration.name)
