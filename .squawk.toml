@@ -8,15 +8,19 @@
 # Every exclusion below is a claim about this repo, not a way to quiet the tool. If
 # one stops being true, the rule goes back on.
 
-# `control-plane migrate` wraps each file in one transaction. That makes two whole
-# rule families inapplicable rather than merely inconvenient:
-#   - prefer-robust-stmts wants IF NOT EXISTS so a half-applied file can be rerun.
-#     A file cannot half-apply: it rolls back whole, and the state after a failure
-#     is always a prefix of the directory.
-#   - require-concurrent-index-creation wants CREATE INDEX CONCURRENTLY, which
-#     Postgres forbids inside a transaction block. If a concurrent index is ever
-#     genuinely needed, the runner needs a non-transactional escape hatch first —
-#     and that is a change to argue for, not a flag to pass.
+# `control-plane migrate` wraps each file in one transaction. prefer-robust-stmts
+# then stops applying: it wants IF NOT EXISTS so a half-applied file can be rerun,
+# and a file cannot half-apply — it rolls back whole, and the state after a
+# failure is always a prefix of the directory.
+#
+# It does *not* silence require-concurrent-index-creation (measured, not assumed:
+# the rule still fires with this set). That is the right outcome. CONCURRENTLY is
+# forbidden inside a transaction block, so every index this project creates is a
+# blocking build, and each one should have to say why it is acceptable — at the
+# statement, with `-- squawk-ignore require-concurrent-index-creation`, which is
+# scoped to the next statement and leaves the rule live for the following one. If
+# a genuinely concurrent index is ever needed, the runner needs a
+# non-transactional escape hatch first: a change to argue for, not a flag to pass.
 assume_in_transaction = true
 
 # The rig and CI both run 18.4; version-gated advice should match what we deploy.

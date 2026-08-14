@@ -97,3 +97,31 @@ class Violation:
     reason: str
     detail: str = ""
     at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class Event:
+    """One outbox row: what the platform tells the outside world happened.
+
+    Read by cursor (`id` is the consumer's position) and never by subscription —
+    a push may wake a consumer early, the poll is the truth (STORES.md). The
+    payload carries only what routing an alert needs; the row it announces is
+    there to be read by whoever wants the rest.
+    """
+
+    id: int
+    kind: str
+    payload: dict
+    created_at: str
+
+
+# Event kinds, as they appear in `events.kind`. The set grows with the stages
+# that emit them (capacity_exhausted at F2, subscription_expiring at F4,
+# task_blocked with the scheduler's own events) — this is the one A4 ships,
+# because the violations feed is the alert signal the platform documents
+# (TO-BE §11: any new violations row is a page).
+EVENT_VIOLATION_RECORDED = "violation_recorded"
+
+# The optional wake channel. A consumer may LISTEN on it to poll sooner; nothing
+# is allowed to depend on a notification arriving.
+EVENT_CHANNEL = "events"

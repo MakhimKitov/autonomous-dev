@@ -530,13 +530,18 @@ Same architecture throughout — exposure is graduated, not the design.
     its own timestamped file names; the directory already has an owner with a
     different convention (`NNNN_slug.sql`, contiguous, enforced at discovery). Atlas
     computes the SQL and a human puts it in the next numbered file.
-  - **Its view has a documented hole.** The community version reads tables, columns,
-    indexes and constraints, and **skips triggers, functions and privileges** — which
-    is three of `STORES.md`'s walls, including `roles_pipeline_guard` and the
-    append-only grants. Those are verified by provoking them (A4's *done when*),
-    which is the better proof anyway; the schema diff is not to be read as the whole
-    truth about the database. The advanced `migrate lint` suite is Pro; the
-    unsafe-DDL niche it covers is #56's, free.
+  - **Its view has a documented hole**, wider than first written and now measured
+    against a real migrated database (A4). The community version reads tables,
+    columns, indexes and constraints, and **skips triggers, functions, privileges
+    and table data** — which is `roles_pipeline_guard`, every grant including the
+    append-only ones, and the seeded pipeline role rows. It also does not read
+    `pg_constraint.convalidated`, so it calls a database whose `VALIDATE
+    CONSTRAINT` step never ran *synced*: a wall enforced for new rows only looks
+    identical to one that holds for all of them. The first three are verified by
+    provoking them (A4's *done when*), which is the better proof anyway; the
+    fourth is one query in the same suite. The schema diff is not to be read as
+    the whole truth about the database. The advanced `migrate lint` suite is Pro;
+    the unsafe-DDL niche it covers is #56's, free.
 
 **Still open**
 
