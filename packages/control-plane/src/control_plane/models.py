@@ -54,6 +54,9 @@ class TaskRecord:
     repo: str
     status: str = TaskStatus.OPEN
     session_id: str | None = None
+    # The MVP's one-blob-per-task pointer. Nothing writes these since A5 — the
+    # snapshot lives on the burst that made it — and A6 (#17) backfills the blobs
+    # they still name into the tree and drops them.
     transcript_key: str | None = None
     transcript_checksum: str | None = None
     pr_number: int | None = None
@@ -68,7 +71,13 @@ class TaskRecord:
 
 @dataclass(slots=True)
 class BurstRecord:
-    """One container run — a row in the burst ledger."""
+    """One container run — a row in the burst ledger.
+
+    Also a node in the session tree (A5): ``resumed_from_burst_id`` names the
+    parent this burst's volume was materialized from, and
+    ``session_key``/``session_checksum`` name the snapshot this burst left behind.
+    The ledger owns the tree; the archive is dumb storage that knows only keys.
+    """
 
     burst_id: str
     task_id: str
@@ -76,6 +85,7 @@ class BurstRecord:
     role: str = Role.DEV
     status: str = BurstStatus.RUNNING
     trace_id: str = ""
+    resumed_from_burst_id: str | None = None  # the parent node — recorded at spawn
     started_at: str = field(default_factory=utc_now)
     finished_at: str | None = None
     exit_code: int | None = None
@@ -85,6 +95,27 @@ class BurstRecord:
     output_tokens: int | None = None
     num_turns: int | None = None
     session_id: str | None = None
+    session_key: str | None = None  # this burst's snapshot in the archive
+    session_checksum: str | None = None  # its sha256; the ledger is the authority
+
+
+# What `finish_burst` writes — everything a burst learns by ending. Shared by both
+# backends on purpose: the CAS is the one statement they both hand-write, and the
+# list drifting between them would be invisible until a field silently stopped
+# being persisted on one of the two.
+BURST_FINALIZE_COLUMNS = (
+    "status",
+    "finished_at",
+    "exit_code",
+    "model",
+    "cost_usd",
+    "input_tokens",
+    "output_tokens",
+    "num_turns",
+    "session_id",
+    "session_key",
+    "session_checksum",
+)
 
 
 @dataclass(slots=True)

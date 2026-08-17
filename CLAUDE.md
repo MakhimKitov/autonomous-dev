@@ -53,9 +53,14 @@ not modes (`STORES.md`). The dev rig supplies both:
 ```bash
 docker compose -f docker/compose.yaml up -d --wait   # Postgres + SeaweedFS
 export LEDGER_DSN='postgresql://platform_admin:platform@localhost:5432/platform?sslmode=disable'
+export ARCHIVE_URL='s3://platform:platform-dev-secret@localhost:8333/platform-sessions?tls=false'
 uv run control-plane migrate                         # numbered SQL; idempotent
 uv run control-plane migrate --check                 # exit 1 if anything is pending
 ```
+
+Two toggles, two stores, and they are independent — a deployment can buy one
+capability before the other. `tls=false` is the archive's `sslmode=disable`; the
+bucket is created on first write if it isn't there.
 
 `sslmode=disable` is in the DSN so the same string works for psycopg and for Atlas,
 which refuses to guess. `open_ledger` is the one place a backend is chosen; nothing
@@ -104,10 +109,21 @@ rows, or whether a constraint is still `NOT VALID` — so it will call a databas
 with a forgotten `VALIDATE CONSTRAINT` synced. Walls of that kind are tested by
 provoking them, not by diffing (`ARCHITECTURE.md` §12).
 
-With `LEDGER_DSN` set, `uv run pytest` additionally runs the ledger contract
-(`test_ledger_contract.py`) against Postgres as well as SQLite, in a throwaway
-database. Everything else keeps its isolated SQLite ledger regardless — see
-`tests/conftest.py` for why.
+### The session tree
+
+One immutable snapshot per burst, keyed `sessions/{task_id}/{burst_id}/session.tar.gz`,
+and the ledger owns the lineage: `resumed_from_burst_id` names the parent a volume
+was materialized from, `session_key`/`session_checksum` name what the burst left.
+`latest_archived_burst(task_id)` is the leaf, and `prepare_volume(..., parent=None)`
+is how an amnesiac burst is expressed — there is deliberately no way to ask for a
+volume that resumes nothing but still holds the session. Snapshots are write-once:
+a retry is a new burst, so a new key, and branching is a ledger write.
+
+With `LEDGER_DSN` and/or `ARCHIVE_URL` set, `uv run pytest` additionally runs that
+store's contract suite (`test_ledger_contract.py`, `test_archive_contract.py`)
+against the service backend as well as the single-node one. Everything else keeps
+its own scratch ledger and archive regardless — see `tests/conftest.py` for why
+that has to be forced.
 
 ## Test
 

@@ -227,6 +227,31 @@ def test_a_burst_points_at_a_real_task_and_a_real_role(db):
         a_running_burst(db, "b2", role="ghost")
 
 
+def test_a_burst_descends_from_a_burst_that_exists(db):
+    """The session tree's edge is a foreign key (A5): a parent that isn't a burst
+    is not a parent, so lineage can be walked without checking whether each hop
+    is real."""
+    a_task(db)
+
+    with pytest.raises(psycopg.errors.ForeignKeyViolation, match="bursts_resumed_from_fk"):
+        attempt(
+            db,
+            "INSERT INTO bursts (burst_id, task_id, kind, role, status, resumed_from_burst_id) "
+            "VALUES ('b1', 't1', 'work', 'dev', 'running', 'no-such-burst')",
+        )
+
+    a_running_burst(db, "b1")
+    finish(db, "b1")
+    attempt(
+        db,
+        "INSERT INTO bursts (burst_id, task_id, kind, role, status, resumed_from_burst_id) "
+        "VALUES ('b2', 't1', 'work', 'dev', 'running', 'b1')",
+    )
+    assert db.execute("SELECT resumed_from_burst_id FROM bursts WHERE burst_id='b2'").fetchone() == (
+        "b1",
+    )
+
+
 def test_a_role_with_history_cannot_be_deleted(db):
     """Not the trigger this time — the plain foreign key. Even a custom role stops
     being disposable once a burst ran as it, because deleting it would leave

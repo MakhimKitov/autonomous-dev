@@ -157,6 +157,8 @@ def test_burst_roundtrip_and_finalize(ledger):
     burst.num_turns = 7
     burst.session_id = "sess-9"
     burst.model = "claude-sonnet-5-20260203"  # harvest overwrote requested with resolved
+    burst.session_key = "sessions/42/b1/session.tar.gz"  # the snapshot it left (A5)
+    burst.session_checksum = "c" * 64
     ledger.finish_burst(burst)
 
     loaded = ledger.get_burst("b1")
@@ -212,6 +214,85 @@ def test_bursts_started_since_counts_the_window(ledger):
     assert ledger.bursts_started_since("2026-08-14T00:00:00+00:00") == 1
     assert ledger.bursts_started_since("2026-08-01T00:00:00+00:00") == 2
     assert ledger.bursts_started_since("2026-09-01T00:00:00+00:00") == 0
+
+
+# --- the session tree ---
+
+
+def test_lineage_is_recorded_at_spawn(ledger):
+    """`resumed_from_burst_id` goes in with the insert, not with the result: it is
+    a fact about what the burst was given, and it has to survive a crash that
+    never reaches finalize."""
+    ledger.upsert_task(_task())
+    parent = _burst("b1")
+    ledger.record_burst(parent)
+    # the parent has to end before the child starts — one running burst per task
+    parent.status = BurstStatus.SUCCEEDED
+    parent.finished_at = "2026-08-14T09:05:00+00:00"
+    ledger.finish_burst(parent)
+    ledger.record_burst(_burst("b2", resumed_from_burst_id="b1"))
+
+    assert ledger.get_burst("b1").resumed_from_burst_id is None
+    assert ledger.get_burst("b2").resumed_from_burst_id == "b1"
+
+
+def test_the_leaf_is_the_newest_burst_that_archived_something(ledger):
+    """What `prepare_volume` asks for. Bursts that archive nothing — reviewer,
+    tester, anything that crashed before harvest — are not nodes, so they can
+    never become the leaf."""
+    ledger.upsert_task(_task())
+    assert ledger.latest_archived_burst("42") is None
+
+    for burst_id, started, key in [
+        ("b1", "2026-08-14T09:00:00+00:00", "sessions/42/b1/session.tar.gz"),
+        ("b2", "2026-08-14T10:00:00+00:00", None),  # a reviewer: no snapshot
+        ("b3", "2026-08-14T11:00:00+00:00", "sessions/42/b3/session.tar.gz"),
+        ("b4", "2026-08-14T12:00:00+00:00", None),  # crashed before harvest
+    ]:
+        burst = _burst(burst_id, started_at=started, session_key=key, session_checksum="c" * 64)
+        ledger.record_burst(burst)
+        burst.status = BurstStatus.SUCCEEDED
+        burst.finished_at = started
+        ledger.finish_burst(burst)
+
+    assert ledger.latest_archived_burst("42").burst_id == "b3"
+    assert ledger.latest_archived_burst("nobody") is None
+
+
+def test_the_leaf_is_per_task(ledger):
+    """Two tasks in flight must not resume each other's sessions."""
+    for task_id in ("42", "43"):
+        ledger.upsert_task(_task(task_id))
+        ledger.record_burst(
+            _burst(
+                f"b-{task_id}",
+                task_id=task_id,
+                session_key=f"sessions/{task_id}/b/session.tar.gz",
+                session_checksum="c" * 64,
+            )
+        )
+
+    assert ledger.latest_archived_burst("42").session_key == "sessions/42/b/session.tar.gz"
+    assert ledger.latest_archived_burst("43").session_key == "sessions/43/b/session.tar.gz"
+
+
+def test_the_snapshot_is_written_by_finalize(ledger):
+    """Harvest sets the key and checksum on the record, and `finish_burst` is what
+    persists them — so a burst that never finalizes leaves no leaf, even if its
+    bytes reached the archive."""
+    ledger.upsert_task(_task())
+    burst = _burst("b1")
+    ledger.record_burst(burst)
+    assert ledger.get_burst("b1").session_key is None
+
+    burst.status = BurstStatus.SUCCEEDED
+    burst.finished_at = "2026-08-14T09:05:00+00:00"
+    burst.session_key = "sessions/42/b1/session.tar.gz"
+    burst.session_checksum = "d" * 64
+    ledger.finish_burst(burst)
+
+    stored = ledger.get_burst("b1")
+    assert (stored.session_key, stored.session_checksum) == (burst.session_key, "d" * 64)
 
 
 # --- violations ---

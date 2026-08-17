@@ -20,7 +20,7 @@ from control_plane.github_auth import (
 )
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, resolve_model
-from control_plane.store import Ledger, LocalSessionArchive, open_ledger
+from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
 
@@ -29,10 +29,15 @@ log = structlog.get_logger()
 
 @dataclass(slots=True)
 class PlatformStores:
-    """The platform's data root and its two stores, opened together."""
+    """The platform's data root and its two stores, opened together.
+
+    Both are chosen by presence toggle (`LEDGER_DSN`, `ARCHIVE_URL`) and both are
+    held behind their protocol, so nothing downstream of here can tell — or name —
+    which backend it got.
+    """
 
     data_dir: Path
-    archive: LocalSessionArchive
+    archive: SessionArchive
     ledger: Ledger
 
     @classmethod
@@ -40,7 +45,7 @@ class PlatformStores:
         data_dir = data_dir.expanduser().resolve()
         return cls(
             data_dir=data_dir,
-            archive=LocalSessionArchive(data_dir / "sessions"),
+            archive=open_archive(data_dir),
             ledger=open_ledger(data_dir),
         )
 
@@ -109,14 +114,24 @@ def execute_burst(
             log.info("github token minted", pushes_as=git_name, expires=minted.expires_at)
 
     burst_id = burst_id or uuid.uuid4().hex[:12]
-    # fresh = amnesiac: no resume, and the volume isn't seeded with the task's
-    # session either — the reviewer must not even be able to read the dev's
-    volume = prepare_volume(
-        stores.data_dir / "volumes", burst_id, task.task_id, stores.archive, seed=not fresh
-    )
+    # The node this burst descends from: the leaf of the task's session tree, or
+    # nothing. fresh = amnesiac (the reviewer), which is exactly "no parent" — so
+    # the volume cannot be seeded with the dev's transcripts and the resume is off,
+    # from one decision rather than two flags.
+    parent = None if fresh else stores.ledger.latest_archived_burst(task.task_id)
+    volume = prepare_volume(stores.data_dir / "volumes", burst_id, stores.archive, parent=parent)
     resume = None if fresh else task.session_id
 
-    burst = BurstRecord(burst_id=burst_id, task_id=task.task_id, kind=kind, role=role, model=model)
+    burst = BurstRecord(
+        burst_id=burst_id,
+        task_id=task.task_id,
+        kind=kind,
+        role=role,
+        model=model,
+        # recorded at spawn, before the container starts: the edge is a fact about
+        # what this burst was given, not about what it managed to produce
+        resumed_from_burst_id=parent.burst_id if parent is not None else None,
+    )
     # The task row goes in before the burst row that points at it. A4's
     # bursts.task_id foreign key is what makes the order load-bearing, but the
     # order was always the honest one: the CLI can be handed a task the ledger has
@@ -163,10 +178,10 @@ def execute_burst(
         stores.ledger.finish_burst(burst)
         if role == "dev":
             # the task's session is the *dev's* memory — a reviewer burst's
-            # session must never become what the next dev round resumes
+            # session must never become what the next dev round resumes.
+            # The snapshot itself is on the burst row now (A5): tasks.transcript_*
+            # stop being written here and A6 (#17) backfills and drops them.
             task.session_id = burst.session_id or task.session_id
-            task.transcript_key = outcome.transcript_key
-            task.transcript_checksum = outcome.transcript_checksum
         stores.ledger.upsert_task(task)
 
     log.info(
@@ -177,7 +192,8 @@ def execute_burst(
         model=burst.model,
         session=burst.session_id,
         violations=outcome.violation_count,
-        transcript=outcome.transcript_key,
+        resumed_from=burst.resumed_from_burst_id,
+        snapshot=outcome.session_key,
         log=str(log_path),
     )
     return BurstOutcome(burst=burst, harvest=outcome, exit_code=exit_code, log_path=log_path)

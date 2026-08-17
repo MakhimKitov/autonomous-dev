@@ -4,13 +4,15 @@ The agent holds no storage credentials — all I/O here happens in the control
 plane, out-of-band of the burst (ARCHITECTURE.md §6 "State & storage"). Two
 stores, two protocols:
 
-- ``SessionArchive`` — the raw-transcript blob store. Phase-0 backend is a local
-  directory of tarballs; the SeaweedFS (S3) backend implements the same protocol
-  later without touching callers.
-- ``Ledger`` — the queryable index (tasks, burst ledger, violations). Two backends
-  behind one protocol: ``SqliteLedger`` here, ``PostgresLedger`` in ``postgres.py``.
-  ``open_ledger`` picks by the presence of ``LEDGER_DSN`` — the same design with
-  and without contention, never a mode flag.
+- ``SessionArchive`` — immutable transcript snapshots, one per burst, addressed by
+  key. ``LocalSessionArchive`` here, ``ObjectSessionArchive`` (S3) in
+  ``objectstore.py``; ``open_archive`` picks by the presence of ``ARCHIVE_URL``.
+- ``Ledger`` — the queryable index (tasks, burst ledger, violations, events). Two
+  backends behind one protocol: ``SqliteLedger`` here, ``PostgresLedger`` in
+  ``postgres.py``; ``open_ledger`` picks by the presence of ``LEDGER_DSN``.
+
+Each pair is the same design with and without contention, never a mode flag, and
+the two ``open_*`` functions are the only places a backend is chosen.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from typing import Protocol
 import structlog
 
 from control_plane.models import (
+    BURST_FINALIZE_COLUMNS,
     EVENT_VIOLATION_RECORDED,
     BurstRecord,
     Event,
@@ -38,21 +41,73 @@ from control_plane.models import (
 
 log = structlog.get_logger()
 
-# The ledger's presence toggle (STORES.md): set to a Postgres DSN, the ledger is
-# the service database, whose schema `control-plane migrate` owns; unset, it is
-# the single-node SQLite variant below, which self-bootstraps. Not a mode flag —
-# the same design, minus contention.
+# The two presence toggles (STORES.md), and the only two. Set LEDGER_DSN and the
+# ledger is a service database whose schema `control-plane migrate` owns; set
+# ARCHIVE_URL and the archive is an S3 bucket. Unset, each is the single-node
+# variant — a SQLite file and a local directory under the data dir. Neither is a
+# mode flag: the same design, minus contention, and they toggle independently
+# because a deployment can buy one capability before the other.
 LEDGER_DSN_ENV = "LEDGER_DSN"
+ARCHIVE_URL_ENV = "ARCHIVE_URL"
+
+
+def session_key(task_id: str, burst_id: str) -> str:
+    """Where a burst's snapshot lives (STORES.md, "The session archive").
+
+    `sessions/{task_id}/{burst_id}/session.tar.gz` — one immutable object per
+    burst. `task_id` becomes `owner/repo#n` at A6, which is legal in S3 keys and
+    on POSIX; presigned URLs percent-encode the `#`.
+    """
+    return f"sessions/{task_id}/{burst_id}/session.tar.gz"
 
 
 class SessionArchive(Protocol):
-    def put(self, task_id: str, session_dir: Path) -> tuple[str, str]:
-        """Archive a session volume. Returns (key, sha256)."""
+    """Dumb storage, addressed by key. The ledger owns the tree and the truth.
+
+    Three properties every backend has to hold, because callers rely on them
+    rather than on which backend they got:
+
+    - **Write-once.** A `put` to an existing key raises. Snapshots never mutate;
+      a retry is a new burst with a new key, and branching is a ledger write
+      (`resumed_from_burst_id`), never an archive one.
+    - **Checksummed against the ledger.** `get` takes the sha256 the ledger
+      recorded and raises if the bytes disagree. The backend's own copy of that
+      number is a convenience for looking at, never the authority.
+    - **No credentials, ever.** `EXCLUDE_FROM_ARCHIVE` is applied on the way in,
+      unconditionally.
+    """
+
+    def put(self, key: str, session_dir: Path) -> str:
+        """Archive session_dir under key; returns its sha256. Write-once."""
         ...
 
-    def get(self, task_id: str, dest_dir: Path) -> bool:
-        """Materialize the task's session into dest_dir. False if none stored."""
+    def get(self, key: str, dest_dir: Path, expected_sha256: str) -> None:
+        """Materialize key into dest_dir. Missing key or checksum mismatch raises."""
         ...
+
+    def recorded_checksum(self, key: str) -> str | None:
+        """The sha256 the archive itself has stored beside the object, if any.
+
+        Not the authority — the ledger is — and deliberately separate from `get`.
+        It exists for the case where the control plane never held the bytes: with
+        presigned PUT (G2, #43) the harvester uploads directly, and this is how
+        the checksum gets back to the ledger.
+        """
+        ...
+
+
+class PresigningArchive(SessionArchive, Protocol):
+    """A backend that can lend out per-object access without lending credentials.
+
+    The capability the three-container pod is built on (TO-BE §6, G2): the burst
+    gets a URL for exactly one object, expiring inside its own rail, instead of a
+    storage credential it could use for anything. `DockerRunner` never calls these
+    — it keeps putting and getting in-process — which is why this is a separate
+    protocol rather than two more methods every backend has to fake.
+    """
+
+    def presign_get(self, key: str, expires_in: int) -> str: ...
+    def presign_put(self, key: str, expires_in: int) -> str: ...
 
 
 # Credentials must never reach the archive. With CLAUDE_CONFIG_DIR set, the CLI
@@ -62,41 +117,67 @@ class SessionArchive(Protocol):
 EXCLUDE_FROM_ARCHIVE = {".credentials.json", "auth.json"}
 
 
+class ArchiveError(RuntimeError):
+    """The archive was asked for something it must refuse: an existing key, a
+    missing one, or bytes that don't match the checksum the ledger recorded."""
+
+
+def tar_without_credentials(session_dir: Path, destination: Path) -> str:
+    """Tar session_dir to destination, minus credential files. Returns sha256."""
+
+    def _skip_credentials(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        return None if Path(info.name).name in EXCLUDE_FROM_ARCHIVE else info
+
+    with tarfile.open(destination, "w:gz") as tar:
+        tar.add(session_dir, arcname=".", filter=_skip_credentials)
+    return hashlib.sha256(destination.read_bytes()).hexdigest()
+
+
+def untar(blob: Path, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(blob, "r:gz") as tar:
+        tar.extractall(dest_dir, filter="data")
+
+
 class LocalSessionArchive:
-    """Phase-0 archive: one tarball per task under a local root."""
+    """The single-node archive: the key is a path under a local root.
+
+    Same three properties as the object backend, in the cheap place — write-once
+    is a file that already exists, and the checksum sidecar is what
+    `recorded_checksum` reads where an object store would read metadata.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
 
-    def _blob(self, task_id: str) -> Path:
-        return self.root / task_id / "session.tar.gz"
+    def _blob(self, key: str) -> Path:
+        return self.root / key
 
-    def put(self, task_id: str, session_dir: Path) -> tuple[str, str]:
-        blob = self._blob(task_id)
+    def put(self, key: str, session_dir: Path) -> str:
+        blob = self._blob(key)
+        if blob.exists():
+            raise ArchiveError(f"snapshots are write-once and {key} already exists")
         blob.parent.mkdir(parents=True, exist_ok=True)
+        checksum = tar_without_credentials(session_dir, blob)
+        blob.with_suffix(blob.suffix + ".sha256").write_text(checksum, encoding="utf-8")
+        return checksum
 
-        def _skip_credentials(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-            return None if Path(info.name).name in EXCLUDE_FROM_ARCHIVE else info
-
-        with tarfile.open(blob, "w:gz") as tar:
-            tar.add(session_dir, arcname=".", filter=_skip_credentials)
-        checksum = hashlib.sha256(blob.read_bytes()).hexdigest()
-        (blob.parent / "sha256").write_text(checksum, encoding="utf-8")
-        return str(blob.relative_to(self.root)), checksum
-
-    def get(self, task_id: str, dest_dir: Path) -> bool:
-        blob = self._blob(task_id)
+    def get(self, key: str, dest_dir: Path, expected_sha256: str) -> None:
+        blob = self._blob(key)
         if not blob.is_file():
-            return False
-        recorded = (blob.parent / "sha256").read_text(encoding="utf-8").strip()
+            raise ArchiveError(f"no snapshot at {key}")
         actual = hashlib.sha256(blob.read_bytes()).hexdigest()
-        if recorded != actual:
-            raise RuntimeError(f"transcript checksum mismatch for task {task_id}")
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(blob, "r:gz") as tar:
-            tar.extractall(dest_dir, filter="data")
-        return True
+        if actual != expected_sha256:
+            raise ArchiveError(
+                f"checksum mismatch for {key}: ledger says {expected_sha256}, bytes say {actual}"
+            )
+        untar(blob, dest_dir)
+
+    def recorded_checksum(self, key: str) -> str | None:
+        blob = self._blob(key)
+        sidecar = blob.with_suffix(blob.suffix + ".sha256")
+        return sidecar.read_text(encoding="utf-8").strip() if sidecar.is_file() else None
 
 
 class Ledger(Protocol):
@@ -106,6 +187,7 @@ class Ledger(Protocol):
     def record_burst(self, burst: BurstRecord) -> None: ...
     def finish_burst(self, burst: BurstRecord) -> None: ...
     def get_burst(self, burst_id: str) -> BurstRecord | None: ...
+    def latest_archived_burst(self, task_id: str) -> BurstRecord | None: ...
     def running_bursts(self) -> list[BurstRecord]: ...
     def bursts_started_since(self, since_iso: str) -> int: ...
     def record_violation(self, violation: Violation) -> None: ...
@@ -127,6 +209,23 @@ def open_ledger(data_dir: Path) -> Ledger:
 
     log.info("ledger backend is postgres", dsn=_redact(dsn))
     return PostgresLedger(dsn)
+
+
+def open_archive(data_dir: Path) -> SessionArchive:
+    """The archive this deployment has: an S3 bucket if ``ARCHIVE_URL`` is set,
+    else a directory under ``data_dir``. `open_ledger`'s twin, deliberately — one
+    presence toggle each, one string each, and nothing else in the codebase
+    allowed to name a backend."""
+    url = os.environ.get(ARCHIVE_URL_ENV, "").strip()
+    if not url:
+        # rooted at the data dir, not at data/sessions: every key already begins
+        # `sessions/`, so the local tree and the bucket lay out identically and a
+        # backfill or an eyeball can compare them path for path
+        return LocalSessionArchive(data_dir)
+    from control_plane.objectstore import ObjectSessionArchive  # local: one-way seam
+
+    log.info("archive backend is an object store", url=_redact(url))
+    return ObjectSessionArchive.from_url(url)
 
 
 def _redact(dsn: str) -> str:
@@ -164,6 +263,7 @@ CREATE TABLE IF NOT EXISTS bursts (
     role TEXT NOT NULL,
     status TEXT NOT NULL,
     trace_id TEXT NOT NULL DEFAULT '',
+    resumed_from_burst_id TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
     exit_code INTEGER,
@@ -172,7 +272,9 @@ CREATE TABLE IF NOT EXISTS bursts (
     input_tokens INTEGER,
     output_tokens INTEGER,
     num_turns INTEGER,
-    session_id TEXT
+    session_id TEXT,
+    session_key TEXT,
+    session_checksum TEXT
 );
 CREATE TABLE IF NOT EXISTS violations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,6 +306,10 @@ class SqliteLedger:
         # touch a ledger created before the column existed).
         for table, column, decl in (
             ("bursts", "model", "TEXT"),
+            # the session tree (A5): a ledger written before it gains the columns
+            ("bursts", "resumed_from_burst_id", "TEXT"),
+            ("bursts", "session_key", "TEXT"),
+            ("bursts", "session_checksum", "TEXT"),
             ("tasks", "pr_number", "INTEGER"),
             ("tasks", "attempts", "INTEGER NOT NULL DEFAULT 0"),
             ("tasks", "review_rounds", "INTEGER NOT NULL DEFAULT 0"),
@@ -258,11 +364,9 @@ class SqliteLedger:
         callers (gate A7), and because the semantics should be settled in the
         cheap place before E1 makes them load-bearing.
         """
+        assignments = ", ".join(f"{column}=:{column}" for column in BURST_FINALIZE_COLUMNS)
         cursor = self._conn.execute(
-            "UPDATE bursts SET status=:status, finished_at=:finished_at, exit_code=:exit_code, "
-            "model=:model, cost_usd=:cost_usd, input_tokens=:input_tokens, output_tokens=:output_tokens, "
-            "num_turns=:num_turns, session_id=:session_id "
-            "WHERE burst_id=:burst_id AND status='running'",
+            f"UPDATE bursts SET {assignments} WHERE burst_id=:burst_id AND status='running'",
             asdict(burst),
         )
         self._conn.commit()
@@ -276,6 +380,17 @@ class SqliteLedger:
     def get_burst(self, burst_id: str) -> BurstRecord | None:
         row = self._conn.execute(
             "SELECT * FROM bursts WHERE burst_id = ?", (burst_id,)
+        ).fetchone()
+        return BurstRecord(**dict(row)) if row else None
+
+    def latest_archived_burst(self, task_id: str) -> BurstRecord | None:
+        """The leaf of this task's session tree: the newest burst that archived a
+        snapshot. What the next burst's volume is materialized from, and what its
+        `resumed_from_burst_id` points at."""
+        row = self._conn.execute(
+            "SELECT * FROM bursts WHERE task_id = ? AND session_key IS NOT NULL "
+            "ORDER BY started_at DESC, burst_id DESC LIMIT 1",
+            (task_id,),
         ).fetchone()
         return BurstRecord(**dict(row)) if row else None
 
