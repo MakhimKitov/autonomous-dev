@@ -242,11 +242,10 @@ def _redact(dsn: str) -> str:
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
-    repo TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
     status TEXT NOT NULL,
     session_id TEXT,
-    transcript_key TEXT,
-    transcript_checksum TEXT,
     pr_number INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
     review_rounds INTEGER NOT NULL DEFAULT 0,
@@ -294,36 +293,45 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 
+class LedgerShapeError(RuntimeError):
+    """This SQLite ledger predates the derived task id and cannot be read as-is."""
+
+
 class SqliteLedger:
-    """Phase-0 ledger: stdlib SQLite. Same protocol Postgres implements later."""
+    """The single-node ledger: stdlib SQLite, the same protocol Postgres answers.
+
+    It self-bootstraps — `_SCHEMA` is `CREATE TABLE IF NOT EXISTS`, so a fresh file
+    is ready on open and no runner is involved. What it no longer does is *migrate*.
+    Until A6 this class carried a list of additive `ALTER TABLE … ADD COLUMN`
+    repairs, one per column the MVP grew; A6 retires this ledger as an origin
+    (STORES.md, "From the MVP"), and every file that list existed for is a file
+    whose task ids predate `{owner}/{repo}#{n}`. Those cannot be repaired by adding
+    a column — deriving an id needs a repository slug that is nowhere in the file —
+    so the honest move is to refuse, name the one-shot that *can* do it, and delete
+    the guesswork.
+    """
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        # Phase-0 migration: additive columns only (CREATE IF NOT EXISTS won't
-        # touch a ledger created before the column existed).
-        for table, column, decl in (
-            ("bursts", "model", "TEXT"),
-            # the session tree (A5): a ledger written before it gains the columns
-            ("bursts", "resumed_from_burst_id", "TEXT"),
-            ("bursts", "session_key", "TEXT"),
-            ("bursts", "session_checksum", "TEXT"),
-            ("tasks", "pr_number", "INTEGER"),
-            ("tasks", "attempts", "INTEGER NOT NULL DEFAULT 0"),
-            ("tasks", "review_rounds", "INTEGER NOT NULL DEFAULT 0"),
-            ("tasks", "next_burst_kind", "TEXT"),
-            ("tasks", "last_review_id", "INTEGER"),
-            ("tasks", "last_burst_at", "TEXT"),
-        ):
-            self._ensure_column(table, column, decl)
+        self._conn.executescript(_SCHEMA)  # a no-op on a file that already has them
+        self._require_current_shape(path)
         self._conn.commit()
 
-    def _ensure_column(self, table: str, column: str, decl: str) -> None:
-        cols = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
-        if column not in cols:
-            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    def _require_current_shape(self, path: Path) -> None:
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(tasks)")}
+        missing = {"repository", "issue_number"} - columns
+        if not missing:
+            return
+        self._conn.close()
+        raise LedgerShapeError(
+            f"{path} predates the derived task id (missing {', '.join(sorted(missing))}). "
+            "Its rows are keyed by a bare issue number, which no longer identifies a "
+            "task. Move them with `control-plane backfill --repository owner/name "
+            f"--data-dir {path.parent}`, which reads this file without writing to it, "
+            "or point --data-dir at a fresh directory to start clean."
+        )
 
     def upsert_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()

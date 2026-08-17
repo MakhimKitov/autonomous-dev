@@ -18,7 +18,7 @@ cp .env.example .env   # add CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
 
 # Build the dev-agent image, then drive one burst by hand:
 docker build -f docker/dev-agent/Dockerfile -t autonomous-dev/dev-agent:latest .
-uv run control-plane burst --task-id t1 --repo ../discord-bot --mode check --data-dir data
+uv run control-plane burst --issue 1 --repo ../discord-bot --mode check --data-dir data
 
 uv run pytest          # structural tests, no network
 ```

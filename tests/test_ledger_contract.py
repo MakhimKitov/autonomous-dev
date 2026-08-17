@@ -32,8 +32,9 @@ from control_plane.models import (
     TaskRecord,
     TaskStatus,
     Violation,
+    task_id_for,
 )
-from control_plane.store import LEDGER_DSN_ENV, SqliteLedger
+from control_plane.store import LEDGER_DSN_ENV, SqliteLedger, session_key
 from psycopg.conninfo import make_conninfo
 
 DSN = os.environ.get(LEDGER_DSN_ENV, "").strip()
@@ -76,12 +77,26 @@ def ledger(request, tmp_path):
     backend.close()
 
 
-def _task(task_id="42", **kwargs):
-    return TaskRecord(task_id=task_id, repo="/r", **kwargs)
+# The ids are derived (A6), so the suite derives them too — a test that types a
+# task id by hand is testing a shape the platform no longer writes.
+REPOSITORY = "owner/product"
 
 
-def _burst(burst_id="b1", task_id="42", **kwargs):
-    return BurstRecord(burst_id=burst_id, task_id=task_id, **kwargs)
+def tid(issue_number=42):
+    return task_id_for(REPOSITORY, issue_number)
+
+
+def _task(issue_number=42, **kwargs):
+    return TaskRecord(
+        task_id=tid(issue_number),
+        repository=REPOSITORY,
+        issue_number=issue_number,
+        **kwargs,
+    )
+
+
+def _burst(burst_id="b1", issue_number=42, **kwargs):
+    return BurstRecord(burst_id=burst_id, task_id=tid(issue_number), **kwargs)
 
 
 # --- tasks ---
@@ -95,8 +110,6 @@ def test_task_roundtrip_preserves_every_field(ledger):
     task = _task(
         status=TaskStatus.AWAITING_REVIEW,
         session_id="sess-1",
-        transcript_key="42/session.tar.gz",
-        transcript_checksum="a" * 64,
         pr_number=7,
         attempts=2,
         review_rounds=1,
@@ -106,7 +119,7 @@ def test_task_roundtrip_preserves_every_field(ledger):
     )
     ledger.upsert_task(task)
 
-    loaded = ledger.get_task("42")
+    loaded = ledger.get_task(tid())
     assert loaded is not None
     # updated_at is stamped by the write, so compare everything else verbatim
     assert {k: v for k, v in asdict(loaded).items() if k != "updated_at"} == {
@@ -117,11 +130,11 @@ def test_task_roundtrip_preserves_every_field(ledger):
 def test_upsert_keeps_created_at_and_advances_updated_at(ledger):
     task = _task(created_at="2026-01-01T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00")
     ledger.upsert_task(task)
-    first = ledger.get_task("42")
+    first = ledger.get_task(tid())
 
     task.status = TaskStatus.WORKING
     ledger.upsert_task(task)
-    second = ledger.get_task("42")
+    second = ledger.get_task(tid())
 
     assert second.created_at == first.created_at == "2026-01-01T00:00:00+00:00"
     assert second.updated_at > first.updated_at
@@ -129,12 +142,12 @@ def test_upsert_keeps_created_at_and_advances_updated_at(ledger):
 
 
 def test_tasks_by_status_filters_and_orders_by_created_at(ledger):
-    ledger.upsert_task(_task("1", status=TaskStatus.CLAIMED, created_at="2026-01-03T00:00:00+00:00"))
-    ledger.upsert_task(_task("2", status=TaskStatus.WORKING, created_at="2026-01-01T00:00:00+00:00"))
-    ledger.upsert_task(_task("3", status=TaskStatus.DONE, created_at="2026-01-02T00:00:00+00:00"))
+    ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-03T00:00:00+00:00"))
+    ledger.upsert_task(_task(2, status=TaskStatus.WORKING, created_at="2026-01-01T00:00:00+00:00"))
+    ledger.upsert_task(_task(3, status=TaskStatus.DONE, created_at="2026-01-02T00:00:00+00:00"))
 
     picked = ledger.tasks_by_status(TaskStatus.CLAIMED, TaskStatus.WORKING)
-    assert [t.task_id for t in picked] == ["2", "1"]  # oldest first
+    assert [t.task_id for t in picked] == [tid(2), tid(1)]  # oldest first
     assert ledger.tasks_by_status(TaskStatus.BLOCKED) == []
 
 
@@ -157,7 +170,7 @@ def test_burst_roundtrip_and_finalize(ledger):
     burst.num_turns = 7
     burst.session_id = "sess-9"
     burst.model = "claude-sonnet-5-20260203"  # harvest overwrote requested with resolved
-    burst.session_key = "sessions/42/b1/session.tar.gz"  # the snapshot it left (A5)
+    burst.session_key = session_key(tid(), "b1")  # the snapshot it left (A5)
     burst.session_checksum = "c" * 64
     ledger.finish_burst(burst)
 
@@ -190,10 +203,10 @@ def test_finalize_happens_once_and_the_first_result_stands(ledger):
 def test_running_bursts_sees_only_the_unfinished(ledger):
     # two running bursts means two tasks: one per task is a wall on Postgres from
     # A4, and the scheduler never wanted more than that anyway
-    ledger.upsert_task(_task("42"))
-    ledger.upsert_task(_task("43"))
-    ledger.record_burst(_burst("b1", task_id="42"))
-    ledger.record_burst(_burst("b2", task_id="43"))
+    ledger.upsert_task(_task(42))
+    ledger.upsert_task(_task(43))
+    ledger.record_burst(_burst("b1", issue_number=42))
+    ledger.record_burst(_burst("b2", issue_number=43))
     assert {b.burst_id for b in ledger.running_bursts()} == {"b1", "b2"}
 
     done = ledger.get_burst("b1")
@@ -206,10 +219,10 @@ def test_running_bursts_sees_only_the_unfinished(ledger):
 
 
 def test_bursts_started_since_counts_the_window(ledger):
-    ledger.upsert_task(_task("42"))
-    ledger.upsert_task(_task("43"))
-    ledger.record_burst(_burst("old", task_id="42", started_at="2026-08-13T09:00:00+00:00"))
-    ledger.record_burst(_burst("new", task_id="43", started_at="2026-08-14T09:00:00+00:00"))
+    ledger.upsert_task(_task(42))
+    ledger.upsert_task(_task(43))
+    ledger.record_burst(_burst("old", issue_number=42, started_at="2026-08-13T09:00:00+00:00"))
+    ledger.record_burst(_burst("new", issue_number=43, started_at="2026-08-14T09:00:00+00:00"))
 
     assert ledger.bursts_started_since("2026-08-14T00:00:00+00:00") == 1
     assert ledger.bursts_started_since("2026-08-01T00:00:00+00:00") == 2
@@ -241,12 +254,12 @@ def test_the_leaf_is_the_newest_burst_that_archived_something(ledger):
     tester, anything that crashed before harvest — are not nodes, so they can
     never become the leaf."""
     ledger.upsert_task(_task())
-    assert ledger.latest_archived_burst("42") is None
+    assert ledger.latest_archived_burst(tid(42)) is None
 
     for burst_id, started, key in [
-        ("b1", "2026-08-14T09:00:00+00:00", "sessions/42/b1/session.tar.gz"),
+        ("b1", "2026-08-14T09:00:00+00:00", session_key(tid(), "b1")),
         ("b2", "2026-08-14T10:00:00+00:00", None),  # a reviewer: no snapshot
-        ("b3", "2026-08-14T11:00:00+00:00", "sessions/42/b3/session.tar.gz"),
+        ("b3", "2026-08-14T11:00:00+00:00", session_key(tid(), "b3")),
         ("b4", "2026-08-14T12:00:00+00:00", None),  # crashed before harvest
     ]:
         burst = _burst(burst_id, started_at=started, session_key=key, session_checksum="c" * 64)
@@ -255,25 +268,26 @@ def test_the_leaf_is_the_newest_burst_that_archived_something(ledger):
         burst.finished_at = started
         ledger.finish_burst(burst)
 
-    assert ledger.latest_archived_burst("42").burst_id == "b3"
+    assert ledger.latest_archived_burst(tid(42)).burst_id == "b3"
     assert ledger.latest_archived_burst("nobody") is None
 
 
 def test_the_leaf_is_per_task(ledger):
     """Two tasks in flight must not resume each other's sessions."""
-    for task_id in ("42", "43"):
-        ledger.upsert_task(_task(task_id))
+    for issue_number in (42, 43):
+        ledger.upsert_task(_task(issue_number))
         ledger.record_burst(
             _burst(
-                f"b-{task_id}",
-                task_id=task_id,
-                session_key=f"sessions/{task_id}/b/session.tar.gz",
+                f"b-{issue_number}",
+                issue_number=issue_number,
+                session_key=session_key(tid(issue_number), f"b-{issue_number}"),
                 session_checksum="c" * 64,
             )
         )
 
-    assert ledger.latest_archived_burst("42").session_key == "sessions/42/b/session.tar.gz"
-    assert ledger.latest_archived_burst("43").session_key == "sessions/43/b/session.tar.gz"
+    for issue_number in (42, 43):
+        leaf = ledger.latest_archived_burst(tid(issue_number))
+        assert leaf.session_key == session_key(tid(issue_number), f"b-{issue_number}")
 
 
 def test_the_snapshot_is_written_by_finalize(ledger):
@@ -287,7 +301,7 @@ def test_the_snapshot_is_written_by_finalize(ledger):
 
     burst.status = BurstStatus.SUCCEEDED
     burst.finished_at = "2026-08-14T09:05:00+00:00"
-    burst.session_key = "sessions/42/b1/session.tar.gz"
+    burst.session_key = session_key(tid(), "b1")
     burst.session_checksum = "d" * 64
     ledger.finish_burst(burst)
 
@@ -299,13 +313,13 @@ def test_the_snapshot_is_written_by_finalize(ledger):
 
 
 def test_violations_by_task_and_in_full(ledger):
-    ledger.record_violation(Violation(task_id="42", burst_id="b1", tool="Read", reason="WALL"))
+    ledger.record_violation(Violation(task_id=tid(42), burst_id="b1", tool="Read", reason="WALL"))
     ledger.record_violation(
-        Violation(task_id="42", burst_id="b1", tool="Bash", reason="WALL", detail="rm -rf /")
+        Violation(task_id=tid(42), burst_id="b1", tool="Bash", reason="WALL", detail="rm -rf /")
     )
-    ledger.record_violation(Violation(task_id="99", burst_id="b2", tool="Read", reason="WALL"))
+    ledger.record_violation(Violation(task_id=tid(99), burst_id="b2", tool="Read", reason="WALL"))
 
-    for_task = ledger.violations("42")
+    for_task = ledger.violations(tid(42))
     assert [v.tool for v in for_task] == ["Read", "Bash"]  # insertion order
     assert for_task[1].detail == "rm -rf /"
     assert len(ledger.violations()) == 3
@@ -319,7 +333,7 @@ def test_every_violation_announces_itself(ledger):
     """"Any new violations row is a page" (TO-BE §11) is implemented as an outbox
     row, written in the same breath as the violation: one CTE on Postgres, one
     transaction on SQLite, the same contract either way."""
-    ledger.record_violation(Violation(task_id="42", burst_id="b1", tool="Bash", reason="WALL"))
+    ledger.record_violation(Violation(task_id=tid(42), burst_id="b1", tool="Bash", reason="WALL"))
 
     events = ledger.events()
     assert [event.kind for event in events] == ["violation_recorded"]
@@ -327,7 +341,7 @@ def test_every_violation_announces_itself(ledger):
     payload = dict(events[0].payload)
     # the id of the row it announces, so a consumer can read the rest of it
     assert isinstance(payload.pop("violation_id"), int)
-    assert payload == {"task_id": "42", "burst_id": "b1", "tool": "Bash", "reason": "WALL"}
+    assert payload == {"task_id": tid(), "burst_id": "b1", "tool": "Bash", "reason": "WALL"}
     assert events[0].created_at  # an ISO string, like every other timestamp here
 
 
@@ -335,7 +349,7 @@ def test_the_cursor_is_the_consumers_own_position(ledger):
     """Read by cursor, at-least-once, replayable — no acknowledgement, no
     deletion, and no subscription. Each consumer keeps its own place."""
     for tool in ("Read", "Write", "Bash"):
-        ledger.record_violation(Violation(task_id="42", burst_id="b1", tool=tool, reason="WALL"))
+        ledger.record_violation(Violation(task_id=tid(42), burst_id="b1", tool=tool, reason="WALL"))
 
     everything = ledger.events()
     assert [event.payload["tool"] for event in everything] == ["Read", "Write", "Bash"]
@@ -372,7 +386,7 @@ def test_a_violation_and_its_event_are_one_write(ledger):
 def test_timestamps_come_back_as_the_identical_iso_string(ledger, stamp):
     """timestamptz in the database, strings at the edge — byte-identical ones."""
     ledger.upsert_task(_task(created_at=stamp))
-    loaded = ledger.get_task("42")
+    loaded = ledger.get_task(tid())
     assert loaded.created_at == stamp
     assert isinstance(loaded.created_at, str)
 
@@ -394,7 +408,7 @@ def test_money_comes_back_as_float_not_decimal(ledger):
 
 def test_absent_optionals_stay_none(ledger):
     ledger.upsert_task(_task())
-    task = ledger.get_task("42")
+    task = ledger.get_task(tid())
     assert (task.pr_number, task.session_id, task.last_burst_at, task.last_review_id) == (
         None,
         None,
@@ -435,7 +449,7 @@ def test_a_dropped_connection_costs_a_reconnect_not_the_loop(pg_dsn):
     ledger._conn.close()  # as if Postgres restarted under us
 
     ledger.upsert_task(_task(status=TaskStatus.WORKING))
-    assert ledger.get_task("42").status == TaskStatus.WORKING
+    assert ledger.get_task(tid()).status == TaskStatus.WORKING
     ledger.close()
 
 

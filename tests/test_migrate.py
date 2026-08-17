@@ -8,6 +8,7 @@ throwaway database, so the suite never touches the dev rig's own ledger.
 """
 
 import os
+from pathlib import Path
 from dataclasses import fields
 from uuid import uuid4
 
@@ -189,6 +190,58 @@ def test_a_runaway_migration_is_cut_off(fresh_dsn, tmp_path, monkeypatch):
     with pytest.raises(psycopg.errors.QueryCanceled):
         migrate(fresh_dsn, tmp_path)
     assert status(fresh_dsn, tmp_path)[0] == []
+
+
+@needs_postgres
+def test_a_pre_a6_row_stops_the_migration_where_it_should(fresh_dsn):
+    """0008 is *meant* to fail on MVP-era data, and this is the only place that
+    claim gets tested — on an empty database it passes vacuously.
+
+    A task row keyed by a bare issue number has no `issue_number` and cannot be
+    given one by SQL: the id needs a repository slug, and the column it replaced
+    held a filesystem path. So the migration stops, the state is a prefix (through
+    0007, not 0008), and `control-plane backfill` is the documented repair.
+    """
+    available = discover()
+    through_0007 = [m for m in available if m.version <= "0007"]
+
+    # apply everything up to the rename, then put an MVP-era row in the way
+    migrate(fresh_dsn, _slice(available, "0005"))
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tasks (task_id, repo, status) VALUES ('7', '/Users/x/clones/product', 'done')"
+        )
+
+    with pytest.raises(psycopg.errors.CheckViolation, match="tasks_issue_number_not_null"):
+        migrate(fresh_dsn)
+
+    applied, pending_now = status(fresh_dsn)
+    assert applied == [m.version for m in through_0007]
+    assert [m.version for m in pending_now] == ["0008"]
+
+    # the repair the header names, in miniature: give the row an identity
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE tasks SET task_id = 'owner/product#7', repository = 'owner/product', "
+            "issue_number = 7 WHERE task_id = '7'"
+        )
+    assert [m.version for m in migrate(fresh_dsn)] == ["0008"]
+
+
+def _slice(available, last_version):
+    """A directory holding just the migrations up to `last_version`.
+
+    The runner enforces contiguity from 0001, so a partial apply has to be a
+    partial *directory* rather than a limit passed in.
+    """
+    import shutil
+    import tempfile
+
+    staging = Path(tempfile.mkdtemp())
+    for migration in available:
+        if migration.version <= last_version:
+            shutil.copy(migration.path, staging / migration.path.name)
+    return staging
 
 
 @needs_postgres

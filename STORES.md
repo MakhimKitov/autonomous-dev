@@ -110,11 +110,14 @@ walls (below). Migrations are numbered SQL files applied by the
 
 **The executable copy of this section is `schema.sql`**, and CI proves the two
 agree — a migrated database diffed against that file must come back empty
-(`ARCHITECTURE.md` §12, "Schema authoring"). It converges on the block below as
-the stage lands: org tables and walls at A4, per-burst snapshots at A5, composite
-identity at A6, at which point the two are the same thing and this block becomes a
-pointer to the file. The claim columns and `bursts.subscription_id` arrive with the
-stages that use them (E1/E2, F).
+(`ARCHITECTURE.md` §12, "Schema authoring"). Read the block below as the *target*
+and `schema.sql` as what exists: Stage A closed most of the gap (org tables and
+walls at A4, per-burst snapshots at A5, derived task identity at A6), and what
+remains arrives with the stage that needs it — `tasks.repository`'s foreign key
+into `repositories` with the registry that can create one (C1), the claim columns
+at E1/E2, `org_state` at E3, `bursts.subscription_id` with the pool at F,
+`bursts.pinned` with the harness that pins fixtures at G4. `schema.sql`'s header
+carries that list, and it is the shorter document to keep honest.
 
 Four things here are outside what a schema diff can see, all measured rather than
 assumed: the `roles_pipeline_guard` trigger, every grant, the seeded role rows,
@@ -183,10 +186,12 @@ CREATE TABLE subscriptions (
 
 -- tasks — one GitHub issue worked to completion. The id is derived, never
 -- invented: '{owner}/{repo}#{issue_number}', so it is stable across replicas
--- and joins the GitHub world for free.
+-- and joins the GitHub world for free (A6). The foreign key below is the one
+-- part not yet built: nothing before C1 can create a `repositories` row, so
+-- requiring one would make every task uninsertable in the meantime.
 CREATE TABLE tasks (
     task_id         text PRIMARY KEY,          -- '{owner}/{repo}#{issue_number}'
-    repository      text NOT NULL REFERENCES repositories (repository),
+    repository      text NOT NULL REFERENCES repositories (repository),  -- the FK: C1
     issue_number    integer NOT NULL,
     status          text NOT NULL CHECK (status IN
                       ('open', 'claimed', 'working', 'awaiting_review', 'blocked', 'done')),
@@ -352,8 +357,10 @@ lineage, `session_key`/`session_checksum` name the content — and the archive i
 deliberately dumb storage.
 
 - **Key scheme**: `sessions/{task_id}/{burst_id}/session.tar.gz`, where
-  `task_id` is the derived `owner/repo#n` (legal in S3 keys and on POSIX;
-  presigned URLs percent-encode the `#`).
+  `task_id` is the derived `owner/repo#n` — so a key holds both a `/` and a `#`,
+  which is legal in S3 and on POSIX and comes back correct through a presigned
+  URL, where the `#` arrives as `%23` (measured on the rig's gateway at A6, not
+  assumed).
 - **Write-once**: `put` to an existing key is an error. Snapshots never mutate;
   retry re-materializes the same parent node, branch points
   `resumed_from_burst_id` at an older node — tree operations are ledger writes,
@@ -409,11 +416,13 @@ What Stage A moves, and where:
 
 | MVP shape | Target shape | Issue |
 |---|---|---|
-| `tasks.task_id` = bare issue number | derived `owner/repo#n` + `repository` FK + `issue_number` | A6 |
-| `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5 stops writing them, A6 backfills the old blobs and drops the columns |
-| task-keyed archive `put`/`get` | key-based, one object per burst, checksum passed in | A5 |
-| ISO-`TEXT` timestamps everywhere | `timestamptz` columns, strings at the edge | A3 |
-| `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb — for Postgres; the single-node SQLite variant keeps self-bootstrapping until A6 retires it as an origin | A2 |
+| `tasks.task_id` = bare issue number | derived `owner/repo#n` + `issue_number` + the one-task-per-issue index (`repository`'s FK waits for C1) | A6 ✔ |
+| `tasks.repo` = the platform's clone path | `repository` = `owner/name`; the clone path is a runtime argument and lives in no row | A6 ✔ |
+| `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5 stopped writing them ✔, A6 carried the blobs over and dropped the columns ✔ |
+| task-keyed archive `put`/`get` | key-based, one object per burst, checksum passed in | A5 ✔ |
+| ISO-`TEXT` timestamps everywhere | `timestamptz` columns, strings at the edge | A3 ✔ |
+| `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb. The single-node ledger self-bootstraps a *fresh* file and no longer repairs an old one: A6 retires it as an origin, so it refuses a pre-A6 file and names `control-plane backfill` | A2, A6 ✔ |
+| the experiment's history, single-node | `control-plane backfill --repository owner/name`: rows re-keyed, blobs re-keyed as their last dev burst's snapshot, manual-era rows dropped, source left read-only | A6 ✔ |
 | no claim verbs (single process) | lease + CAS statements in the `Ledger` protocol | A3 (the finalize CAS), E1 (`claimed_by`/`claimed_until` + the claim verbs), E2 (used in anger) |
 | STOP flag on the filesystem | `org_state` row | E3 |
 
