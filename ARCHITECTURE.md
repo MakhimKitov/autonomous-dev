@@ -208,12 +208,15 @@ The control plane owns both stores **and all I/O to them**; the dev agent holds 
 storage credentials and touches only a mounted working dir. Nothing durable lives in
 the ephemeral container.
 
-> **As built (MVP):** the control DB is **SQLite** (`data/ledger.db` — tasks, bursts,
-> violations) and the object store is a **filesystem archive** (`data/sessions/` for
-> task-keyed resumable transcripts, `data/volumes/` for per-burst forensics). Same
-> split, same walls, zero services to operate at experiment scale. Postgres +
-> SeaweedFS below are the scale-up design. The full as-built data model —
-> ledger tables, filesystem stores, and the GitHub entities they reference —
+> **As built:** both stores are presence toggles now (`STORES.md`, Stage A).
+> Unset, they are what the MVP shipped — a SQLite ledger and a filesystem archive
+> under `--data-dir`, zero services to operate at experiment scale. Set
+> `LEDGER_DSN` and the ledger is Postgres, whose schema numbered migrations own;
+> set `ARCHIVE_URL` and the archive is an S3 bucket. The archive is a tree of
+> per-burst snapshots either way (A5): `data/volumes/` still holds per-burst
+> forensics, but `sessions/{task}/{burst}/session.tar.gz` replaced the
+> task-keyed blob, and the ledger owns the lineage. The full as-built data model —
+> ledger tables, both stores, and the GitHub entities they reference —
 > is drawn in `diagrams/data-model.drawio` (+ `.png`).
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔

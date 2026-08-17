@@ -69,7 +69,10 @@ def _outcome(exit_code=0, is_error=False):
     return BurstOutcome(
         burst=BurstRecord(burst_id="fake", task_id="1", status=BurstStatus.SUCCEEDED),
         harvest=HarvestOutcome(
-            result={"is_error": is_error}, violation_count=0, transcript_key="k", transcript_checksum="c"
+            result={"is_error": is_error},
+            violation_count=0,
+            session_key="sessions/1/fake/session.tar.gz",
+            session_checksum="c" * 64,
         ),
         exit_code=exit_code,
         log_path=Path("/dev/null"),

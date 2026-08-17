@@ -360,15 +360,23 @@ deliberately dumb storage.
   never archive writes.
 - **Checksummed**: `put` returns the sha256, recorded in the burst's finalize
   statement; `get` verifies content against the ledger's value. The ledger is
-  the authority — a sidecar file is a backend convenience, not a contract.
+  the authority — the copy the archive keeps beside the object (S3 metadata, a
+  sidecar file locally) is for reading, never for deciding. It has one job:
+  when the control plane never held the bytes, as with presigned PUT, it is how
+  the checksum gets home (`recorded_checksum`).
 - The **credential-exclusion rule is unconditional** (`EXCLUDE_FROM_ARCHIVE`
   survives verbatim), and reviewer/tester volumes are never seeded and never
-  archived, as in the MVP.
+  archived. Under per-burst keys that is no longer a rule about *overwriting* —
+  every burst has its own key — but about what is a node: nothing resumes a
+  reviewer, so it is not one.
 - **GC**: snapshots of `done` tasks age out after a retention window, except
   nodes with `pinned = true` (golden-replay fixtures, M4 scenarios) and any
   node on a path to a pinned one.
 
-The protocol goes key-based to match (A5):
+The protocol is key-based, and `ARCHIVE_URL` chooses the backend the same way
+`LEDGER_DSN` chooses the ledger's —
+`s3://[key:secret@]host[:port]/bucket[/prefix][?tls=false]`, where `tls=false`
+is this store's `sslmode=disable`:
 
 ```python
 class SessionArchive(Protocol):
@@ -376,11 +384,24 @@ class SessionArchive(Protocol):
         """Archive session_dir under key; returns sha256. Write-once."""
     def get(self, key: str, dest_dir: Path, expected_sha256: str) -> None:
         """Materialize key into dest_dir; checksum mismatch raises."""
+    def recorded_checksum(self, key: str) -> str | None:
+        """What the archive itself stored beside the object. Not the authority."""
 ```
 
-Per-object presigned GET/PUT (the three-container pod, T1) extends this
-protocol without changing it for `DockerRunner`, which keeps calling `put`/`get`
-in-process.
+Per-object presigned GET/PUT (the three-container pod, T1) is a second protocol
+over the same backend — `PresigningArchive`, implemented by the object store and
+by nothing else, because `DockerRunner` keeps putting and getting in-process and
+should not have to fake a capability it never uses.
+
+**Walking the tree** is one query, not a join through the task row:
+`latest_archived_burst(task_id)` returns the leaf — the newest burst with a
+`session_key` — and that is both what the next volume is materialized from and
+what its `resumed_from_burst_id` points at. `bursts_session_leaf`, a partial index
+on exactly that predicate, serves it. Two consequences worth stating: a burst that
+crashes before harvest never becomes a leaf, so the next one resumes the last node
+that actually produced something; and a `parent` of `None` is the whole mechanism
+behind an amnesiac burst, so there is no way to ask for a volume that resumes
+nothing yet still holds the session.
 
 ## From the MVP
 
@@ -389,7 +410,8 @@ What Stage A moves, and where:
 | MVP shape | Target shape | Issue |
 |---|---|---|
 | `tasks.task_id` = bare issue number | derived `owner/repo#n` + `repository` FK + `issue_number` | A6 |
-| `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5, backfilled at A6 |
+| `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5 stops writing them, A6 backfills the old blobs and drops the columns |
+| task-keyed archive `put`/`get` | key-based, one object per burst, checksum passed in | A5 |
 | ISO-`TEXT` timestamps everywhere | `timestamptz` columns, strings at the edge | A3 |
 | `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb — for Postgres; the single-node SQLite variant keeps self-bootstrapping until A6 retires it as an origin | A2 |
 | no claim verbs (single process) | lease + CAS statements in the `Ledger` protocol | A3 (the finalize CAS), E1 (`claimed_by`/`claimed_until` + the claim verbs), E2 (used in anger) |

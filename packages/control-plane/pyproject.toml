@@ -13,6 +13,10 @@ dependencies = [
     "python-dotenv>=1.0",
     "structlog>=26.1.0",
     "psycopg[binary]>=3.2",
+    # The S3 protocol client for the session archive (A5). Control-plane only —
+    # a burst container never holds storage credentials, so the dev-agent package
+    # must never grow this.
+    "boto3>=1.35",
 ]
 
 [project.scripts]

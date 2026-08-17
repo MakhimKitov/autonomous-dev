@@ -43,6 +43,7 @@ import structlog
 from psycopg.rows import dict_row
 
 from control_plane.models import (
+    BURST_FINALIZE_COLUMNS,
     EVENT_CHANNEL,
     EVENT_VIOLATION_RECORDED,
     BurstRecord,
@@ -65,17 +66,8 @@ _EVENT_TIMESTAMPS = ("created_at",)
 # numeric → float on load; see the module docstring.
 _BURST_NUMERICS = ("cost_usd",)
 
-_BURST_FINALIZE_COLUMNS = (
-    "status",
-    "finished_at",
-    "exit_code",
-    "model",
-    "cost_usd",
-    "input_tokens",
-    "output_tokens",
-    "num_turns",
-    "session_id",
-)
+# What finish_burst writes: BURST_FINALIZE_COLUMNS in models.py, shared with the
+# SQLite backend so the two CAS statements cannot drift apart.
 
 
 def _to_datetime(value: str | None) -> datetime | None:
@@ -189,7 +181,7 @@ class PostgresLedger:
         the same guarantee structural.
         """
         data = _bind(burst, _BURST_TIMESTAMPS)
-        assignments = ", ".join(f"{column} = %({column})s" for column in _BURST_FINALIZE_COLUMNS)
+        assignments = ", ".join(f"{column} = %({column})s" for column in BURST_FINALIZE_COLUMNS)
         cursor = self._execute(
             f"UPDATE bursts SET {assignments} WHERE burst_id = %(burst_id)s AND status = 'running'",
             data,
@@ -203,6 +195,17 @@ class PostgresLedger:
 
     def get_burst(self, burst_id: str) -> BurstRecord | None:
         row = self._execute("SELECT * FROM bursts WHERE burst_id = %s", (burst_id,)).fetchone()
+        return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
+
+    def latest_archived_burst(self, task_id: str) -> BurstRecord | None:
+        """The leaf of this task's session tree — the newest burst that archived a
+        snapshot. Served by `bursts_session_leaf`, the partial index on exactly
+        this predicate."""
+        row = self._execute(
+            "SELECT * FROM bursts WHERE task_id = %s AND session_key IS NOT NULL "
+            "ORDER BY started_at DESC, burst_id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
 
     def running_bursts(self) -> list[BurstRecord]:

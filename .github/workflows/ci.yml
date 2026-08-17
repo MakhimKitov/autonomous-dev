@@ -21,8 +21,9 @@ jobs:
         run: uv run squawk packages/control-plane/src/control_plane/migrations/*.sql
 
   # The state block's per-PR proof: the schema applies from nothing, twice, and
-  # the suite then runs against a real Postgres rather than SQLite alone.
-  migrate:
+  # the suite then runs against the real service backends rather than the
+  # single-node ones alone — a real Postgres and a real S3 bucket.
+  stores:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -41,6 +42,10 @@ jobs:
       # which refuses to guess (the rig speaks no TLS).
       LEDGER_DSN: postgresql://platform_admin:platform@localhost:5432/platform?sslmode=disable
       ATLAS_DEV_URL: postgresql://platform_admin:platform@localhost:5432/atlas_dev?sslmode=disable
+      # tls=false is this store's sslmode=disable. Credentials match the rig's
+      # s3.json, which is dev-only by construction: the gateway is on localhost
+      # and the volume dies with the job.
+      ARCHIVE_URL: s3://platform:platform-dev-secret@localhost:8333/platform-sessions?tls=false
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -49,6 +54,12 @@ jobs:
       - uses: ariga/setup-atlas@v0
         with:
           version: v1.2.1 # pinned: the drift check below reads Atlas's output
+      - name: the archive's backend, from the rig's own definition
+        # A step rather than a `services:` entry, because a service container
+        # cannot be given a command and this image needs one. Compose is the
+        # single definition of the rig either way — CI runs the same file a
+        # laptop does, so the two cannot drift.
+        run: docker compose -f docker/compose.yaml up -d --wait seaweedfs
       - run: uv sync --locked
       - name: from zero
         run: uv run control-plane migrate
@@ -79,5 +90,23 @@ jobs:
             *"Schemas are synced"*) ;;
             *) echo "::error::schema.sql and the migration directory have drifted — see the plan above"; exit 1 ;;
           esac
-      - name: the suite, against Postgres
+      - name: the suite, against the service backends
+        # Both contract suites see their service backend here — the ledger's
+        # because LEDGER_DSN is set, the archive's because ARCHIVE_URL is.
+        # Everything else keeps its own scratch space regardless
+        # (tests/conftest.py explains why that has to be forced).
         run: uv run pytest
+      - name: what the archive was left holding
+        # Cheap, and it is the one thing the suite cannot assert about itself: no
+        # test wrote to a bare sessions/ key, so nothing bypassed the isolation.
+        if: always()
+        run: |
+          uv run python - <<'PY'
+          import os
+          from control_plane.objectstore import ObjectSessionArchive
+          archive = ObjectSessionArchive.from_url(os.environ["ARCHIVE_URL"])
+          listing = archive._client.list_objects_v2(Bucket=archive.bucket).get("Contents", [])
+          leaked = [o["Key"] for o in listing if o["Key"].startswith("sessions/")]
+          print(f"{len(listing)} objects, {len(leaked)} outside a test prefix")
+          assert not leaked, f"tests wrote to the shared archive root: {leaked[:5]}"
+          PY

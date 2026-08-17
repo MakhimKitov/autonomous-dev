@@ -33,12 +33,13 @@
 -- database match them.
 --
 -- Shape note: still converging on STORES.md's Stage-A target. Landed: org tables
--- and walls (A4). Outstanding: per-burst snapshots at A5 (#16), composite task
--- identity — `repository` + `issue_number` + the one-task-per-issue UNIQUE — at
--- A6 (#17), the task/repository claim columns at E1/E2 (#32, #33), the
--- `org_state` STOP row at E3 (#34), and `bursts.subscription_id` with the pool at
--- F (#38–41). All but `org_state` are additions to a *live* table, which is why
--- they wait for the stage that needs them rather than landing speculatively here.
+-- and walls (A4), the session tree (A5). Outstanding: composite task identity —
+-- `repository` + `issue_number` + the one-task-per-issue UNIQUE — at A6 (#17), the
+-- task/repository claim columns at E1/E2 (#32, #33), the `org_state` STOP row at
+-- E3 (#34), `bursts.pinned` with the golden-replay harness that needs it at G4
+-- (#45), and `bursts.subscription_id` with the pool at F (#38–41). All but
+-- `org_state` are additions to a *live* table, which is why they wait for the
+-- stage that needs them rather than landing speculatively here.
 
 -- repositories — one row per registered repository; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
@@ -129,27 +130,37 @@ CREATE INDEX tasks_status_created ON tasks (status, created_at);
 -- running ⟺ finished_at CHECK behind it). `kind` is deliberately unconstrained:
 -- it is scheduler vocabulary, and new kinds must not need a migration.
 CREATE TABLE bursts (
-    burst_id      text PRIMARY KEY,
-    task_id       text NOT NULL CONSTRAINT bursts_task_fk REFERENCES tasks (task_id),
-    kind          text NOT NULL,
-    role          text NOT NULL CONSTRAINT bursts_role_fk REFERENCES roles (role),
-    status        text NOT NULL CONSTRAINT bursts_status_check CHECK (status IN
-                    ('running', 'succeeded', 'failed', 'killed')),
-    trace_id      text NOT NULL DEFAULT '',
-    session_id    text,
-    started_at    timestamptz NOT NULL DEFAULT now(),
-    finished_at   timestamptz,
-    exit_code     integer,
-    model         text,
-    cost_usd      numeric,
-    input_tokens  bigint,
-    output_tokens bigint,
-    num_turns     integer,
+    burst_id              text PRIMARY KEY,
+    task_id               text NOT NULL CONSTRAINT bursts_task_fk REFERENCES tasks (task_id),
+    kind                  text NOT NULL,
+    role                  text NOT NULL CONSTRAINT bursts_role_fk REFERENCES roles (role),
+    status                text NOT NULL CONSTRAINT bursts_status_check CHECK (status IN
+                            ('running', 'succeeded', 'failed', 'killed')),
+    trace_id              text NOT NULL DEFAULT '',
+    -- the session tree (A5): the parent node this burst resumed from, and the
+    -- snapshot it left behind. Self-referencing, so lineage is a walk in SQL.
+    resumed_from_burst_id text CONSTRAINT bursts_resumed_from_fk REFERENCES bursts (burst_id),
+    session_id            text,
+    session_key           text,   -- archive key of this burst's snapshot
+    session_checksum      text,   -- sha256; the ledger is the checksum authority
+    started_at            timestamptz NOT NULL DEFAULT now(),
+    finished_at           timestamptz,
+    exit_code             integer,
+    model                 text,
+    cost_usd              numeric,
+    input_tokens          bigint,
+    output_tokens         bigint,
+    num_turns             integer,
     CONSTRAINT bursts_running_finished_check CHECK ((status = 'running') = (finished_at IS NULL))
 );
 
 -- bursts_started_since(): the rolling-window count behind the daily rail.
 CREATE INDEX bursts_started_at ON bursts (started_at);
+
+-- latest_archived_burst(): the leaf of a task's session tree, materialized into
+-- the next burst's volume. Partial, because only a burst that archived something
+-- is a candidate — reviewer and tester bursts never are.
+CREATE INDEX bursts_session_leaf ON bursts (task_id, started_at) WHERE session_key IS NOT NULL;
 
 -- WALL: sessions are single-writer — at most one running burst per task, as a
 -- constraint, not a scheduler promise. Any claiming bug becomes a constraint
