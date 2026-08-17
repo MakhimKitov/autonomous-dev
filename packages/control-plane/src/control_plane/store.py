@@ -36,6 +36,7 @@ from control_plane.models import (
     Event,
     TaskRecord,
     Violation,
+    utc_iso,
     utc_now,
 )
 
@@ -351,9 +352,12 @@ class SqliteLedger:
         return TaskRecord(**dict(row)) if row else None
 
     def tasks_by_status(self, *statuses: str) -> list[TaskRecord]:
+        # `task_id` breaks the tie: the scheduler takes the first row as "oldest
+        # first", and two tasks created in the same microsecond would otherwise be
+        # ordered by whatever the storage happened to return (gate A7).
         marks = ", ".join("?" for _ in statuses)
         rows = self._conn.execute(
-            f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at", statuses
+            f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at, task_id", statuses
         ).fetchall()
         return [TaskRecord(**dict(row)) for row in rows]
 
@@ -403,12 +407,23 @@ class SqliteLedger:
         return BurstRecord(**dict(row)) if row else None
 
     def running_bursts(self) -> list[BurstRecord]:
-        rows = self._conn.execute("SELECT * FROM bursts WHERE status = 'running'").fetchall()
+        rows = self._conn.execute(
+            "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
+        ).fetchall()
         return [BurstRecord(**dict(row)) for row in rows]
 
     def bursts_started_since(self, since_iso: str) -> int:
+        """The count since an *instant*, which is not the same as since a string.
+
+        SQLite has no timestamp type, so this is a text comparison — sound only
+        because every stored stamp is `utc_now()`-spelled and that format sorts
+        chronologically ('+' < '.' < digits, so an absent microsecond field sorts
+        before a present one). The caller's stamp gets the same spelling via
+        `utc_iso`; without it, an offset like +06:00 compares by clock reading and
+        the daily rail counts the wrong bursts (gate A7).
+        """
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= ?", (since_iso,)
+            "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= ?", (utc_iso(since_iso),)
         ).fetchone()
         return int(row["n"])
 

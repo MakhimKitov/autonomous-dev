@@ -157,8 +157,12 @@ class PostgresLedger:
         return None if row is None else _load(row, TaskRecord, _TASK_TIMESTAMPS)
 
     def tasks_by_status(self, *statuses: str) -> list[TaskRecord]:
+        # ORDER BY created_at alone is not a total order, and an unbroken tie is
+        # resolved by the plan — index order under one, heap order under another.
+        # `task_id` makes the answer the query's rather than the planner's (A7).
         rows = self._execute(
-            "SELECT * FROM tasks WHERE status = ANY(%s) ORDER BY created_at", (list(statuses),)
+            "SELECT * FROM tasks WHERE status = ANY(%s) ORDER BY created_at, task_id",
+            (list(statuses),),
         ).fetchall()
         return [_load(row, TaskRecord, _TASK_TIMESTAMPS) for row in rows]
 
@@ -209,7 +213,9 @@ class PostgresLedger:
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
 
     def running_bursts(self) -> list[BurstRecord]:
-        rows = self._execute("SELECT * FROM bursts WHERE status = 'running'").fetchall()
+        rows = self._execute(
+            "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
+        ).fetchall()
         return [_load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS) for row in rows]
 
     def bursts_started_since(self, since_iso: str) -> int:

@@ -428,8 +428,49 @@ What Stage A moves, and where:
 
 The `Ledger` protocol keeps its nine MVP methods; new verbs (claim, CAS
 transition, finalize) arrive additively at A3 so `SqliteLedger` callers never
-change. Gate A7: the MVP scenario runs byte-for-byte on Postgres + SeaweedFS with
-`LEDGER_DSN`/`ARCHIVE_URL` set, and identically with them unset.
+change.
+
+## Parity, and what it can mean
+
+Gate A7 asks that the MVP scenario run the same on Postgres + SeaweedFS as on
+SQLite + a directory. It cannot mean equal bytes — ids are random, timestamps
+advance, and a model's cost is its own business — so every field lands in one of
+three buckets, and `scripts/ledger-parity.py` + `scripts/archive-parity.py` are
+where the buckets are declared:
+
+- **strict** — shape, status, and lineage. Compared after *interning*: a burst id
+  becomes `B1, B2 …` in start order and `resumed_from_burst_id` becomes its
+  target's symbol, which turns "resumed from the burst before it" into a
+  comparable value instead of an opaque hex string. `session_key` gets the same
+  treatment, so the key scheme is compared and not merely its presence.
+- **excused** — what cannot repeat: `burst_id`, `trace_id`, `session_id`,
+  `session_checksum` (a fresh tarball has its own sha256), every timestamp.
+  Interned or shape-checked rather than compared.
+- **variance** — `cost_usd`, `input_tokens`, `output_tokens`. Printed, never
+  compared: a difference there is the model's, not the store's. `num_turns`,
+  `exit_code` and `status` are deliberately strict.
+
+Three asymmetries are by design, and a parity run should not report them:
+`platform_app`'s grants and the walls that reject a write exist only in Postgres
+(the single-node file carries none — "Walls in the schema"); `events.created_at` comes from
+the database clock there and the app clock here, both meaning "when the row was
+written"; and the payload is `jsonb`, so key order is normalized on the way in
+while SQLite keeps insertion order — callers see a parsed dict either way.
+
+A clean parity report is also narrower than it looks: it compares the rows two runs
+*left behind*. Walls that reject a write leave no rows, and those are
+`tests/test_schema_walls.py`'s job, not a diff's.
+
+What the gate found is what the buckets were built to find — divergence in a
+*read*, not in a write. `bursts_started_since` compared ISO **strings** on SQLite
+and **instants** on Postgres, so the daily-burst rail counted 0 bursts where
+Postgres counted 2 (`+06:00`) and 2 where Postgres counted 0 (`-08:00`); the
+SQLite path now respells the caller's stamp through `utc_iso` first.
+`tasks_by_status` and `running_bursts` returned rows in an order no query
+promised — the planner's, not the statement's — and now break their ties on
+`task_id` and `(started_at, burst_id)`. All three are held by
+`tests/test_ledger_contract.py`, which is where a claim about two backends
+belongs.
 
 ## Deliberately out
 

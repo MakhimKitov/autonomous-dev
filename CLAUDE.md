@@ -149,6 +149,23 @@ against the service backend as well as the single-node one. Everything else keep
 its own scratch ledger and archive regardless — see `tests/conftest.py` for why
 that has to be forced.
 
+### Parity, at a gate
+
+The contract suites hold the backends to one answer per method; a `gate` issue asks
+it of a whole scenario. Run the same commands twice — toggles set, then unset, into
+two data dirs — and compare with the instruments A7 built:
+
+```bash
+uv run python scripts/ledger-parity.py  data-single/ledger.sqlite3 "$LEDGER_DSN"
+uv run python scripts/archive-parity.py data-single "$LEDGER_DSN" "$ARCHIVE_URL"
+```
+
+Both exit non-zero on a difference. What they can and can't say — the three
+buckets, and the asymmetries that are by design — is `STORES.md`, "Parity, and
+what it can mean". They are by-hand instruments (a live rig, a real burst), so
+`tests/test_gate_instruments.py` is what keeps a rename from silently breaking
+them between gates.
+
 ## Test
 
 ```bash
