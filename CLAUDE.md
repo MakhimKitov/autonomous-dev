@@ -34,10 +34,10 @@ lives in `dev_agent.env`; control-plane imports it, never the reverse.
 docker build -f docker/dev-agent/Dockerfile -t autonomous-dev/dev-agent:latest .
 
 # Boot smoke (no network, no key): container check in a clone
-uv run control-plane burst --task-id t1 --repo ../discord-bot --mode check --data-dir data
+uv run control-plane burst --issue 1 --repo ../discord-bot --mode check --data-dir data
 
 # One real burst (needs CLAUDE_CODE_OAUTH_TOKEN in the control-plane env)
-uv run control-plane burst --task-id t1 --repo ../discord-bot \
+uv run control-plane burst --issue 1 --repo ../discord-bot \
   --prompt "Summarize the repo layout" --budget 1.0
 
 # The M2 scheduler (SCHEDULER.md): ready issue → PR → review rounds, unattended
@@ -108,6 +108,30 @@ lints, `control-plane migrate` applies. It cannot see triggers, grants, seeded
 rows, or whether a constraint is still `NOT VALID` — so it will call a database
 with a forgotten `VALIDATE CONSTRAINT` synced. Walls of that kind are tested by
 provoking them, not by diffing (`ARCHITECTURE.md` §12).
+
+### Task identity
+
+A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).
+Both places that mint one — the scheduler's intake and the `burst` verb — build it
+from the repository slug, so a hand-run burst joins the task the scheduler would
+have created rather than making a second one. `UNIQUE (repository, issue_number)`
+makes a duplicate unrepresentable, and `tasks.repository` holds the slug: the
+platform's clone path is a fact about one machine and lives in no row.
+
+MVP-era data — bare-number ids, a clone path in `repo` — moves with one verb:
+
+```bash
+uv run control-plane backfill --repository owner/name --data-dir data --dry-run
+```
+
+It reads the single-node pair read-only and writes to whatever the toggles name:
+rows re-keyed, each task's one blob re-keyed as its last dev burst's snapshot,
+manual-era rows (`t1` and friends — ids that were never issues) dropped and
+counted. It refuses a second run rather than colliding on every derived id.
+Two consequences worth knowing: `migrate` **fails on purpose** at `0008` while any
+task lacks an `issue_number` (the repair is the verb, and the state after the
+failure is a prefix), and `SqliteLedger` refuses to open a pre-A6 file for the same
+reason instead of half-repairing it.
 
 ### The session tree
 

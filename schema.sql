@@ -100,30 +100,39 @@ CREATE TABLE subscriptions (
     registered_at   timestamptz NOT NULL DEFAULT now()
 );
 
--- tasks — one GitHub issue worked to completion. Still the MVP shape: `repo` is
--- a filesystem path and `task_id` a bare issue number until A6 derives
--- '{owner}/{repo}#{issue_number}' and adds `issue_number` + the
--- UNIQUE (repository, issue_number) wall.
+-- tasks — one GitHub issue worked to completion. The id is derived, never
+-- invented: '{owner}/{repo}#{issue_number}', so it is stable across replicas and
+-- joins the GitHub world for free. `repository` holds the product slug; the
+-- platform's clone path is a runtime argument and belongs in no row.
+--
+-- No foreign key into repositories yet, and that is a decision rather than an
+-- omission: nothing before C1 (#23) can legitimately create a `repositories` row,
+-- so requiring one here would make every task uninsertable in the meantime. C1
+-- ships `product register` and adds the reference.
 CREATE TABLE tasks (
-    task_id             text PRIMARY KEY,
-    repo                text NOT NULL,
-    status              text NOT NULL CONSTRAINT tasks_status_check CHECK (status IN
-                          ('open', 'claimed', 'working', 'awaiting_review', 'blocked', 'done')),
-    session_id          text,
-    transcript_key      text,
-    transcript_checksum text,
-    pr_number           integer,
-    attempts            integer NOT NULL DEFAULT 0,
-    review_rounds       integer NOT NULL DEFAULT 0,
-    next_burst_kind     text,
-    last_review_id      bigint,
-    last_burst_at       timestamptz,
-    created_at          timestamptz NOT NULL DEFAULT now(),
-    updated_at          timestamptz NOT NULL DEFAULT now()
+    task_id         text PRIMARY KEY,          -- '{owner}/{repo}#{issue_number}'
+    repository      text NOT NULL,             -- 'owner/name'
+    issue_number    integer NOT NULL,
+    status          text NOT NULL CONSTRAINT tasks_status_check CHECK (status IN
+                      ('open', 'claimed', 'working', 'awaiting_review', 'blocked', 'done')),
+    session_id      text,
+    pr_number       integer,
+    attempts        integer NOT NULL DEFAULT 0,
+    review_rounds   integer NOT NULL DEFAULT 0,
+    next_burst_kind text,
+    last_review_id  bigint,
+    last_burst_at   timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
 -- tasks_by_status(): WHERE status IN (…) ORDER BY created_at
 CREATE INDEX tasks_status_created ON tasks (status, created_at);
+
+-- WALL: one task per issue. The derived task_id already makes a duplicate hard to
+-- represent; this makes it impossible, including for two replicas that compute the
+-- same id at the same moment.
+CREATE UNIQUE INDEX tasks_one_per_issue ON tasks (repository, issue_number);
 
 -- bursts — history-preserving, not append-only: a row transitions while running
 -- and is finalized exactly once (the CAS in the store layer, with the

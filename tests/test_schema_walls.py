@@ -33,7 +33,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from control_plane.migrate import migrate
-from control_plane.models import BurstStatus, TaskStatus, Violation
+from control_plane.models import BurstStatus, TaskStatus, Violation, task_id_for
 from control_plane.store import LEDGER_DSN_ENV
 from psycopg.conninfo import make_conninfo
 
@@ -87,12 +87,22 @@ def attempt(conn, sql, params=None, *, role=None):
         return conn.execute(sql, params)
 
 
-def a_task(conn, task_id="t1", status=TaskStatus.OPEN):
-    attempt(conn, "INSERT INTO tasks (task_id, repo, status) VALUES (%s, '/r', %s)", (task_id, status))
+REPOSITORY = "owner/product"
+
+
+def a_task(conn, task_id=None, status=TaskStatus.OPEN, repository=REPOSITORY, issue_number=1):
+    """A task row, keyed the way the platform keys them (A6): derived, not typed."""
+    task_id = task_id or task_id_for(repository, issue_number)
+    attempt(
+        conn,
+        "INSERT INTO tasks (task_id, repository, issue_number, status) VALUES (%s, %s, %s, %s)",
+        (task_id, repository, issue_number, status),
+    )
     return task_id
 
 
-def a_running_burst(conn, burst_id, task_id="t1", role="dev", kind="work"):
+def a_running_burst(conn, burst_id, task_id=None, role="dev", kind="work"):
+    task_id = task_id or task_id_for(REPOSITORY, 1)
     attempt(
         conn,
         "INSERT INTO bursts (burst_id, task_id, kind, role, status) VALUES (%s, %s, %s, %s, 'running')",
@@ -107,6 +117,52 @@ def finish(conn, burst_id):
         "UPDATE bursts SET status = 'succeeded', finished_at = now() WHERE burst_id = %s",
         (burst_id,),
     )
+
+
+# ------------------------------------------------------------ one task per issue
+
+
+def test_one_task_per_issue(db):
+    """The wall A4's scope named and A6 could finally build, since it needs the
+    column A6 adds. The derived id already makes a duplicate hard to represent;
+    this is what makes it impossible — including for two replicas deriving the same
+    id in the same instant."""
+    a_task(db, task_id="owner/product#7", repository="owner/product", issue_number=7)
+
+    with pytest.raises(psycopg.errors.UniqueViolation, match="tasks_one_per_issue"):
+        attempt(
+            db,
+            "INSERT INTO tasks (task_id, repository, issue_number, status) "
+            "VALUES ('owner/product#7-again', 'owner/product', 7, 'open')",
+        )
+
+    # …and the same issue number under a different product is a different task
+    a_task(db, task_id="owner/other#7", repository="owner/other", issue_number=7)
+
+
+def test_a_task_always_names_its_issue(db):
+    """NOT NULL, arrived at without a table scan (0007 + 0008). A task whose issue
+    is unknown has no derived id, so there is nothing for the wall above to be
+    unique about."""
+    with pytest.raises(psycopg.errors.NotNullViolation, match="issue_number"):
+        attempt(
+            db,
+            "INSERT INTO tasks (task_id, repository, status) "
+            "VALUES ('owner/product#8', 'owner/product', 'open')",
+        )
+
+
+def test_the_clone_path_has_nowhere_to_go(db):
+    """`repo` is gone, not renamed-and-kept: the platform's clone path is a fact
+    about one machine and belongs in no row (A6). A migration that reintroduced it
+    would make this pass, which is the point of asserting it."""
+    columns = db.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'tasks'"
+    ).fetchall()
+    names = {row[0] for row in columns}
+    assert "repo" not in names
+    assert {"repository", "issue_number"} <= names
+    assert not {"transcript_key", "transcript_checksum"} & names  # A5's snapshot moved to bursts
 
 
 # ------------------------------------------------- one running burst per task
@@ -138,7 +194,7 @@ def test_the_handoff_still_works(db):
     finish(db, "b2")
     a_running_burst(db, "b3")
 
-    rows = db.execute("SELECT count(*) FROM bursts WHERE task_id = 't1'").fetchone()
+    rows = db.execute("SELECT count(*) FROM bursts WHERE task_id = 'owner/product#1'").fetchone()
     assert rows[0] == 3
 
 
@@ -189,7 +245,7 @@ def test_every_burst_status_the_code_writes_is_allowed(db, status):
     attempt(
         db,
         "INSERT INTO bursts (burst_id, task_id, kind, role, status, finished_at) "
-        "VALUES (%s, 't1', 'work', 'dev', %s, %s)",
+        "VALUES (%s, 'owner/product#1', 'work', 'dev', %s, %s)",
         (f"b-{status}", status, ended),
     )
 
@@ -206,7 +262,7 @@ def test_a_status_nobody_implements_is_refused(db):
         attempt(
             db,
             "INSERT INTO bursts (burst_id, task_id, kind, role, status, finished_at) "
-            "VALUES ('b1', 't1', 'work', 'dev', 'vibing', now())",
+            "VALUES ('b1', 'owner/product#1', 'work', 'dev', 'vibing', now())",
         )
 
 
@@ -237,7 +293,7 @@ def test_a_burst_descends_from_a_burst_that_exists(db):
         attempt(
             db,
             "INSERT INTO bursts (burst_id, task_id, kind, role, status, resumed_from_burst_id) "
-            "VALUES ('b1', 't1', 'work', 'dev', 'running', 'no-such-burst')",
+            "VALUES ('b1', 'owner/product#1', 'work', 'dev', 'running', 'no-such-burst')",
         )
 
     a_running_burst(db, "b1")
@@ -245,7 +301,7 @@ def test_a_burst_descends_from_a_burst_that_exists(db):
     attempt(
         db,
         "INSERT INTO bursts (burst_id, task_id, kind, role, status, resumed_from_burst_id) "
-        "VALUES ('b2', 't1', 'work', 'dev', 'running', 'b1')",
+        "VALUES ('b2', 'owner/product#1', 'work', 'dev', 'running', 'b1')",
     )
     assert db.execute("SELECT resumed_from_burst_id FROM bursts WHERE burst_id='b2'").fetchone() == (
         "b1",
@@ -433,11 +489,16 @@ def test_the_runtime_cannot_register_what_operators_register(db, what, statement
 def test_the_runtime_can_do_its_job(db):
     """The other direction, and the one a too-tight grant would break: everything
     the scheduler actually does, done as the role replicas connect as."""
-    attempt(db, "INSERT INTO tasks (task_id, repo, status) VALUES ('t1', '/r', 'open')", role="platform_app")
-    attempt(db, "UPDATE tasks SET status = 'working' WHERE task_id = 't1'", role="platform_app")
     attempt(
         db,
-        "INSERT INTO bursts (burst_id, task_id, kind, role, status) VALUES ('b1','t1','work','dev','running')",
+        "INSERT INTO tasks (task_id, repository, issue_number, status) "
+        "VALUES ('owner/product#1', 'owner/product', 1, 'open')",
+        role="platform_app",
+    )
+    attempt(db, "UPDATE tasks SET status = 'working' WHERE task_id = 'owner/product#1'", role="platform_app")
+    attempt(
+        db,
+        "INSERT INTO bursts (burst_id, task_id, kind, role, status) VALUES ('b1','owner/product#1','work','dev','running')",
         role="platform_app",
     )
     attempt(
@@ -447,10 +508,10 @@ def test_the_runtime_can_do_its_job(db):
     )
     attempt(
         db,
-        "INSERT INTO violations (task_id, burst_id, tool, reason) VALUES ('t1','b1','Bash','WALL')",
+        "INSERT INTO violations (task_id, burst_id, tool, reason) VALUES ('owner/product#1','b1','Bash','WALL')",
         role="platform_app",
     )
-    attempt(db, "INSERT INTO audit (actor, action, target) VALUES ('op','stop','t1')", role="platform_app")
+    attempt(db, "INSERT INTO audit (actor, action, target) VALUES ('op','stop','owner/product#1')", role="platform_app")
     for readable in ("roles", "repositories", "subscriptions", "memory_entries", "events"):
         attempt(db, f"SELECT count(*) FROM {readable}", role="platform_app")
 
@@ -466,7 +527,10 @@ def test_the_outbox_statement_runs_under_the_runtime_grants(db, walls_dsn):
     ledger = PostgresLedger(walls_dsn)
     try:
         ledger._conn.execute("SET ROLE platform_app")  # for the rest of the session
-        db.execute("INSERT INTO tasks (task_id, repo, status) VALUES ('t1', '/r', 'open')")
+        db.execute(
+            "INSERT INTO tasks (task_id, repository, issue_number, status) "
+            "VALUES ('owner/product#1', 'owner/product', 1, 'open')"
+        )
         ledger.record_violation(Violation(task_id="t1", burst_id="b1", tool="Bash", reason="WALL"))
 
         assert [v.tool for v in ledger.violations("t1")] == ["Bash"]

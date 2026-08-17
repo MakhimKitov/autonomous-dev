@@ -4,6 +4,7 @@
 scheduler: the same choreography, driven unattended by the reconciler loop
 (SCHEDULER.md). ``stop`` — the kill switch. ``github-check`` — App preflight.
 ``migrate`` — the Postgres ledger's schema, from numbered SQL (STORES.md).
+``backfill`` — the one-shot that carries MVP history into the service stores (A6).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import structlog
 from dotenv import load_dotenv
 from opentelemetry import trace
 
+from control_plane.backfill import BackfillError, run_backfill
 from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError, prepare_clone
 from control_plane.github_api import COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, slug_from_origin
@@ -32,11 +34,18 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.migrate import MigrationError, migrate, status
-from control_plane.models import TaskRecord
+from control_plane.models import TaskRecord, task_id_for
 from control_plane.review import REVIEWER_APP_PREFIX, ReviewPolicy, ReviewPolicyError
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
-from control_plane.store import LEDGER_DSN_ENV, LEDGER_FILENAME, open_ledger
+from control_plane.store import (
+    LEDGER_DSN_ENV,
+    LEDGER_FILENAME,
+    ArchiveError,
+    LocalSessionArchive,
+    open_archive,
+    open_ledger,
+)
 from control_plane.telemetry import init_telemetry
 from control_plane.testing import E2EPolicy, E2EPolicyError
 from dev_agent.log import configure_logging
@@ -49,8 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     burst = sub.add_parser("burst", help="run one burst container against a task, by hand")
-    burst.add_argument("--task-id", required=True, help="the issue id this burst works")
+    # An issue number, not a task id: the id is derived (A6). --github names the
+    # product when the clone's origin can't (a fixture, a detached checkout).
+    burst.add_argument("--issue", type=int, required=True, help="the issue number this burst works")
     burst.add_argument("--repo", type=Path, required=True, help="path to the product clone to mount")
+    burst.add_argument("--github", default=None, help="owner/name (default: parsed from --repo's origin)")
     burst.add_argument("--prompt", default="", help="the task text (M0/M1: injected directly)")
     burst.add_argument("--prompt-file", type=Path, help="read the task text from a file")
     burst.add_argument("--mode", default="run", choices=["run", "check"])
@@ -91,11 +103,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="report applied/pending and exit 1 if anything is pending; writes nothing",
     )
 
+    backfill_cmd = sub.add_parser(
+        "backfill",
+        help="one-shot: carry the MVP's single-node history into the service stores",
+    )
+    backfill_cmd.add_argument(
+        "--repository", required=True, help="owner/name — the product those rows belong to"
+    )
+    backfill_cmd.add_argument("--data-dir", type=Path, default=Path("data"), help="the source root")
+    backfill_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the plan and write nothing"
+    )
+
     sub.add_parser(
         "github-check",
         help="preflight the GitHub App: mint a token, show installation + permissions",
     )
     return parser
+
+
+def _backfill(args: argparse.Namespace) -> int:
+    """Move the experiment's history into whatever the toggles now point at.
+
+    The source is always the single-node pair under --data-dir; the destination is
+    whatever `LEDGER_DSN` / `ARCHIVE_URL` name, so pointing at nothing is a mistake
+    worth catching here rather than discovering as a no-op copy onto itself.
+    """
+    data_dir = args.data_dir.expanduser().resolve()
+    if not os.environ.get(LEDGER_DSN_ENV, "").strip():
+        print(f"error: set {LEDGER_DSN_ENV} — the backfill's destination is the service ledger",
+              file=sys.stderr)
+        return 2
+
+    destination = open_ledger(data_dir)
+    source_archive = LocalSessionArchive(data_dir)
+    destination_archive = open_archive(data_dir)
+    try:
+        plan = run_backfill(
+            data_dir,
+            args.repository,
+            destination,
+            source_archive,
+            destination_archive,
+            dry_run=args.dry_run,
+        )
+    except (BackfillError, ArchiveError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        destination.close()
+
+    print(plan.render())
+    if args.dry_run:
+        print("\n(dry run — nothing was written)")
+    return 0
 
 
 def _github_check() -> int:
@@ -131,9 +192,22 @@ def _run_burst(args: argparse.Namespace) -> int:
         print("error: a run burst needs --prompt or --prompt-file", file=sys.stderr)
         return 2
 
+    slug = args.github or slug_from_origin(repo)
+    if not slug:
+        print(
+            "error: pass --github owner/name (the clone's origin names no GitHub repo)",
+            file=sys.stderr,
+        )
+        return 2
+
     init_telemetry()
     stores = PlatformStores.open(args.data_dir)
-    task = stores.ledger.get_task(args.task_id) or TaskRecord(task_id=args.task_id, repo=str(repo))
+    # Derived, not typed: the same id the scheduler would compute for this issue,
+    # so a hand-run burst joins the same task rather than making a second one.
+    task_id = task_id_for(slug, args.issue)
+    task = stores.ledger.get_task(task_id) or TaskRecord(
+        task_id=task_id, repository=slug, issue_number=args.issue
+    )
     try:
         outcome = execute_burst(
             stores,
@@ -335,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
         return _stop(args)
     if args.command == "migrate":
         return _migrate(args)
+    if args.command == "backfill":
+        return _backfill(args)
     if args.command == "github-check":
         return _github_check()
     return 2

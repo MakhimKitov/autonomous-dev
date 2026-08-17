@@ -21,7 +21,7 @@ from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Review
 from control_plane.github_auth import GitHubAuthError
-from control_plane.models import BurstStatus, TaskRecord, TaskStatus, utc_now
+from control_plane.models import BurstStatus, TaskRecord, TaskStatus, task_id_for, utc_now
 from control_plane.prompts import assess_prompt, review_prompt, test_prompt, work_prompt
 from control_plane.review import FindingsError, ReviewPolicy, format_review_body, parse_findings
 from control_plane.runner import DEFAULT_IMAGE
@@ -171,7 +171,10 @@ class Scheduler:
 
     def _claim_ready_issues(self) -> None:
         for issue in self.api.list_ready_issues():
-            task = self.stores.ledger.get_task(str(issue.number))
+            # by the derived id, the same one _new_task would compute: a lookup that
+            # spells the key differently from the write finds nothing and re-claims
+            # an issue the platform already holds
+            task = self.stores.ledger.get_task(task_id_for(self.api.repo, issue.number))
             if task is not None and task.status in (
                 TaskStatus.CLAIMED,
                 TaskStatus.WORKING,
@@ -179,7 +182,7 @@ class Scheduler:
             ):
                 continue  # already ours; the label is drift
             if task is None:
-                task = TaskRecord(task_id=str(issue.number), repo=str(self.repo))
+                task = self._new_task(issue.number)
             task.status = TaskStatus.CLAIMED
             task.attempts = 0  # a human re-`ready` is a fresh grant
             task.review_rounds = 0
@@ -198,10 +201,26 @@ class Scheduler:
                 burst=task.next_burst_kind,
             )
 
+    def _new_task(self, issue_number: int) -> TaskRecord:
+        """A task row for an issue we just claimed.
+
+        The id is derived from the repository slug and the issue number, never
+        invented (A6): `self.api.repo` is 'owner/name', so two replicas claiming
+        the same issue compute the same id and the one-task-per-issue index turns
+        the race into a constraint violation rather than two tasks. The clone path
+        deliberately does not appear — it is a fact about this machine, passed to
+        each burst as an argument.
+        """
+        return TaskRecord(
+            task_id=task_id_for(self.api.repo, issue_number),
+            repository=self.api.repo,
+            issue_number=issue_number,
+        )
+
     def _park_blocked_issues(self) -> None:
         """The agent set `blocked` (contract rule 9) — stop scheduling the task."""
         for task in self.stores.ledger.tasks_by_status(TaskStatus.CLAIMED, TaskStatus.AWAITING_REVIEW):
-            issue = self.api.get_issue(int(task.task_id))
+            issue = self.api.get_issue(task.issue_number)
             if "blocked" in issue.labels:
                 task.status = TaskStatus.BLOCKED
                 task.next_burst_kind = None
@@ -212,7 +231,7 @@ class Scheduler:
         for task in self.stores.ledger.tasks_by_status(TaskStatus.AWAITING_REVIEW):
             if not task.pr_number:
                 continue
-            number = int(task.task_id)
+            number = task.issue_number
             pr = self.api.get_pr(task.pr_number)
             if pr.merged:
                 task.status = TaskStatus.DONE
@@ -315,7 +334,7 @@ class Scheduler:
         return None
 
     def run_task_burst(self, task: TaskRecord) -> None:
-        number = int(task.task_id)
+        number = task.issue_number
         kind = task.next_burst_kind or WORK
         if kind == ASSESS:
             self._run_assess_burst(task)
@@ -500,7 +519,7 @@ class Scheduler:
         log.info("machine test skipped", task=task.task_id, reason=reason)
         try:
             self.api.comment(
-                int(task.task_id),
+                task.issue_number,
                 f"ℹ️ control plane: machine test could not run ({reason}).",
             )
         except GitHubApiError as exc:
@@ -715,7 +734,7 @@ class Scheduler:
         task.attempts += 1
         task.last_burst_at = utc_now()
         if task.attempts >= self.rails.max_attempts:
-            number = int(task.task_id)
+            number = task.issue_number
             if task.next_burst_kind in MACHINE_STAGES:
                 # machine stages are additive (REVIEWERS.md, TESTER.md): give up
                 # on the stage, never on the task — it proceeds to the human gate

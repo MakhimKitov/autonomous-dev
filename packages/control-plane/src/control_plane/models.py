@@ -46,19 +46,27 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def task_id_for(repository: str, issue_number: int) -> str:
+    """A task's id, derived and never invented: ``{owner}/{repo}#{issue_number}``.
+
+    Two properties come from deriving it (TO-BE §2, STORES.md). It is stable across
+    replicas — two of them looking at the same issue compute the same id without
+    coordinating — and it joins the GitHub world for free, so a row and a URL name
+    the same thing. `UNIQUE (repository, issue_number)` then makes a second task
+    for one issue unrepresentable rather than unlikely.
+    """
+    return f"{repository}#{issue_number}"
+
+
 @dataclass(slots=True)
 class TaskRecord:
-    """One issue under work; keyed by the issue id."""
+    """One GitHub issue worked to completion, keyed by its derived id."""
 
-    task_id: str
-    repo: str
+    task_id: str  # '{owner}/{repo}#{issue_number}' — see task_id_for
+    repository: str  # 'owner/name', the registered product; never a clone path
+    issue_number: int
     status: str = TaskStatus.OPEN
     session_id: str | None = None
-    # The MVP's one-blob-per-task pointer. Nothing writes these since A5 — the
-    # snapshot lives on the burst that made it — and A6 (#17) backfills the blobs
-    # they still name into the tree and drops them.
-    transcript_key: str | None = None
-    transcript_checksum: str | None = None
     pr_number: int | None = None
     attempts: int = 0
     review_rounds: int = 0
