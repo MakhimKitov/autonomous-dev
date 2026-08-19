@@ -94,6 +94,41 @@ A LogsQL query for one burst, which is the whole correlation story in one line:
 trace_id:"7caf15929cf77e014997da6bf8395979" | sort by (_time)
 ```
 
+### What a burst looks like in Phoenix
+
+Everything lands in the `default` project — nothing sets a Phoenix project name — and
+each burst is one trace, rooted at the control plane's own `burst` span:
+
+```
+burst                              9.5s   ← the control plane's span: the whole burst
+  claude_code.interaction          5.9s   ← the CLI adopted our traceparent here
+    claude_code.llm_request        2.7s   LLM   model, finish_reason, ttft_ms, usage
+    claude_code.tool             41.0ms   TOOL  tool_name=Bash, full_command=…, tool_use_id
+      claude_code.tool.blocked_on_user     6ms
+      claude_code.tool.execution          35ms  TOOL  success=true
+    claude_code.llm_request        3.3s   LLM
+```
+
+Four things worth knowing when you look:
+
+- **The gap on the left is the platform.** `burst` starts ~2.7s before the first
+  CLI span — container start, clone, minting a GitHub token. Platform overhead and
+  agent work are separated for free, which is most of why the burst span exists.
+- **Tool arguments are there** (`full_command`, `file_path`), because tool visibility
+  *is* the experiment's dataset (§9). Tool and API *bodies* are not.
+- **`tool_use_id` is on both tool spans**, which is the handle B6 (#68) resolves a
+  test report's citation against — visible here before anything reads it.
+- **Span links are not shown, at all.** Phoenix's span model has no links field, so
+  B1's link to the predecessor burst is exported and then dropped. Lineage is
+  readable anyway: `burst.resumed_from` is an attribute on the root span, which is
+  the reason B1 recorded it as one as well as as a link. The authority is the
+  ledger's `resumed_from_burst_id`.
+
+One trace will look wrong and is not: a lone `claude_code.llm_request` with no parent
+and `llm_request.context = standalone`. That is the CLI's quick side-call, outside the
+interaction tree and in a trace of its own (B2) — attributable only by its `burst.id`,
+which is why `OTEL_RESOURCE_ATTRIBUTES` stamps every signal.
+
 **A collector in front of both, on purpose.** `ARCHITECTURE.md` §9 originally paired
 Phoenix's own OTLP listener directly with the emitters. The rig puts a collector
 there instead for three reasons that outlived the shortcut: logs need a second
@@ -135,12 +170,15 @@ Two things measured on the rig that are worth knowing before they cost you an ho
   symptom is the DNS error above, two containers from the cause. The rig streams on
   `service.name` alone; every other attribute is still an ordinary searchable field,
   which is all correlation needs (`docker/telemetry/collector.yaml`).
-- **Phoenix shows the tree, not its LLM-native views.** The CLI's spans arrive with
-  `span_kind` unset and no OpenInference attributes, so Phoenix classifies them
-  `UNKNOWN`: you get the nesting, the timings and the attributes, and its
-  prompt/completion panels stay empty. Fine for "what did this burst do" — the deep
-  record is the archived session (§9, "spans stay thin"), and B6 (#68) is what makes
-  a citation into it resolve.
+- **Phoenix types the spans but cannot count them.** It reads the CLI's `gen_ai.*`
+  attributes and classifies `claude_code.llm_request` as `LLM`, `claude_code.tool`
+  and `.tool.execution` as `TOOL` — so the LLM-flavored views do engage. What stays
+  at zero is its **token and cost accounting**: the CLI reports usage as
+  `input_tokens` / `output_tokens` / `cache_read_tokens`, not `gen_ai.usage.*`, so
+  Phoenix's totals read 0 and its cost is null while the numbers sit right there in
+  the attributes. Read cost from the burst row, which is the authoritative copy
+  anyway (§9). Content panes are empty by *our* choice — bodies off, the transcript
+  is the deep record.
 
 ## The alert condition
 

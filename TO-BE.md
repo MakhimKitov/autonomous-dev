@@ -571,11 +571,12 @@ capabilities:
 > shipped, swappable in that file plus `docker/telemetry/collector.yaml`. OTel
 > collector in front (logs need a second destination and Phoenix takes traces only),
 > VictoriaLogs for logs, Phoenix for traces, Grafana for the views; `lnav` over the
-> logfmt files as the no-server default for laptop work. One correction from building
-> it: Phoenix shows the **tree**, not LLM-native views — the CLI's spans carry no
-> OpenInference attributes and arrive with `span_kind` unset, so its prompt/completion
-> panels stay empty. The deep record is the archived session either way (§9, "spans
-> stay thin").
+> logfmt files as the no-server default for laptop work. One measured caveat: Phoenix
+> reads the CLI's `gen_ai.*` attributes and does type the spans (`LLM`, `TOOL`), but
+> its **token and cost accounting stays at zero** — usage arrives as `input_tokens` /
+> `output_tokens`, not `gen_ai.usage.*` — and it has no span-links field, so B1's
+> lineage link is dropped and `burst.resumed_from` is what a viewer reads. Cost comes
+> from the burst row, which is the authoritative copy either way.
 
 ## 13. Containment at org scale
 
