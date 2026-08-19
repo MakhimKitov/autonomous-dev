@@ -200,8 +200,16 @@ the reason for each choice next to it: traces and log events yes, metrics no (th
 ledger is the metrics store — TO-BE §12), tool arguments yes, tool and API bodies no.
 `CONTROL_PLANE_TRACE_CONSOLE=1` prints the control plane's own spans instead of
 pushing them; it is never passed into a container, where stdout is the SDK's message
-channel. The dev-only rig that receives all this — collector, logs, trace UI — is
-B4 (#22); until then any OTLP collector works.
+channel.
+
+The rig that receives all this is `docker/compose.telemetry.yaml` (B4) — collector,
+VictoriaLogs, Phoenix, Grafana, no volumes, four commands to boot. **`OBSERVABILITY.md`
+is the read**: the correlation join, the three UIs, what to check when nothing
+arrives, the alert condition in the three forms an adopter can consume, and the
+reference dashboards in `examples/dashboards/`. Two traps it records because they cost
+real time — a correlation id used as a VictoriaLogs stream field kills the process,
+and the rig's Grafana connects as a role that can read the views and nothing else, so
+a panel reaching for a base table fails rather than widening the boundary.
 
 ## Test
 

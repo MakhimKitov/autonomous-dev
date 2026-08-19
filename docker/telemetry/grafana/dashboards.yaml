@@ -1,0 +1,17 @@
+# Provision the reference dashboards straight out of examples/.
+#
+# The directory below is `../examples/dashboards` mounted read-only, so the rig
+# renders the committed file rather than a copy of it — an edit to the JSON shows up
+# on the next `up`, and a dashboard edited in the UI is a scratchpad that the next
+# `up` replaces. That is the intent: the example is the artifact, and the rig is one
+# tool that happens to read it.
+
+apiVersion: 1
+
+providers:
+  - name: examples
+    type: file
+    allowUiUpdates: false # the file wins
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

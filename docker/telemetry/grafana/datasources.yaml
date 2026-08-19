@@ -1,0 +1,31 @@
+# The one datasource the rig's Grafana has: the ledger, read through the reporting
+# views and nothing else.
+#
+# The user is the point. `dashboard` is a role with USAGE on `reporting` and SELECT
+# on its views (docker/telemetry/dashboard-role.sql) — so this connection can render
+# every aggregate the platform publishes and cannot read one row of `tasks`,
+# `bursts` or `violations`. Views execute with their owner's privileges, which is
+# what makes that possible without a second copy of the data. Point it at
+# `platform_app` instead and the boundary is gone, silently: everything would still
+# work, which is exactly why it is written down here.
+#
+# `editable: false` because this file is the definition — change it here, not in the
+# UI, or the next `up` overwrites you.
+
+apiVersion: 1
+
+datasources:
+  - name: ledger
+    uid: ledger # what examples/dashboards/grafana-reporting.json binds its panels to
+    type: grafana-postgresql-datasource
+    # The ledger runs in the *other* compose project, so it is reached as the host
+    # (docker/compose.telemetry.yaml maps the name on Linux too).
+    url: host.docker.internal:5432
+    user: dashboard
+    isDefault: true
+    editable: false
+    jsonData:
+      database: platform
+      sslmode: disable # the rig speaks no TLS, same as LEDGER_DSN's sslmode=disable
+    secureJsonData:
+      password: dashboard # a rig password: localhost, thrown away with the volume

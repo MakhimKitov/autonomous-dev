@@ -382,9 +382,13 @@ containing `CREATE VIEW` outright ("views are available to logged-in users only"
 so the drift check cannot see these definitions at all. Seeded rows in, known
 numbers out is what stands behind them.
 
-Reference dashboards are examples, not components, and land with the dev-only rig
-at B4 (#22). The single-node ledger has no reporting layer and is not getting one:
-a laptop reads its own numbers with a query.
+Reference dashboards are examples, not components: `examples/dashboards/` (B4) is a
+portable `.sql` file plus one importable dashboard that embeds the same statements,
+run by `tests/test_dashboards.py` as a role holding nothing but the two grants above —
+so the example cannot rot and cannot quietly come to need a base table.
+`docker/telemetry/dashboard-role.sql` is those grants as a script, and
+`OBSERVABILITY.md` is the operator's read. The single-node ledger has no reporting
+layer and is not getting one: a laptop reads its own numbers with a query.
 
 ## The events outbox
 
@@ -396,7 +400,8 @@ instruments (`TO-BE.md` §12).
 - **Written atomically** with the mutation they announce, via the CTE shape
   above. An event without its mutation, or a mutation without its event,
   cannot be observed. `violation_recorded` is the first kind (A4) — the alert
-  signal §11 documents; `capacity_exhausted`, `subscription_expiring` and
+  signal `TO-BE.md` §12 documents, and the exact form of the condition
+  (`OBSERVABILITY.md`); `capacity_exhausted`, `subscription_expiring` and
   `task_blocked` arrive with the stages that raise them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
   — at-least-once, ordered, replayable; each consumer keeps its own cursor, and

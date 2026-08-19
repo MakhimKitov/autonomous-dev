@@ -1,0 +1,77 @@
+# The rig's collector: one OTLP endpoint in, one destination per signal out.
+#
+# This file is the swap TO-BE §12 promises. Both processes that emit — the control
+# plane and each burst — know one address and nothing else; which viewer holds
+# their spans is decided here, in a dev-only file, and changing it changes no
+# platform code and no environment variable.
+#
+# Core distribution only (`otel/opentelemetry-collector`, not -contrib): an OTLP
+# receiver, a batcher and two OTLP/HTTP exporters is the whole rig. If a processor
+# you want is missing, that is the contrib image's job — and worth a second look
+# first, because a processor here rewrites signals the platform will be judged on.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318 # what both emitters push to (only this one is published)
+      grpc:
+        endpoint: 0.0.0.0:4317 # nothing uses it yet; a sidecar or an SDK might
+
+processors:
+  batch:
+    # A rig is watched by a human waiting for a burst to show up, so latency beats
+    # throughput: the emitters already export every second (B2).
+    timeout: 1s
+
+exporters:
+  otlphttp/phoenix:
+    # Phoenix is traces-only, so the endpoint is set per signal rather than by base
+    # URL — an `endpoint:` here would also claim to accept logs and metrics.
+    traces_endpoint: http://phoenix:6006/v1/traces
+
+  otlphttp/victorialogs:
+    logs_endpoint: http://victorialogs:9428/insert/opentelemetry/v1/logs
+    headers:
+      # Which fields become *stream* fields — and `service.name` is the only one of
+      # ours that may. Two reasons, one measured the hard way (2026-08-19):
+      #
+      #   * The CLI puts `task.id` / `burst.id` / `burst.role` / `burst.kind` on the
+      #     resource *and* on every log record, so each name matches twice.
+      #     VictoriaLogs answers a duplicate stream tag with a FATAL panic that takes
+      #     the whole process down — not the request, the process — after which the
+      #     collector reports `lookup victorialogs: no such host` and the cause is
+      #     two containers away. Naming any correlation id here breaks the rig.
+      #   * `burst.id` is unbounded anyway: a stream per burst is exactly the
+      #     cardinality VictoriaLogs warns about.
+      #
+      # Nothing is lost. Every attribute is still an ordinary field, so
+      # `burst.id:"58e70f71c6aa"` and `trace_id:"…"` find the burst — which is all
+      # correlation needs. Streams are about how the data is laid out.
+      VL-Stream-Fields: service.name
+
+  debug:
+    # The rig's answer to "did anything arrive?" — per-batch counts in
+    # `docker compose logs otel-collector`, no bodies. The emitters cannot tell you:
+    # the CLI drops export failures silently, and the control plane's exporter logs
+    # nothing either.
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phoenix, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/victorialogs, debug]
+    # No metrics pipeline, on purpose. The ledger is the metrics store (TO-BE §12),
+    # so an exported metric is a second copy of a ledger fact — and a collector with
+    # nowhere to put it refuses the export rather than quietly storing it. If this
+    # rig ever starts rejecting metrics you did not know were being sent, that is
+    # the wall working.
+  telemetry:
+    logs:
+      level: info

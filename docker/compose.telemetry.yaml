@@ -1,0 +1,102 @@
+# The telemetry rig (B4, #22): where a burst's spans and log events go while you
+# are watching one. Dev-only and never shipped — TO-BE §12 makes the platform emit
+# four capabilities (traces, logs, metrics-as-queries, an alert signal) and ship no
+# instrument, so everything named in this file is a viewer you chose, not a
+# component the platform depends on. Swapping one is an edit here plus, for traces
+# and logs, a line in ./telemetry/collector.yaml. Nothing above this file knows
+# which of them is running. `OBSERVABILITY.md` is the operator's read.
+#
+# A separate file from ./compose.yaml, not a second half of it: the stores rig backs
+# the *suite* (CI boots it, the contract tests need it), while this one backs a
+# *look* at a burst you are running. Keeping them apart means `up` on either costs
+# only what it is for, and CI never pulls a trace UI.
+#
+#   docker compose -f docker/compose.yaml up -d --wait                # 1. stores
+#   uv run control-plane migrate                                      # 2. schema + views
+#   docker compose -f docker/compose.yaml exec -T postgres \
+#     psql -U platform_admin -d platform \
+#     < docker/telemetry/dashboard-role.sql                           # 3. the reader
+#   docker compose -f docker/compose.telemetry.yaml up -d --wait      # 4. the rig
+#
+#   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318          # control plane
+#   export DEV_AGENT_OTLP_ENDPOINT=http://host.docker.internal:4318   # a burst
+#
+# Step 3 is the one that looks out of place and is not: how a dashboard reader
+# authenticates is the operator's, so no migration creates it (0010 says why).
+#
+# Three UIs, one per capability, each the native one for it:
+#   http://localhost:6006  Phoenix      — the burst trace, control plane + agent spans
+#   http://localhost:9428/select/vmui   — VictoriaLogs, the agent's log events
+#   http://localhost:3000  Grafana      — the reporting views (examples/dashboards)
+#
+# State is deliberately absent: no volumes, so `down` leaves nothing and the next
+# `up` starts empty. A rig that accumulates history is a store, and the store this
+# platform has is the ledger.
+
+name: autonomous-dev-telemetry
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector:0.159.0
+    volumes:
+      - ./telemetry/collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP — the one address both emitters are given
+    # No healthcheck: the image is distroless, so there is nothing inside to run a
+    # probe with. It listens in well under a second; `docker compose logs
+    # otel-collector` is where you look if it did not.
+    depends_on:
+      - phoenix
+      - victorialogs
+
+  phoenix:
+    image: arizephoenix/phoenix:version-20.3.0
+    ports:
+      - "6006:6006" # UI, and its own OTLP/HTTP — the collector uses the latter
+    # ARCHITECTURE §9 pairs Phoenix with "our existing Postgres". That is a
+    # deployment's choice, not a rig's: Phoenix's own tables in the platform
+    # database would show up in every `atlas schema diff` as drift, and a viewer's
+    # state is not worth a migration. Here it keeps its default store and loses it
+    # on `down`, which is what a rig is for.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6006/healthz')"]
+      interval: 2s
+      timeout: 3s
+      retries: 45 # first boot migrates its own schema
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.52.0
+    command: -storageDataPath=/victoria-logs-data -retentionPeriod=7d
+    ports:
+      - "9428:9428" # ingestion + vmui (/select/vmui)
+    # No healthcheck: the image ships the binary and nothing else — no shell, no
+    # wget. `curl localhost:9428/health` from the host answers the same question.
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      # A laptop rig: anonymous read so a link works with no login, admin/admin if
+      # you want to edit. Editing is a scratchpad — the file under examples/ is what
+      # gets provisioned back on the next `up`.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./telemetry/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/ledger.yaml:ro
+      - ./telemetry/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/examples.yaml:ro
+      # The reference dashboards are provisioned straight from examples/ — the rig
+      # renders the committed file rather than a copy of it, so it cannot rot.
+      - ../examples/dashboards:/var/lib/grafana/dashboards:ro
+    extra_hosts:
+      # The ledger is in the *other* compose project, reached as the host either
+      # way. Docker Desktop resolves this name already; on Linux this line is what
+      # creates it.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

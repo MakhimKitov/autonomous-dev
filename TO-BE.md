@@ -553,18 +553,29 @@ capabilities:
   families (reliability / containment / capability) ship as documented
   read-only SQL **reporting views** over `tasks`/`bursts`/`violations`. Any
   dashboard tool with a Postgres driver renders them; reference dashboards are
-  examples, not components. No emitted-metrics pipeline — that would mirror
-  ledger facts and drift (labels reflect, the ledger locks). Emitted OTel
+  examples, not components, and are exactly that — `examples/dashboards/` (B4),
+  a portable `.sql` file plus one importable dashboard that embeds it, read by a
+  role holding nothing but SELECT on the views. No emitted-metrics pipeline —
+  that would mirror ledger facts and drift (labels reflect, the ledger locks). Emitted OTel
   metrics stay reserved for process-local facts (tick latency, queue depth)
   when a real operational question demands them.
 - **The alert signal** — the violations feed itself (append-only table + its
   `events` outbox row) plus the documented condition: any new violations row
   is a page. Adopters wire it into their own alerting; the platform emits,
-  never routes.
+  never routes. Written down in three forms at B4 (`OBSERVABILITY.md`, "The alert
+  condition") because they are not equivalent: the pull query a least-privileged
+  dashboard role can run pages at group grain, and only the outbox — or the rows
+  themselves — is exact per violation.
 
-> **Testing rig** (dev-only, never shipped, swappable by a compose edit): OTel
-> collector + VictoriaLogs for logs + Phoenix for LLM-native trace views;
-> `lnav` over the logfmt files as the no-server default for laptop work.
+> **Testing rig** — built at B4: `docker/compose.telemetry.yaml`, dev-only, never
+> shipped, swappable in that file plus `docker/telemetry/collector.yaml`. OTel
+> collector in front (logs need a second destination and Phoenix takes traces only),
+> VictoriaLogs for logs, Phoenix for traces, Grafana for the views; `lnav` over the
+> logfmt files as the no-server default for laptop work. One correction from building
+> it: Phoenix shows the **tree**, not LLM-native views — the CLI's spans carry no
+> OpenInference attributes and arrive with `span_kind` unset, so its prompt/completion
+> panels stay empty. The deep record is the archived session either way (§9, "spans
+> stay thin").
 
 ## 13. Containment at org scale
 
