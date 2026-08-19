@@ -368,6 +368,14 @@ can't read or skew its own scorecard).
 - **Violations ledger** — every tripwire firing and every wall block, logged. This
   is the experiment's primary dataset.
 
+Each family is one SELECT: `reporting.reliability`, `reporting.containment`,
+`reporting.capability` over `reporting.task_facts` (B3, migration `0010`). The
+denominators, and the four metrics above that the ledger has no source for — review
+verdicts, human-review pass-rate, post-merge defects, difficulty — are written down
+in STORES.md, "Reporting". Breach rate is the one that is measured rather than
+queried: it is what the walls did *not* catch, so no row holds it and G6's M4 suite
+is what produces the number.
+
 ### Tracing
 
 **OpenTelemetry end-to-end**, in the code from the first line (the backend can come

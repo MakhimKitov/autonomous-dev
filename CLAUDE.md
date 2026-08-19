@@ -105,9 +105,21 @@ the next one.
 
 Atlas is a development instrument, never a runtime dependency: it diffs and it
 lints, `control-plane migrate` applies. It cannot see triggers, grants, seeded
-rows, or whether a constraint is still `NOT VALID` — so it will call a database
-with a forgotten `VALIDATE CONSTRAINT` synced. Walls of that kind are tested by
-provoking them, not by diffing (`ARCHITECTURE.md` §12).
+rows, views, or whether a constraint is still `NOT VALID` — so it will call a
+database with a forgotten `VALIDATE CONSTRAINT` synced, and it *refuses outright* a
+`schema.sql` containing a `CREATE VIEW` ("views are available to logged-in users
+only"), which is why B3's reporting views live in their migration with
+`tests/test_reporting_views.py` behind them. Walls and definitions of that kind are
+tested by provoking them, not by diffing (`ARCHITECTURE.md` §12).
+
+**A column lands in three places, sometimes four.** The numbered migration, then
+`schema.sql` (the declared state Atlas diffs), then the SQLite `_SCHEMA` in
+`store.py` — and if a file created before the column has to survive it,
+`_ADDITIVE_COLUMNS` beside it, with a test that opens a pre-column file. The first
+three are self-enforcing: both `record_burst` and `upsert_task` build their column
+lists from the dataclass, so a field with no SQLite column fails the first insert
+and CI's `test` job (which runs single-node) goes red. The fourth is not — CI only
+ever creates fresh files, so it is the one to remember.
 
 ### Task identity
 
