@@ -129,6 +129,35 @@ and `llm_request.context = standalone`. That is the CLI's quick side-call, outsi
 interaction tree and in a trace of its own (B2) — attributable only by its `burst.id`,
 which is why `OTEL_RESOURCE_ATTRIBUTES` stamps every signal.
 
+### What a burst looks like in VictoriaLogs
+
+The content lives here, not in the spans. Eight event types, measured on a 3-tool
+burst — a work burst on a real issue is the same shapes, tens of times over:
+
+| Event | Per | Carries |
+|---|---|---|
+| `user_prompt` | burst | the **full prompt text** — for a scheduled burst, what the platform composed and actually said |
+| `tool_decision` | tool call | `decision`, `source`, `tool_name`, **`tool_parameters`** (the arguments), `tool_use_id` |
+| `tool_result` | tool call | `success`, `duration_ms`, `tool_input`, and *sizes* rather than bodies (`tool_result_size_bytes`) |
+| `hook_execution_start` / `_complete` | tool call | `hook_event=PreToolUse`, `hook_name`, `num_hooks`, `num_blocking`, `total_duration_ms` — the **wall's own execution** |
+| `api_request` | model call | **`cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens`**, `duration_ms`, `model`, `effort`, `speed` |
+| `assistant_response` | turn | the full response text |
+| `plugin_loaded` | burst | the toolkit plugin the image installs |
+
+Three consequences worth carrying around:
+
+- **The per-request cost and token breakdown is here**, in `api_request` — so what
+  Phoenix declines to count is an accounting gap in one viewer, not missing data. The
+  ledger's burst row remains the authority for the total.
+- **`num_blocking` on the hook events is the wall reporting itself**, once per tool
+  call: `0` means it let the call through. The deny path should read `1` with
+  `decision=deny`, which is stated rather than measured — the burst that was supposed
+  to trip a wall declined to call the tool at all.
+- **Tool arguments include the `git` and `gh` commands**, so a PR's title and body
+  text arrive here as tool parameters. That is the intended dataset (§9 — tool
+  visibility *is* the experiment) and it is also the concrete answer to what a burst
+  puts in front of an adopter's collector.
+
 **A collector in front of both, on purpose.** `ARCHITECTURE.md` §9 originally paired
 Phoenix's own OTLP listener directly with the emitters. The rig puts a collector
 there instead for three reasons that outlived the shortcut: logs need a second
