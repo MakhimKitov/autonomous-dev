@@ -379,7 +379,9 @@ conventions** where applicable (still experimental) and Claude Code's built-in
   and multi-day open traces break tooling — so each burst is its own trace. Every
   span/event carries `task.id` (= issue), `burst.id`, `role` (dev|tester), and each
   burst links to its predecessor via span links. The burst ledger (Control DB) stores
-  each burst's `trace_id`; task-level assembly is a query.
+  each burst's `trace_id` **and the id of the burst span in it** — a link names a
+  span, not a trace, so one half of the pair would only buy a link that resolves to
+  nothing. Task-level assembly is a query.
 - **Context propagation is built in:** the control plane opens the burst span and
   injects `TRACEPARENT` into the container env; Claude Code in SDK/non-interactive
   mode adopts it, nesting its span tree (`claude_code.interaction` →

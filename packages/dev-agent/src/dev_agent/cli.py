@@ -57,14 +57,22 @@ def main(argv: list[str] | None = None) -> int:
         log.error("environment contract unsatisfied", error=str(exc))
         return 2
 
+    # Correlation in-band, for the whole process (TO-BE §12). This side of the
+    # boundary has no ledger and no trace backend — what it has is a stdout that
+    # gets teed to `data/logs/<burst_id>.log`, and that file is often all a reader
+    # has. The ids come from the environment because the control plane put them
+    # there; nothing here invents one.
+    bindings = {"task_id": env.task_id, "burst_id": env.burst_id}
+    if env.trace_id:
+        bindings["trace_id"] = env.trace_id
+    structlog.contextvars.bind_contextvars(**bindings)
+
     if args.command == "check":
         return _check(env)
 
     result = run_burst_sync(env)
     log.info(
-        "burst done",
-        task=result.task_id,
-        burst=result.burst_id,
+        "burst done",  # task and burst ids come from the bound context, not from here
         session=result.session_id,
         turns=result.num_turns,
         cost_usd=result.total_cost_usd,

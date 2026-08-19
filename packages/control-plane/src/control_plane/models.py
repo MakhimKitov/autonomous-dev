@@ -108,6 +108,10 @@ class BurstRecord:
     role: str = Role.DEV
     status: str = BurstStatus.RUNNING
     trace_id: str = ""
+    # The burst span's own id. Both halves are here because a successor's span link
+    # names a span, not a trace — see `telemetry.link_to_burst`. Empty when tracing
+    # produced no span, which is a state and not a failure.
+    span_id: str = ""
     resumed_from_burst_id: str | None = None  # the parent node — recorded at spawn
     started_at: str = field(default_factory=utc_now)
     finished_at: str | None = None

@@ -174,7 +174,12 @@ def test_a_tie_in_created_at_is_broken_the_same_way(ledger):
 
 def test_burst_roundtrip_and_finalize(ledger):
     ledger.upsert_task(_task())
-    burst = _burst(trace_id="0" * 32, model="claude-sonnet-5", started_at="2026-08-14T09:00:00+00:00")
+    burst = _burst(
+        trace_id="0" * 32,
+        span_id="0" * 16,
+        model="claude-sonnet-5",
+        started_at="2026-08-14T09:00:00+00:00",
+    )
     ledger.record_burst(burst)
 
     assert ledger.get_burst("b1").status == BurstStatus.RUNNING
@@ -294,6 +299,23 @@ def test_lineage_is_recorded_at_spawn(ledger):
 
     assert ledger.get_burst("b1").resumed_from_burst_id is None
     assert ledger.get_burst("b2").resumed_from_burst_id == "b1"
+
+
+def test_the_trace_pair_goes_in_at_spawn_and_is_empty_when_there_was_none(ledger):
+    """Both halves, and both as strings. A successor's span link names a *span*, so
+    `trace_id` alone would only buy a link with a zero span id — which resolves to
+    nothing in a viewer (B1). The absent case is `""` rather than NULL on purpose:
+    `telemetry.link_to_burst` decides by truthiness, and a caller that has to handle
+    both an empty string and a None is a caller that will handle one of them."""
+    ledger.upsert_task(_task())
+    ledger.upsert_task(_task(43))  # a second task: one running burst per task
+    ledger.record_burst(_burst("b1", trace_id="a" * 32, span_id="b" * 16))
+    ledger.record_burst(_burst("b2", issue_number=43))  # tracing produced no span
+
+    recorded = ledger.get_burst("b1")
+    assert (recorded.trace_id, recorded.span_id) == ("a" * 32, "b" * 16)
+    untraced = ledger.get_burst("b2")
+    assert (untraced.trace_id, untraced.span_id) == ("", "")
 
 
 def test_the_leaf_is_the_newest_burst_that_archived_something(ledger):

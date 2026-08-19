@@ -148,7 +148,10 @@ CREATE TABLE bursts (
     role                  text NOT NULL CONSTRAINT bursts_role_fk REFERENCES roles (role),
     status                text NOT NULL CONSTRAINT bursts_status_check CHECK (status IN
                             ('running', 'succeeded', 'failed', 'killed')),
+    -- the burst's trace and the id of the root span in it. Both, because a
+    -- successor's span link names a span and not a trace (B1).
     trace_id              text NOT NULL DEFAULT '',
+    span_id               text NOT NULL DEFAULT '',
     -- the session tree (A5): the parent node this burst resumed from, and the
     -- snapshot it left behind. Self-referencing, so lineage is a walk in SQL.
     resumed_from_burst_id text CONSTRAINT bursts_resumed_from_fk REFERENCES bursts (burst_id),

@@ -76,6 +76,25 @@ class BurstEnv:
     github_token: str | None = None
     git_user_name: str | None = None
     git_user_email: str | None = None
+    traceparent: str = ""
+
+    @property
+    def trace_id(self) -> str:
+        """The trace this burst belongs to, or "" — read out of the traceparent.
+
+        Parsed by hand rather than with an OTel API on purpose: what a log line
+        needs is the id, and the image should not have to carry a tracing SDK to
+        write a correlated line (B2 gives the agent its own exporter; this is not
+        that). The field is validated because it is a value the container is *told*
+        — a malformed one should cost the trace_id on a log line and nothing else.
+        """
+        parts = self.traceparent.split("-")
+        if len(parts) != 4 or parts[0] != "00" or len(parts[1]) != 32:
+            return ""
+        trace_id = parts[1].lower()
+        if not all(c in "0123456789abcdef" for c in trace_id) or trace_id == "0" * 32:
+            return ""
+        return trace_id
 
     @property
     def result_path(self) -> Path:
@@ -129,4 +148,5 @@ class BurstEnv:
             github_token=env.get(GITHUB_TOKEN) or None,
             git_user_name=env.get(GIT_USER_NAME) or None,
             git_user_email=env.get(GIT_USER_EMAIL) or None,
+            traceparent=env.get(TRACEPARENT, ""),
         )
