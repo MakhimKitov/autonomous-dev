@@ -126,7 +126,10 @@ CREATE TABLE tasks (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
--- tasks_by_status(): WHERE status IN (…) ORDER BY created_at
+-- tasks_by_status(): WHERE status IN (…) ORDER BY created_at, task_id. The index
+-- covers the filter and the leading sort key; the tie-break (A7 — an order that is
+-- the query's, not the plan's) is a sort over the few rows a status match returns,
+-- which is not worth a wider index.
 CREATE INDEX tasks_status_created ON tasks (status, created_at);
 
 -- WALL: one task per issue. The derived task_id already makes a duplicate hard to
@@ -174,7 +177,8 @@ CREATE INDEX bursts_session_leaf ON bursts (task_id, started_at) WHERE session_k
 -- WALL: sessions are single-writer — at most one running burst per task, as a
 -- constraint, not a scheduler promise. Any claiming bug becomes a constraint
 -- violation, never a doubled burst. Serves running_bursts() too, which is why
--- that query has no index of its own.
+-- that query has no index of its own — it sorts its handful of rows by
+-- (started_at, burst_id) so both backends answer in the same order (A7).
 CREATE UNIQUE INDEX bursts_one_running_per_task ON bursts (task_id)
     WHERE status = 'running';
 

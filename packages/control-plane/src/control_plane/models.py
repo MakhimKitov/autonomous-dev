@@ -46,6 +46,21 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def utc_iso(value: str) -> str:
+    """An ISO timestamp respelled in UTC — the spelling every stored stamp has.
+
+    Every timestamp the ledger holds was written by `utc_now`, so it carries the
+    `+00:00` offset. A caller's timestamp need not: `2026-08-17T12:00:00+06:00` is
+    an earlier instant than `2026-08-17T09:00:00+00:00` but a later string. The
+    Postgres backend compares instants and doesn't care; the SQLite one compares
+    text, so anything it compares goes through here first (gate A7 measured the
+    difference: `bursts_started_since` answered 0 where Postgres answered 2).
+    """
+    parsed = datetime.fromisoformat(value)
+    aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).isoformat()
+
+
 def task_id_for(repository: str, issue_number: int) -> str:
     """A task's id, derived and never invented: ``{owner}/{repo}#{issue_number}``.
 

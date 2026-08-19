@@ -10,10 +10,11 @@ Postgres is skipped unless `LEDGER_DSN` is set. When it is, the suite gets one
 throwaway migrated database for the session and truncates between tests, so it
 never touches the rig's own ledger.
 
-Note on the vocabulary: timestamps are UTC ISO-8601 strings, because `utc_now()`
-is the only thing that produces them. A non-UTC offset string is outside the
-contract — Postgres would normalize it to UTC on the way back out and SQLite
-would return it verbatim, which is a divergence no caller can currently provoke.
+Note on the vocabulary: *stored* timestamps are UTC ISO-8601 strings, because
+`utc_now()` is the only thing that produces them. Storing a non-UTC offset is
+outside the contract — Postgres would normalize it on the way back out and SQLite
+would return it verbatim. *Querying* with one is inside the contract, and A7 found
+out why it has to be: the comparison, not the spelling, is what a caller sees.
 """
 
 import os
@@ -151,6 +152,23 @@ def test_tasks_by_status_filters_and_orders_by_created_at(ledger):
     assert ledger.tasks_by_status(TaskStatus.BLOCKED) == []
 
 
+def test_a_tie_in_created_at_is_broken_the_same_way(ledger):
+    """Two tasks stamped in the same microsecond still come back in one order.
+
+    `ORDER BY created_at` alone leaves the tie to the storage — index order under
+    one plan, heap order under another — so the scheduler's "oldest first" would
+    depend on the backend. Inserted here in descending id order, so returning them
+    in insertion order fails. (A7: neither backend actually reordered these, which
+    is exactly why the promise has to be in the query rather than observed once.)
+    """
+    same_instant = "2026-01-01T00:00:00+00:00"
+    for issue in (3, 2, 1):
+        ledger.upsert_task(_task(issue, status=TaskStatus.CLAIMED, created_at=same_instant))
+
+    picked = ledger.tasks_by_status(TaskStatus.CLAIMED)
+    assert [t.task_id for t in picked] == [tid(1), tid(2), tid(3)]
+
+
 # --- bursts ---
 
 
@@ -218,6 +236,16 @@ def test_running_bursts_sees_only_the_unfinished(ledger):
     assert [b.burst_id for b in ledger.running_bursts()] == ["b2"]
 
 
+def test_running_bursts_come_back_oldest_first(ledger):
+    """Started second, inserted first — so insertion order is the wrong answer."""
+    ledger.upsert_task(_task(42))
+    ledger.upsert_task(_task(43))
+    ledger.record_burst(_burst("later", issue_number=42, started_at="2026-08-14T09:00:02+00:00"))
+    ledger.record_burst(_burst("earlier", issue_number=43, started_at="2026-08-14T09:00:01+00:00"))
+
+    assert [b.burst_id for b in ledger.running_bursts()] == ["earlier", "later"]
+
+
 def test_bursts_started_since_counts_the_window(ledger):
     ledger.upsert_task(_task(42))
     ledger.upsert_task(_task(43))
@@ -227,6 +255,25 @@ def test_bursts_started_since_counts_the_window(ledger):
     assert ledger.bursts_started_since("2026-08-14T00:00:00+00:00") == 1
     assert ledger.bursts_started_since("2026-08-01T00:00:00+00:00") == 2
     assert ledger.bursts_started_since("2026-09-01T00:00:00+00:00") == 0
+
+
+def test_the_window_starts_at_an_instant_not_at_a_clock_reading(ledger):
+    """The same instant, spelled with three offsets, must count the same bursts.
+
+    A7 measured what this guards: SQLite compares the text, so `+06:00` made the
+    daily rail count 0 bursts where Postgres counted 2 — and `-08:00` made it count
+    2 where Postgres counted 0. Both wrong in both directions, from one caller
+    passing a stamp it had every right to pass.
+    """
+    ledger.upsert_task(_task(42))
+    ledger.record_burst(_burst("b1", issue_number=42, started_at="2026-08-14T09:00:00+00:00"))
+
+    # 08:00Z, spelled three ways — the burst is after all three
+    for before in ("2026-08-14T08:00:00+00:00", "2026-08-14T14:00:00+06:00", "2026-08-14T00:00:00-08:00"):
+        assert ledger.bursts_started_since(before) == 1, before
+    # 10:00Z, spelled three ways — the burst is before all three
+    for after in ("2026-08-14T10:00:00+00:00", "2026-08-14T16:00:00+06:00", "2026-08-14T02:00:00-08:00"):
+        assert ledger.bursts_started_since(after) == 0, after
 
 
 # --- the session tree ---
