@@ -5,10 +5,11 @@
 # their spans is decided here, in a dev-only file, and changing it changes no
 # platform code and no environment variable.
 #
-# Core distribution only (`otel/opentelemetry-collector`, not -contrib): an OTLP
-# receiver, a batcher and two OTLP/HTTP exporters is the whole rig. If a processor
-# you want is missing, that is the contrib image's job — and worth a second look
-# first, because a processor here rewrites signals the platform will be judged on.
+# An OTLP receiver, two OTLP/HTTP exporters and one rename is the whole rig. The
+# rename is the only reason this needs the **contrib** image rather than core: the
+# `transform` processor lives there. Worth knowing before adding a second one — a
+# processor here rewrites signals the platform will be judged on, and the rule that
+# keeps that honest is below: translate names, never invent numbers.
 
 receivers:
   otlp:
@@ -23,6 +24,41 @@ processors:
     # A rig is watched by a human waiting for a burst to show up, so latency beats
     # throughput: the emitters already export every second (B2).
     timeout: 1s
+
+  transform/token_usage:
+    # The CLI reports usage under its own names, so every viewer's token and cost
+    # accounting reads zero while the numbers sit in the attributes. Renaming them to
+    # the OTel GenAI convention belongs *here* and not in the platform: the emitted
+    # signal stays what the CLI produces, and the translation lives in the dev-only
+    # file that already decides where signals go.
+    #
+    # Additive on purpose — the original attributes stay, because `input_tokens` is
+    # what the CLI documents and a query written against it should keep working.
+    # `error_mode: ignore` because a span missing one of these is normal (a tool span
+    # has no tokens at all), and one skipped statement must not drop the batch.
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        conditions:
+          - attributes["span.type"] == "llm_request"
+        statements:
+          - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["output_tokens"] != nil
+          # Prompt tokens are summed from three counters the CLI keeps apart, because
+          # `input_tokens` alone is the *uncached* remainder — 2, on a request that
+          # actually sent 29k. A viewer showing 2 would be worse than showing zero.
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"]) where attributes["input_tokens"] != nil
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["gen_ai.usage.input_tokens"] + attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["gen_ai.usage.input_tokens"] + attributes["cache_creation_tokens"]) where attributes["cache_creation_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_read_input_tokens"], attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_creation_input_tokens"], attributes["cache_creation_tokens"]) where attributes["cache_creation_tokens"] != nil
+          # The cache split, in OpenInference's names — the one place this file speaks a
+          # viewer's dialect instead of the standard, and it is load-bearing. Phoenix
+          # derives its own token counts from the `gen_ai.usage.*` above, but reads the
+          # *breakdown* only from these, and without it every cached token is priced as
+          # fresh input: measured at 5.6x the burst row's cost on a warm session
+          # (2026-08-19). An overstated number in a viewer is worse than no number.
+          - set(attributes["llm.token_count.prompt_details.cache_read"], attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil
+          - set(attributes["llm.token_count.prompt_details.cache_write"], attributes["cache_creation_tokens"]) where attributes["cache_creation_tokens"] != nil
 
 exporters:
   otlphttp/phoenix:
@@ -61,7 +97,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
+      processors: [transform/token_usage, batch]
       exporters: [otlphttp/phoenix, debug]
     logs:
       receivers: [otlp]

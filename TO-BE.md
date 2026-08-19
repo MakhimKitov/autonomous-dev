@@ -571,12 +571,15 @@ capabilities:
 > shipped, swappable in that file plus `docker/telemetry/collector.yaml`. OTel
 > collector in front (logs need a second destination and Phoenix takes traces only),
 > VictoriaLogs for logs, Phoenix for traces, Grafana for the views; `lnav` over the
-> logfmt files as the no-server default for laptop work. One measured caveat: Phoenix
-> reads the CLI's `gen_ai.*` attributes and does type the spans (`LLM`, `TOOL`), but
-> its **token and cost accounting stays at zero** — usage arrives as `input_tokens` /
-> `output_tokens`, not `gen_ai.usage.*` — and it has no span-links field, so B1's
-> lineage link is dropped and `burst.resumed_from` is what a viewer reads. Cost comes
-> from the burst row, which is the authoritative copy either way.
+> logfmt files as the no-server default for laptop work. Two measured caveats. The
+> CLI reports usage under its own attribute names, so a viewer's accounting reads zero
+> until something renames them — the rig's collector does, in the OTel GenAI
+> convention, which is the shape of every viewer fix that belongs in a rig rather than
+> in the platform: **translate names, never invent numbers.** Tokens then reconcile
+> with the burst row exactly; Phoenix's *cost* does not, because it prices tokens off
+> its own table (0.64× measured), and the ledger stays the authority for money. And
+> Phoenix has no span-links field, so B1's lineage link is dropped and
+> `burst.resumed_from` is what a viewer reads.
 
 ## 13. Containment at org scale
 

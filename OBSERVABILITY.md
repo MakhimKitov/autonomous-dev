@@ -190,7 +190,16 @@ In order, cheapest first:
    host`, which points at the network and means the process.
 4. Only then the endpoint variables, and the `host.docker.internal` trap above.
 
-Two things measured on the rig that are worth knowing before they cost you an hour:
+Three things measured on the rig that are worth knowing before they cost you an hour:
+
+- **A config the collector never read looks like a working rig.** Each distribution
+  defaults to its own path — `/etc/otelcol/config.yaml` for core,
+  `/etc/otelcol-contrib/…` for contrib — and mounting to the wrong one is not an
+  error: the collector boots its **built-in default**, accepts every push, and drops
+  it. Everything reports healthy and nothing arrives anywhere. The tell is in the
+  `debug` output: internal counters like `otelcol_receiver_failed_metric_points`
+  mean you are watching the default config, because ours has no metrics pipeline.
+  `docker/compose.telemetry.yaml` passes `--config` explicitly so this cannot recur.
 
 - **Do not make a correlation id a VictoriaLogs stream field.** The CLI sends
   `task.id` / `burst.id` / `burst.role` / `burst.kind` on the resource *and* on every
@@ -199,15 +208,16 @@ Two things measured on the rig that are worth knowing before they cost you an ho
   symptom is the DNS error above, two containers from the cause. The rig streams on
   `service.name` alone; every other attribute is still an ordinary searchable field,
   which is all correlation needs (`docker/telemetry/collector.yaml`).
-- **Phoenix types the spans but cannot count them.** It reads the CLI's `gen_ai.*`
-  attributes and classifies `claude_code.llm_request` as `LLM`, `claude_code.tool`
-  and `.tool.execution` as `TOOL` — so the LLM-flavored views do engage. What stays
-  at zero is its **token and cost accounting**: the CLI reports usage as
-  `input_tokens` / `output_tokens` / `cache_read_tokens`, not `gen_ai.usage.*`, so
-  Phoenix's totals read 0 and its cost is null while the numbers sit right there in
-  the attributes. Read cost from the burst row, which is the authoritative copy
-  anyway (§9). Content panes are empty by *our* choice — bodies off, the transcript
-  is the deep record.
+- **Tokens are exact, cost is an estimate.** The CLI reports usage under its own
+  names (`input_tokens`, `cache_read_tokens`), so out of the box every viewer's
+  accounting reads zero next to attributes full of numbers. The rig's collector
+  renames them to the OTel GenAI convention, and Phoenix's own translation takes it
+  from there — token counts then reconcile with the burst row exactly. Its **cost
+  does not**: Phoenix multiplies tokens by its own price table rather than reading
+  the CLI's figure, which measured **0.64×** the burst row on a warm session. The
+  ledger stays the authority for money (§9); Phoenix's number is for *shape* — which
+  request was the expensive one. Content panes are empty by our own choice: bodies
+  off, the transcript is the deep record.
 
 ## The alert condition
 

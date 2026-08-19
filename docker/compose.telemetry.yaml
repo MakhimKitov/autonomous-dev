@@ -37,7 +37,14 @@ name: autonomous-dev-telemetry
 
 services:
   otel-collector:
-    image: otel/opentelemetry-collector:0.159.0
+    image: otel/opentelemetry-collector-contrib:0.159.0
+    # `--config` explicitly, because each distribution defaults to its own path
+    # (`/etc/otelcol/…` for core, `/etc/otelcol-contrib/…` for contrib) and a config
+    # mounted at the *other* one is not an error: the collector boots its built-in
+    # default, accepts every push, and drops it. The rig reports healthy while
+    # nothing arrives anywhere. Naming the path makes the image swappable and the
+    # failure impossible.
+    command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./telemetry/collector.yaml:/etc/otelcol/config.yaml:ro
     ports:

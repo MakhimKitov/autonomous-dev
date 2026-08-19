@@ -206,10 +206,14 @@ The rig that receives all this is `docker/compose.telemetry.yaml` (B4) — colle
 VictoriaLogs, Phoenix, Grafana, no volumes, four commands to boot. **`OBSERVABILITY.md`
 is the read**: the correlation join, the three UIs, what to check when nothing
 arrives, the alert condition in the three forms an adopter can consume, and the
-reference dashboards in `examples/dashboards/`. Two traps it records because they cost
-real time — a correlation id used as a VictoriaLogs stream field kills the process,
-and the rig's Grafana connects as a role that can read the views and nothing else, so
-a panel reaching for a base table fails rather than widening the boundary.
+reference dashboards in `examples/dashboards/`. The traps it records because they cost
+real time: a correlation id used as a VictoriaLogs stream field kills the process, a
+collector config mounted at the other distribution's path is silently ignored while
+everything reports healthy, and Phoenix's cost is its own estimate (~0.64× measured)
+because it prices tokens rather than reading the CLI's figure — the burst row stays
+the authority. The rig's Grafana connects as a role that can read the views and
+nothing else, so a panel reaching for a base table fails rather than widening the
+boundary.
 
 ## Test
 
