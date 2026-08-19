@@ -23,8 +23,10 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from typing import Iterator
+from urllib.parse import quote
 
 import structlog
+from dev_agent import env as agentenv
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -34,6 +36,17 @@ from control_plane.models import BurstRecord
 
 SERVICE_NAME = "control-plane"
 _initialized = False
+
+# Where a *burst* pushes its telemetry — deliberately not the control plane's own
+# `OTEL_EXPORTER_OTLP_ENDPOINT`. The two processes are in different network
+# namespaces, so the same string rarely names the same collector: `localhost` inside
+# the box is the box. Unset means the burst gets no telemetry configuration at all,
+# which is the same presence-toggle shape as `LEDGER_DSN` and `ARCHIVE_URL`.
+AGENT_OTLP_ENDPOINT_ENV = "DEV_AGENT_OTLP_ENDPOINT"
+
+# The CLI's tracing is beta: "span names and attributes may change between
+# releases". This is the version the span nesting was verified against.
+VERIFIED_CLI_VERSION = "2.1.235"
 
 
 def init_telemetry() -> None:
@@ -89,6 +102,73 @@ def link_to_burst(parent: BurstRecord) -> trace.Link | None:
         context,
         {"burst.id": parent.burst_id, "burst.role": parent.role, "burst.link": "resumed_from"},
     )
+
+
+def _resource_attributes(pairs: dict[str, str]) -> str:
+    """W3C-Baggage-shaped `key=value,key=value`, values percent-encoded.
+
+    Comma, space and `=` are the separators, so a value containing one would split
+    the list — the CLI's docs say to encode them. `/` and `#` are left alone
+    deliberately: they are in every task id, they are not separators, and a
+    dashboard filter on `task.id` should read the id and not a mangling of it.
+    """
+    return ",".join(f"{key}={quote(value, safe='/#')}" for key, value in pairs.items())
+
+
+def agent_telemetry_env(task_id: str, burst_id: str, role: str, kind: str) -> dict[str, str]:
+    """Claude Code's own OTel, configured for one burst (B2, #20).
+
+    Empty unless `DEV_AGENT_OTLP_ENDPOINT` names a collector the *container* can
+    reach: no endpoint, no telemetry variables, and the box is exactly what it was.
+
+    Two signals, and the third one's absence is the interesting part:
+
+    * **traces** — the point of this. The CLI adopts the `TRACEPARENT` the runner
+      already injects, so `claude_code.interaction` and its children land inside the
+      burst span instead of in a trace of their own.
+    * **log events** — `tool_result`, `api_request`, `user_prompt`: tool visibility
+      *is* the experiment's dataset (ARCHITECTURE §9). The violations ledger is still
+      derived control-plane-side from the volume, never from these — an alerting
+      path that depends on an adopter's log pipeline isn't a wall.
+    * **metrics** — not enabled, and not an omission. TO-BE §12: the ledger *is* the
+      metrics store, and "no emitted-metrics pipeline — that would mirror ledger
+      facts and drift". The CLI's counters are cost and tokens, which `bursts` already
+      records as the authoritative copy; B3's reporting views are how they're read.
+      An adopter who wants them adds `OTEL_METRICS_EXPORTER` and owns the divergence.
+
+    Content: arguments yes, bodies no. `OTEL_LOG_TOOL_DETAILS` puts tool inputs —
+    paths, commands, patterns — on the events, which is the dataset. Tool *bodies*
+    (`OTEL_LOG_TOOL_CONTENT`) and raw API bodies stay off: §9 says spans stay thin
+    because the session transcript in the archive is the deep record, and raw bodies
+    carry the whole conversation into a second store with its own retention.
+
+    Nothing here may be `console`: the SDK uses the CLI's stdout as its message
+    channel, so a console exporter corrupts the burst rather than exporting it.
+    """
+    endpoint = os.environ.get(AGENT_OTLP_ENDPOINT_ENV, "").strip()
+    if not endpoint:
+        return {}
+    return {
+        agentenv.CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+        agentenv.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",  # traces are beta-gated
+        agentenv.OTEL_TRACES_EXPORTER: "otlp",
+        agentenv.OTEL_LOGS_EXPORTER: "otlp",
+        agentenv.OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
+        agentenv.OTEL_EXPORTER_OTLP_ENDPOINT: endpoint,
+        # A burst is short and can be killed mid-run by the budget rail, which loses
+        # whatever is still in the batch buffer. The CLI's own advice for short-lived
+        # calls is to shorten the intervals; the default 5s would lose most bursts.
+        agentenv.OTEL_TRACES_EXPORT_INTERVAL: "1000",
+        agentenv.OTEL_LOGS_EXPORT_INTERVAL: "1000",
+        agentenv.OTEL_SERVICE_NAME: agentenv.AGENT_SERVICE_NAME,
+        # The same four attributes the burst span carries, so a query written against
+        # one signal works on the other.
+        agentenv.OTEL_RESOURCE_ATTRIBUTES: _resource_attributes(
+            {"task.id": task_id, "burst.id": burst_id, "burst.role": role, "burst.kind": kind}
+        ),
+        agentenv.OTEL_LOG_USER_PROMPTS: "1",
+        agentenv.OTEL_LOG_TOOL_DETAILS: "1",
+    }
 
 
 @contextmanager

@@ -15,6 +15,8 @@ from pathlib import Path
 
 from dev_agent import env as agentenv
 
+from control_plane.telemetry import agent_telemetry_env
+
 DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
 
 # Docker's default seccomp profile blocks unprivileged user namespaces, which
@@ -104,6 +106,11 @@ class DockerRunner:
                 env[agentenv.CLAUDE_CODE_OAUTH_TOKEN] = oauth
             elif api_key:
                 env[agentenv.ANTHROPIC_API_KEY] = api_key
+            # The agent's own OTel (B2) — empty unless a collector is configured, and
+            # never on a `check`, which is the no-network boot smoke.
+            env.update(
+                agent_telemetry_env(spec.task_id, spec.burst_id, spec.role, spec.kind)
+            )
         env.update(spec.extra_env)
 
         cmd = [

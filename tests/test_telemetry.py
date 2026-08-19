@@ -4,7 +4,13 @@ import re
 
 import structlog
 from control_plane.models import BurstRecord, Role
-from control_plane.telemetry import burst_span, init_telemetry, link_to_burst
+from control_plane.telemetry import (
+    AGENT_OTLP_ENDPOINT_ENV,
+    agent_telemetry_env,
+    burst_span,
+    init_telemetry,
+    link_to_burst,
+)
 
 TRACEPARENT_RE = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
@@ -92,6 +98,34 @@ def test_the_predecessors_role_travels_with_the_link():
     link, and answering it from the link saves fetching the other trace."""
     link = link_to_burst(_parent(role=Role.TESTER))
     assert link.attributes["burst.role"] == "tester"
+
+
+# --- the agent's own telemetry (B2) ---
+
+
+def test_a_task_id_stays_readable_in_the_resource_attributes(monkeypatch):
+    """`/` and `#` are in every task id and separate nothing, so they are left as
+    they are — a dashboard filtering on task.id should show the id."""
+    monkeypatch.setenv(AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = agent_telemetry_env("MakhimKitov/discord-bot#1", "cd99ecaae580", "dev", "work")
+    assert env["OTEL_RESOURCE_ATTRIBUTES"].startswith("task.id=MakhimKitov/discord-bot#1,")
+
+
+def test_a_value_that_would_split_the_list_is_encoded(monkeypatch):
+    """Comma, space and `=` are the separators. An unencoded one wouldn't corrupt a
+    value, it would invent an attribute — so they go in percent-encoded."""
+    monkeypatch.setenv(AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = agent_telemetry_env("owner/repo#1", "b1", "dev", "a, b=c d")
+    attributes = dict(pair.split("=", 1) for pair in env["OTEL_RESOURCE_ATTRIBUTES"].split(","))
+    assert attributes["burst.kind"] == "a%2C%20b%3Dc%20d"
+    assert set(attributes) == {"task.id", "burst.id", "burst.role", "burst.kind"}
+
+
+def test_the_endpoint_is_the_toggle(monkeypatch):
+    monkeypatch.delenv(AGENT_OTLP_ENDPOINT_ENV, raising=False)
+    assert agent_telemetry_env("owner/repo#1", "b1", "dev", "work") == {}
+    monkeypatch.setenv(AGENT_OTLP_ENDPOINT_ENV, "   ")  # set-but-blank is unset
+    assert agent_telemetry_env("owner/repo#1", "b1", "dev", "work") == {}
 
 
 # --- log correlation (TO-BE §12) ---
