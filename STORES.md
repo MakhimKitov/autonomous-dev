@@ -328,6 +328,64 @@ uncontended CAS updates with the same semantics, append-only is code discipline,
 and A6 retires that ledger as an origin. The walls that guard concurrency are
 real exactly where concurrency is real.
 
+## Reporting — the metrics are queries, not a pipeline
+
+`TO-BE.md` §12: the ledger *is* the metrics store. The `ARCHITECTURE.md` §9 metric
+families ship as read-only views in a `reporting` schema (B3, migration `0010`), and
+anything with a Postgres driver renders them. Nothing emits a metric that mirrors a
+ledger fact — a second copy drifts, and the labels would be the copy.
+
+| View | Grain | Answers |
+|---|---|---|
+| `reporting.task_facts` | one task | burst counts by kind, non-clean finishes, cost, tokens, turns, violations, first/last burst. The base the other three aggregate |
+| `reporting.reliability` | repository | tasks by status · success / blocked / needs-review / rework rates · cost per task · bursts per task |
+| `reporting.containment` | repository × tool × reason | every wall hit, with the bursts and tasks it touched and when it was first and last seen |
+| `reporting.capability` | repository | merges · first-pass merges · review rounds and attempts per merge · review/test burst counts · turns |
+
+Three definitions worth knowing before reading a number:
+
+- **Success and blocked rates are over *settled* tasks** — `done + blocked`. A task
+  the scheduler is still working is not a failure yet, and putting it in the
+  denominator makes every rate move with queue depth. `needs_review_rate` is over
+  all tasks on purpose: "a human has the ball" is a fact about now.
+- **Wall hits and attempted violations are one number**, because every row in
+  `violations` is an attempt the deny hook refused. They separate the day a
+  tripwire becomes observe-only, and that is when the view grows a column.
+- **A successful breach has no row, so the view has no column.** It is by
+  definition what the walls did not catch; a `0` there would read as "none
+  happened" while meaning "none was recorded". Breach rate is *measured* — G6
+  (#47) runs the M4 suite against a real deployment — and #10's
+  acknowledged-defects channel is where a human classifies one after the fact.
+
+And what §9 asks for that the ledger cannot answer yet, named rather than faked:
+a review **verdict** (the ledger keeps `review_rounds` and the review cursor; the
+verdict is a GitHub review event), the human-review pass-rate (same reason),
+post-merge defect rate (needs a link from a later issue back to the merge that
+caused it), and task difficulty (`turns`, `cost_usd`, `attempts` are proxies, and
+inputs to a judgment rather than the judgment). `reporting.capability` reports
+first-pass merges instead and is named for what it counts.
+
+**A dashboard is not the runtime.** Views execute with their owner's privileges
+(`security_invoker` is off by default), so a read-only role sees every aggregate and
+no row of `tasks`, `bursts` or `violations`. Two statements, and how it
+authenticates is the operator's business:
+
+```sql
+GRANT USAGE ON SCHEMA reporting TO <dashboard_role>;
+GRANT SELECT ON ALL TABLES IN SCHEMA reporting TO <dashboard_role>;
+```
+
+`tests/test_reporting_views.py` provokes that boundary rather than assuming it, and
+it carries the rest of the verification too: the views are `schema.sql`'s newest
+blind spot, and the loudest one — Atlas's community version refuses a file
+containing `CREATE VIEW` outright ("views are available to logged-in users only"),
+so the drift check cannot see these definitions at all. Seeded rows in, known
+numbers out is what stands behind them.
+
+Reference dashboards are examples, not components, and land with the dev-only rig
+at B4 (#22). The single-node ledger has no reporting layer and is not getting one:
+a laptop reads its own numbers with a query.
+
 ## The events outbox
 
 Events are how the platform tells the adopter's systems what happened

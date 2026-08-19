@@ -20,7 +20,10 @@
 -- trigger, the append-only grants on violations/audit/events, the rest of
 -- `platform_app`'s grants, and the seeded pipeline role rows. A4 (#15) provokes
 -- each of them in `tests/test_schema_walls.py`, which is a better proof than a
--- schema comparison anyway. Do not read this file as the whole truth about the
+-- schema comparison anyway. Views are the fifth, and louder than the others: Atlas
+-- does not merely ignore a `CREATE VIEW`, it refuses the file that contains one
+-- ("views are available to logged-in users only"), so B3's reporting views live in
+-- their migration and are tested by querying them (see the end of this file). Do not read this file as the whole truth about the
 -- database — read it as the whole truth about its tables, columns, indexes and
 -- constraints.
 --
@@ -238,3 +241,23 @@ CREATE TABLE memory_entries (
     CONSTRAINT memory_entries_product_scope_check CHECK ((scope = 'product') = (repository IS NOT NULL)),
     CONSTRAINT memory_entries_role_scope_check CHECK ((scope = 'role') = (role IS NOT NULL))
 );
+
+
+-- ============================================================ reporting (B3)
+--
+-- The schema is declared here; its four views are not, and cannot be. Atlas's
+-- community version refuses them outright — `views are available to logged-in
+-- users only` — so a `CREATE VIEW` in this file breaks the drift check rather
+-- than feeding it. They join the blind spots above: stated in
+-- `migrations/0010_reporting-views.sql`, which is where their definitions and the
+-- reasoning behind each metric live, and verified by behavior in
+-- `tests/test_reporting_views.py` — seeded rows in, known numbers out, which is a
+-- better proof of a metric than a comparison of its text anyway.
+--
+-- The schema itself has to be here: Atlas does read schemas and their comments, so
+-- without these two statements a migrated database looks like drift and CI's check
+-- proposes `DROP SCHEMA reporting CASCADE`.
+CREATE SCHEMA reporting;
+
+COMMENT ON SCHEMA reporting IS
+    'Read-only views over the ledger: the ARCHITECTURE §9 metric families (B3).';
