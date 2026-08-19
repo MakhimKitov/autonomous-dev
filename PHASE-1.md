@@ -12,7 +12,7 @@ the checkpoints below.
 | Stage | Issues | What ships | Org asks |
 |---|---|---|---|
 | **A — state block** | #52, #12–#18 | CI workflow · STORES.md · migrations · PostgresLedger · schema walls · session-tree archive · composite ids · backfill | — |
-| **B — observability** | #19–#22 | trace lineage · agent OTel · reporting views · testing rig | — |
+| **B — observability** | #19–#22, #67, #68 | trace lineage · agent OTel · reporting views · testing rig · the tester's transcript as evidence · citations that resolve | — |
 | **C — product registry** | #23–#26 | registry verbs · preflight (gate + lint) · row-sourced policy · registry-driven scheduler | second test repo (§15) |
 | **D — identity + roles** | #27–#31 | role prefixes · token downscoping · tester provenance · SecretResolver · roles as rows | Apps created + installed |
 | **E — deployment** | #32–#37 | leases + CAS · replica safety · STOP row · Runner protocol · webhook receiver · server | server + HTTPS route |
