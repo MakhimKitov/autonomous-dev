@@ -220,6 +220,7 @@ CREATE TABLE bursts (
     status                text NOT NULL CHECK (status IN
                             ('running', 'succeeded', 'failed', 'killed')),
     trace_id              text NOT NULL DEFAULT '',
+    span_id               text NOT NULL DEFAULT '',  -- the burst span in that trace; a link needs the pair (B1)
     resumed_from_burst_id text REFERENCES bursts (burst_id),
     subscription_id       text REFERENCES subscriptions (subscription_id),
     session_id            text,
@@ -421,7 +422,7 @@ What Stage A moves, and where:
 | `tasks.transcript_key/-_checksum` (one blob per task) | `bursts.session_key/-_checksum` (one snapshot per burst) | A5 stopped writing them ✔, A6 carried the blobs over and dropped the columns ✔ |
 | task-keyed archive `put`/`get` | key-based, one object per burst, checksum passed in | A5 ✔ |
 | ISO-`TEXT` timestamps everywhere | `timestamptz` columns, strings at the edge | A3 ✔ |
-| `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb. The single-node ledger self-bootstraps a *fresh* file and no longer repairs an old one: A6 retires it as an origin, so it refuses a pre-A6 file and names `control-plane backfill` | A2, A6 ✔ |
+| `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb. The single-node ledger self-bootstraps a *fresh* file and no longer repairs an old one: A6 retires it as an origin, so it refuses a pre-A6 file and names `control-plane backfill`. What survived is `_ADDITIVE_COLUMNS`: a column with a default, added to a file whose ids are already current, is DDL and not guesswork — the SQLite half of a numbered migration, listed one line per migration | A2, A6 ✔ |
 | the experiment's history, single-node | `control-plane backfill --repository owner/name`: rows re-keyed, blobs re-keyed as their last dev burst's snapshot, manual-era rows dropped, source left read-only | A6 ✔ |
 | no claim verbs (single process) | lease + CAS statements in the `Ledger` protocol | A3 (the finalize CAS), E1 (`claimed_by`/`claimed_until` + the claim verbs), E2 (used in anger) |
 | STOP flag on the filesystem | `org_state` row | E3 |
@@ -443,9 +444,9 @@ where the buckets are declared:
   target's symbol, which turns "resumed from the burst before it" into a
   comparable value instead of an opaque hex string. `session_key` gets the same
   treatment, so the key scheme is compared and not merely its presence.
-- **excused** — what cannot repeat: `burst_id`, `trace_id`, `session_id`,
-  `session_checksum` (a fresh tarball has its own sha256), every timestamp.
-  Interned or shape-checked rather than compared.
+- **excused** — what cannot repeat: `burst_id`, `trace_id`, `span_id`,
+  `session_id`, `session_checksum` (a fresh tarball has its own sha256), every
+  timestamp. Interned or shape-checked rather than compared.
 - **variance** — `cost_usd`, `input_tokens`, `output_tokens`. Printed, never
   compared: a difference there is the model's, not the store's. `num_turns`,
   `exit_code` and `status` are deliberately strict.

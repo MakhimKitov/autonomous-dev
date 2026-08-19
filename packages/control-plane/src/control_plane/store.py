@@ -263,6 +263,7 @@ CREATE TABLE IF NOT EXISTS bursts (
     role TEXT NOT NULL,
     status TEXT NOT NULL,
     trace_id TEXT NOT NULL DEFAULT '',
+    span_id TEXT NOT NULL DEFAULT '',
     resumed_from_burst_id TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
@@ -298,6 +299,24 @@ class LedgerShapeError(RuntimeError):
     """This SQLite ledger predates the derived task id and cannot be read as-is."""
 
 
+# Columns added to a *current-shape* file after it was created. `CREATE TABLE IF NOT
+# EXISTS` does nothing to a table that already exists, so a file made before the
+# column would fail the next insert.
+#
+# This is not the ALTER list A6 deleted. That one existed to repair files whose task
+# ids could not be repaired at all — an id needs a repository slug the file doesn't
+# contain, so adding columns was guesswork dressed as migration, and refusing was
+# the honest answer. A column with a default and no history to reconstruct is a
+# different thing: `span_id` is empty for every burst that ran before B1, which is
+# exactly the truth about those bursts.
+#
+# The Postgres schema stays authoritative (STORES.md) — an entry here is the SQLite
+# half of a numbered migration, never a schema change of its own.
+_ADDITIVE_COLUMNS = (
+    ("bursts", "span_id", "TEXT NOT NULL DEFAULT ''"),  # 0009, B1 (#19)
+)
+
+
 class SqliteLedger:
     """The single-node ledger: stdlib SQLite, the same protocol Postgres answers.
 
@@ -309,7 +328,8 @@ class SqliteLedger:
     whose task ids predate `{owner}/{repo}#{n}`. Those cannot be repaired by adding
     a column — deriving an id needs a repository slug that is nowhere in the file —
     so the honest move is to refuse, name the one-shot that *can* do it, and delete
-    the guesswork.
+    the guesswork. `_ADDITIVE_COLUMNS` is the narrow case that survived: a column
+    with a default, on a file this class can still read.
     """
 
     def __init__(self, path: Path) -> None:
@@ -318,6 +338,7 @@ class SqliteLedger:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)  # a no-op on a file that already has them
         self._require_current_shape(path)
+        self._add_columns_a_current_file_may_lack()
         self._conn.commit()
 
     def _require_current_shape(self, path: Path) -> None:
@@ -333,6 +354,15 @@ class SqliteLedger:
             f"--data-dir {path.parent}`, which reads this file without writing to it, "
             "or point --data-dir at a fresh directory to start clean."
         )
+
+    def _add_columns_a_current_file_may_lack(self) -> None:
+        """Runs after the refusal above, so it only ever touches a file worth
+        keeping. One statement per missing column and nothing else — no version
+        table, because `PRAGMA table_info` already knows the answer."""
+        for table, column, definition in _ADDITIVE_COLUMNS:
+            existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def upsert_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()

@@ -138,8 +138,16 @@ def execute_burst(
     # never seen, and a burst is evidence about a task, so the task exists first.
     # The second upsert after the harvest is what records the burst's results.
     stores.ledger.upsert_task(task)
-    with burst_span(task.task_id, burst_id, role, kind, model=model) as (span, traceparent):
-        burst.trace_id = f"{span.get_span_context().trace_id:032x}"
+    with burst_span(task.task_id, burst_id, role, kind, model=model, parent=parent) as (
+        span,
+        traceparent,
+    ):
+        context = span.get_span_context()
+        # Both halves, because a successor's span link needs both (B1). The lookup
+        # TO-BE §12 describes turns out to cost nothing: the parent row is already
+        # in hand — it's what the volume was materialized from.
+        burst.trace_id = f"{context.trace_id:032x}"
+        burst.span_id = f"{context.span_id:016x}"
         stores.ledger.record_burst(burst)
         spec = BurstSpec(
             task_id=task.task_id,
@@ -184,16 +192,19 @@ def execute_burst(
             task.session_id = burst.session_id or task.session_id
         stores.ledger.upsert_task(task)
 
-    log.info(
-        "burst finished",
-        burst=burst_id,
-        exit=exit_code,
-        status=str(burst.status),
-        model=burst.model,
-        session=burst.session_id,
-        violations=outcome.violation_count,
-        resumed_from=burst.resumed_from_burst_id,
-        snapshot=outcome.session_key,
-        log=str(log_path),
-    )
+        # Inside the span on purpose: this is the line a reader starts from, and
+        # outside it the trace, burst and task ids are no longer bound (B1). The
+        # burst is already finalized in the ledger by here — the span is still open
+        # only because the log line is part of the burst, not part of what follows.
+        log.info(
+            "burst finished",
+            exit=exit_code,
+            status=str(burst.status),
+            model=burst.model,
+            session=burst.session_id,
+            violations=outcome.violation_count,
+            resumed_from=burst.resumed_from_burst_id,
+            snapshot=outcome.session_key,
+            log=str(log_path),
+        )
     return BurstOutcome(burst=burst, harvest=outcome, exit_code=exit_code, log_path=log_path)

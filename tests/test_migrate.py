@@ -204,6 +204,9 @@ def test_a_pre_a6_row_stops_the_migration_where_it_should(fresh_dsn):
     """
     available = discover()
     through_0007 = [m for m in available if m.version <= "0007"]
+    # everything the failure leaves pending — not just 0008, so that adding a
+    # migration after it doesn't make this test wrong about where the stop was
+    from_0008 = [m for m in available if m.version >= "0008"]
 
     # apply everything up to the rename, then put an MVP-era row in the way
     migrate(fresh_dsn, _slice(available, "0005"))
@@ -217,7 +220,7 @@ def test_a_pre_a6_row_stops_the_migration_where_it_should(fresh_dsn):
 
     applied, pending_now = status(fresh_dsn)
     assert applied == [m.version for m in through_0007]
-    assert [m.version for m in pending_now] == ["0008"]
+    assert [m.version for m in pending_now] == [m.version for m in from_0008]
 
     # the repair the header names, in miniature: give the row an identity
     with psycopg.connect(fresh_dsn, autocommit=True) as conn:
@@ -225,7 +228,7 @@ def test_a_pre_a6_row_stops_the_migration_where_it_should(fresh_dsn):
             "UPDATE tasks SET task_id = 'owner/product#7', repository = 'owner/product', "
             "issue_number = 7 WHERE task_id = '7'"
         )
-    assert [m.version for m in migrate(fresh_dsn)] == ["0008"]
+    assert [m.version for m in migrate(fresh_dsn)] == [m.version for m in from_0008]
 
 
 def _slice(available, last_version):

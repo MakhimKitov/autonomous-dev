@@ -52,6 +52,31 @@ def test_full_env_parses():
     assert env.violations_path == Path("/tmp/session") / agentenv.VIOLATIONS_FILENAME
 
 
+def test_the_trace_id_is_read_out_of_the_traceparent():
+    """What the container needs for a correlated log line is the trace id, and the
+    only place it exists in the box is the traceparent the control plane injected."""
+    traceparent = f"00-{'a' * 32}-{'b' * 16}-01"
+    assert BurstEnv.from_environ(MINIMAL | {agentenv.TRACEPARENT: traceparent}).trace_id == "a" * 32
+    assert BurstEnv.from_environ(MINIMAL).trace_id == ""  # tracing off — not an error
+
+
+def test_a_traceparent_that_is_not_one_costs_only_the_trace_id():
+    """It arrives as a string from outside, so it gets checked. A burst is not
+    something to fail over a log field: no id beats a wrong id, and the run goes on
+    either way."""
+    for bad in (
+        "",
+        "nonsense",
+        f"01-{'a' * 32}-{'b' * 16}-01",  # a version we don't know how to read
+        f"00-{'a' * 31}-{'b' * 16}-01",  # trace id one digit short
+        f"00-{'z' * 32}-{'b' * 16}-01",  # not hex
+        f"00-{'0' * 32}-{'b' * 16}-01",  # parses, and means "no trace"
+    ):
+        env = BurstEnv.from_environ(MINIMAL | {agentenv.TRACEPARENT: bad})
+        assert env.trace_id == "", bad
+        assert env.task_id == "42"  # and the burst still has everything it needs
+
+
 def test_bad_values_raise():
     with pytest.raises(EnvError, match="AGENT_ROLE"):
         BurstEnv.from_environ(MINIMAL | {agentenv.ROLE: "villain"})

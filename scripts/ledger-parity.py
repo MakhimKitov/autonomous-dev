@@ -61,6 +61,7 @@ INTERNED = {
     ("bursts", "burst_id"): "B",
     ("bursts", "resumed_from_burst_id"): "B",
     ("bursts", "trace_id"): "T",
+    ("bursts", "span_id"): "P",  # the burst span in it (B1) — per-run, like the trace
     ("bursts", "session_id"): "S",
     ("bursts", "session_checksum"): "C",
     ("tasks", "session_id"): "S",

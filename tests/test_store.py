@@ -21,6 +21,22 @@ MVP_TASKS = (
     "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
 )
 
+# A file in the shape A6 left behind: current task ids, no `span_id` yet.
+PRE_B1_SCHEMA = """
+CREATE TABLE tasks (task_id TEXT PRIMARY KEY, repository TEXT NOT NULL,
+    issue_number INTEGER NOT NULL, status TEXT NOT NULL, session_id TEXT,
+    pr_number INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+    review_rounds INTEGER NOT NULL DEFAULT 0, next_burst_kind TEXT,
+    last_review_id INTEGER, last_burst_at TEXT, created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL);
+CREATE TABLE bursts (burst_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, kind TEXT NOT NULL,
+    role TEXT NOT NULL, status TEXT NOT NULL, trace_id TEXT NOT NULL DEFAULT '',
+    resumed_from_burst_id TEXT, started_at TEXT NOT NULL, finished_at TEXT,
+    exit_code INTEGER, model TEXT, cost_usd REAL, input_tokens INTEGER,
+    output_tokens INTEGER, num_turns INTEGER, session_id TEXT, session_key TEXT,
+    session_checksum TEXT);
+"""
+
 
 def test_a_fresh_ledger_is_ready_on_open(tmp_path):
     """No runner, no migration: the file is created in the current shape."""
@@ -31,6 +47,31 @@ def test_a_fresh_ledger_is_ready_on_open(tmp_path):
     loaded = ledger.get_task("owner/product#7")
     assert (loaded.repository, loaded.issue_number) == ("owner/product", 7)
     assert ledger.get_burst("b1").session_key is None  # nothing archived yet
+
+
+def test_a_column_added_after_the_file_was_made_gets_added_to_it(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` does nothing to a table that exists, so a file
+    created before B1 has no `span_id` and the next insert would fail on it. The
+    additive list is for exactly this: a column with a default, on a file whose task
+    ids are already current — the case A6's refusal was never about."""
+    db = tmp_path / "ledger.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(PRE_B1_SCHEMA)
+    conn.execute(
+        "INSERT INTO bursts (burst_id, task_id, kind, role, status, trace_id, started_at) "
+        "VALUES ('b0', 'owner/product#7', 'work', 'dev', 'succeeded', 'ab', 'then')"
+    )
+    conn.commit()
+    conn.close()
+
+    ledger = SqliteLedger(db)
+    ledger.upsert_task(TaskRecord(task_id="owner/product#7", repository="owner/product", issue_number=7))
+    ledger.record_burst(BurstRecord(burst_id="b1", task_id="owner/product#7", span_id="c" * 16))
+
+    assert ledger.get_burst("b1").span_id == "c" * 16
+    # the burst that predates the column keeps its trace and reads back unspanned,
+    # which is what `telemetry.link_to_burst` refuses to make a link out of
+    assert (ledger.get_burst("b0").trace_id, ledger.get_burst("b0").span_id) == ("ab", "")
 
 
 def test_a_pre_a6_ledger_refuses_to_open_and_says_what_to_run(tmp_path):
