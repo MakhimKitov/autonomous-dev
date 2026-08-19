@@ -387,12 +387,27 @@ conventions** where applicable (still experimental) and Claude Code's built-in
   mode adopts it, nesting its span tree (`claude_code.interaction` →
   `llm_request` / `tool` / `hook`, subagents, even Bash subprocesses) under our burst
   span. No custom instrumentation inside the box.
-- **Agent-side telemetry is Claude Code's own OTel** (opt-in env in the image):
-  metrics, structured events (`tool_result`, `tool_decision`, `api_request`), and
-  traces. `OTEL_RESOURCE_ATTRIBUTES` stamps every signal with our correlation IDs.
-  Content flags (`OTEL_LOG_TOOL_DETAILS`, prompts) are **on** — tool visibility *is*
-  the experiment's dataset — and export goes only to our OTLP endpoint, never
-  elsewhere.
+- **Agent-side telemetry is Claude Code's own OTel** (B2): traces (beta, two
+  switches) and structured events (`tool_result`, `tool_decision`, `api_request`,
+  `user_prompt`), configured entirely by env the runner injects — no custom
+  instrumentation inside the box. `OTEL_RESOURCE_ATTRIBUTES` stamps every signal with
+  `task.id` / `burst.id` / `burst.role` / `burst.kind`, so a query written against one
+  signal works on the other. Content flags: tool **arguments** on
+  (`OTEL_LOG_TOOL_DETAILS`, prompts) — tool visibility *is* the experiment's dataset —
+  and tool/API **bodies** off, because spans stay thin (below) and the transcript is
+  the deep record. **Metrics are deliberately not exported**: TO-BE §12 makes the
+  ledger the metrics store, and the CLI's counters are cost and tokens, which the
+  burst row already holds as the authoritative copy.
+- **The endpoint is the one egress widening, and it's the adopter's** — a burst talks
+  to GitHub, the inference API, and now one collector, named by
+  `DEV_AGENT_OTLP_ENDPOINT` (the control plane's own `OTEL_EXPORTER_OTLP_ENDPOINT` is
+  a different variable because the two processes are in different network namespaces:
+  `localhost` inside the box is the box). Unset ⇒ no telemetry env enters the
+  container at all. Declaring that host per burst and enforcing it is G6/#47; until
+  then the note is the wall. Two consequences worth stating: the collector sees tool
+  arguments, which for a tester burst can include a command that names a credential;
+  and an *authenticated* endpoint waits for D4's SecretResolver, since
+  `OTEL_EXPORTER_OTLP_HEADERS` would carry a token as a value.
 - **One instrumentation point, two consumers.** `tool_decision` / hook events feed
   both the trace stream (debugging) and the **violations ledger** (the §9 dataset).
   Ledger derivation is control-plane-owned — tripwire-relevant events are also

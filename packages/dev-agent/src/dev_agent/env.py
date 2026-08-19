@@ -39,6 +39,32 @@ ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 GITHUB_TOKEN = "GITHUB_TOKEN"
 GH_TOKEN = "GH_TOKEN"
 
+# Claude Code's own telemetry (B2). Set by the control plane, read by the CLI the
+# SDK drives — this package reads none of them, and doesn't need to: the SDK passes
+# the process environment to the CLI, and the CLI's exporter is its own. Named here
+# so the two sides can't drift, like everything else in this module.
+#
+# Reference: code.claude.com/docs/en/monitoring-usage. Traces are beta and take two
+# switches, ENABLE_TELEMETRY plus ENHANCED_TELEMETRY_BETA; span names and attributes
+# may change between CLI releases, so `control_plane.telemetry` records the version
+# this was verified against.
+CLAUDE_CODE_ENABLE_TELEMETRY = "CLAUDE_CODE_ENABLE_TELEMETRY"
+CLAUDE_CODE_ENHANCED_TELEMETRY_BETA = "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"
+OTEL_TRACES_EXPORTER = "OTEL_TRACES_EXPORTER"
+OTEL_LOGS_EXPORTER = "OTEL_LOGS_EXPORTER"
+OTEL_METRICS_EXPORTER = "OTEL_METRICS_EXPORTER"
+OTEL_EXPORTER_OTLP_PROTOCOL = "OTEL_EXPORTER_OTLP_PROTOCOL"
+OTEL_EXPORTER_OTLP_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
+OTEL_TRACES_EXPORT_INTERVAL = "OTEL_TRACES_EXPORT_INTERVAL"
+OTEL_LOGS_EXPORT_INTERVAL = "OTEL_LOGS_EXPORT_INTERVAL"
+OTEL_SERVICE_NAME = "OTEL_SERVICE_NAME"
+OTEL_RESOURCE_ATTRIBUTES = "OTEL_RESOURCE_ATTRIBUTES"
+OTEL_LOG_USER_PROMPTS = "OTEL_LOG_USER_PROMPTS"
+OTEL_LOG_TOOL_DETAILS = "OTEL_LOG_TOOL_DETAILS"
+
+# What the box reports itself as, next to the control plane's own `control-plane`.
+AGENT_SERVICE_NAME = "dev-agent"
+
 ROLES = ("dev", "reviewer", "tester")
 BURST_KINDS = ("work", "review", "assess", "test")
 

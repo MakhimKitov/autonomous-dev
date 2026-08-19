@@ -166,6 +166,31 @@ what it can mean". They are by-hand instruments (a live rig, a real burst), so
 `tests/test_gate_instruments.py` is what keeps a rename from silently breaking
 them between gates.
 
+## Telemetry
+
+Two OTLP endpoints, because two processes in two network namespaces. Both are
+presence toggles; unset means spans exist only to mint correlation ids, and the
+container is told nothing about telemetry at all.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318          # the control plane's own
+export DEV_AGENT_OTLP_ENDPOINT=http://host.docker.internal:4318   # where a *burst* pushes
+```
+
+The second string is the one that gets it wrong: `localhost` inside the box is the
+box, and the CLI drops export failures silently — a burst with an unreachable
+collector looks exactly like one with none. Point both at the same collector by two
+different names, and if nothing arrives, `CLAUDE_CODE_OTEL_DIAG_STDERR=1` in the
+container env makes the CLI say why.
+
+What a burst emits is decided in `control_plane.telemetry.agent_telemetry_env`, with
+the reason for each choice next to it: traces and log events yes, metrics no (the
+ledger is the metrics store — TO-BE §12), tool arguments yes, tool and API bodies no.
+`CONTROL_PLANE_TRACE_CONSOLE=1` prints the control plane's own spans instead of
+pushing them; it is never passed into a container, where stdout is the SDK's message
+channel. The dev-only rig that receives all this — collector, logs, trace UI — is
+B4 (#22); until then any OTLP collector works.
+
 ## Test
 
 ```bash

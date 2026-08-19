@@ -533,14 +533,16 @@ log store, dashboard, or alerting component is part of the shipment — adopters
 plug the capabilities into whatever monitoring stack they already run. Four
 capabilities:
 
-- **Traces** — OTLP push to a configurable endpoint
-  (`OTEL_EXPORTER_OTLP_ENDPOINT`), as built: trace-per-burst,
-  `task.id`/`burst.id`/`role` attributes, `TRACEPARENT` into the Job so the
-  agent's native spans nest. Gaps to close in the build: span links to the
-  predecessor burst (one ledger lookup via `resumed_from_burst_id`), and the
-  agent's own OTel enabled in the image with `OTEL_RESOURCE_ATTRIBUTES`
-  stamping the correlation ids. The burst egress wall widens by exactly one
-  adopter-configured endpoint (§13).
+- **Traces** — OTLP push to a configurable endpoint, trace-per-burst with
+  `task.id`/`burst.id`/`role` attributes and `TRACEPARENT` into the Job so the
+  agent's native spans nest. Both gaps this section used to name are closed:
+  the burst span links to its predecessor (B1 — a link needs `trace_id` *and*
+  the span id, so the ledger records the pair), and the agent's own OTel is
+  configured per burst with `OTEL_RESOURCE_ATTRIBUTES` stamping the correlation
+  ids (B2). Two endpoints, because two network namespaces:
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is the control plane's own,
+  `DEV_AGENT_OTLP_ENDPOINT` is where a burst pushes. The burst egress wall
+  widens by exactly one adopter-configured endpoint (§13).
 - **Logs** — structured logfmt on stdout + the per-burst teed files, with
   `trace_id`/`burst_id`/`task_id` bound into every line. That is the whole
   contract: 12-factor out, correlation in-band, consumable by any log

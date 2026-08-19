@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from control_plane import telemetry
 from control_plane.runner import DEFAULT_MODEL, MODEL_ENV, BurstSpec, DockerRunner, resolve_model
 from dev_agent import env as agentenv
 
@@ -145,6 +146,74 @@ def test_optional_env_only_when_set(monkeypatch):
 
     resumed = " ".join(DockerRunner().build_command(_spec(resume_session_id="sess-9")))
     assert f"{agentenv.RESUME_SESSION_ID}=sess-9" in resumed
+
+
+def _env_of(cmd: list[str]) -> dict[str, str]:
+    """The `-e KEY=VALUE` pairs the container will actually be given."""
+    pairs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-e"]
+    return dict(pair.split("=", 1) for pair in pairs)
+
+
+def test_no_collector_means_no_telemetry_variables(monkeypatch):
+    """A presence toggle, like the two stores: unconfigured is not a broken export,
+    it is a box that was never told about telemetry (B2)."""
+    monkeypatch.delenv(telemetry.AGENT_OTLP_ENDPOINT_ENV, raising=False)
+    env = _env_of(DockerRunner().build_command(_spec()))
+    assert not [key for key in env if key.startswith(("OTEL_", "CLAUDE_CODE_ENABLE", "CLAUDE_CODE_ENH"))]
+
+
+def test_the_agents_own_otel_is_configured_from_one_variable(monkeypatch):
+    monkeypatch.setenv(telemetry.AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = _env_of(DockerRunner().build_command(_spec(task_id="owner/product#42", role="tester", kind="test")))
+
+    # both switches, because traces are beta-gated behind the second one
+    assert env[agentenv.CLAUDE_CODE_ENABLE_TELEMETRY] == "1"
+    assert env[agentenv.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA] == "1"
+    assert env[agentenv.OTEL_TRACES_EXPORTER] == "otlp"
+    assert env[agentenv.OTEL_EXPORTER_OTLP_ENDPOINT] == "http://collector:4318"
+    assert env[agentenv.OTEL_EXPORTER_OTLP_PROTOCOL] == "http/protobuf"
+    assert env[agentenv.OTEL_SERVICE_NAME] == agentenv.AGENT_SERVICE_NAME
+
+    # the ids the burst span carries, stamped onto every signal the box emits
+    assert env[agentenv.OTEL_RESOURCE_ATTRIBUTES] == (
+        "task.id=owner/product#42,burst.id=b1,burst.role=tester,burst.kind=test"
+    )
+    # and the traceparent is still there — it is what makes them one trace
+    assert env[agentenv.TRACEPARENT].startswith("00-")
+
+
+def test_the_box_is_never_given_a_console_exporter(monkeypatch):
+    """The SDK reads the CLI's stdout as its message channel, so a console exporter
+    doesn't export the burst, it corrupts it."""
+    monkeypatch.setenv(telemetry.AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = _env_of(DockerRunner().build_command(_spec()))
+    assert "console" not in " ".join(env.values())
+
+
+def test_content_bodies_stay_out_of_telemetry(monkeypatch):
+    """Arguments yes, bodies no. Tool inputs are the experiment's dataset (§9); the
+    full input/output bodies and raw API bodies are the transcript's job, and the
+    transcript is in the archive with the ledger's checksum over it."""
+    monkeypatch.setenv(telemetry.AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = _env_of(DockerRunner().build_command(_spec()))
+    assert env[agentenv.OTEL_LOG_TOOL_DETAILS] == "1"
+    assert "OTEL_LOG_TOOL_CONTENT" not in env
+    assert "OTEL_LOG_RAW_API_BODIES" not in env
+
+
+def test_no_metrics_exporter_because_the_ledger_is_the_metrics_store(monkeypatch):
+    """TO-BE §12: no emitted-metrics pipeline — the CLI's counters are cost and
+    tokens, which the burst row already records as the authoritative copy."""
+    monkeypatch.setenv(telemetry.AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = _env_of(DockerRunner().build_command(_spec()))
+    assert agentenv.OTEL_METRICS_EXPORTER not in env
+
+
+def test_a_check_burst_gets_no_telemetry(monkeypatch):
+    """`check` is the no-network boot smoke: no credential, and nothing to export."""
+    monkeypatch.setenv(telemetry.AGENT_OTLP_ENDPOINT_ENV, "http://collector:4318")
+    env = _env_of(DockerRunner().build_command(_spec(command="check")))
+    assert not [key for key in env if key.startswith("OTEL_")]
 
 
 def test_reviewer_repo_mount_is_read_only():
