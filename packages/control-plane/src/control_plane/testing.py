@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from control_plane.models import RepositoryRecord
+
 E2E_ENV = "E2E"
 TESTER_MODEL_ENV = "TESTER_MODEL"
 TEST_ENV_PREFIX = "TEST_"  # the allowlist boundary and the radioactivity marker
@@ -46,6 +48,18 @@ class E2EPolicy:
         if raw == "off":
             return cls()
         return cls(enabled=True, tester_model=(env.get(TESTER_MODEL_ENV) or "").strip() or None)
+
+    @classmethod
+    def from_product(
+        cls, row: RepositoryRecord, environ: dict[str, str] | None = None
+    ) -> E2EPolicy:
+        """The registered product's toggle (C3): the row overrides ``E2E``;
+        ``TESTER_MODEL`` stays env-sourced — which model tests is a deployment
+        fact, not product policy. Delegates to `from_env` on a probe env so
+        both sources behave identically."""
+        probe = dict(os.environ) if environ is None else dict(environ)
+        probe[E2E_ENV] = "on" if row.e2e_enabled else "off"
+        return cls.from_env(probe)
 
     def describe(self) -> str:
         return "on" if self.enabled else "off"

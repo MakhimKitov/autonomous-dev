@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from control_plane.models import RepositoryRecord
 from control_plane.testing import (
     CitationError,
     ManifestError,
@@ -47,6 +48,23 @@ def test_policy_on_with_optional_model():
 def test_policy_rejects_anything_but_on_off():
     with pytest.raises(E2EPolicyError, match="on|off"):
         E2EPolicy.from_env({"E2E": "yes"})
+
+
+def test_policy_from_product_row_governs():
+    # C3: the row overrides the machine's E2E toggle in both directions
+    on = RepositoryRecord(repository="fermata/discord-bot", team="platform", e2e_enabled=True)
+    off = RepositoryRecord(repository="fermata/discord-bot", team="platform")
+    assert E2EPolicy.from_product(on, {"E2E": "off"}).enabled is True
+    assert E2EPolicy.from_product(off, {"E2E": "on"}).enabled is False
+
+
+def test_policy_from_product_model_stays_a_machine_answer():
+    row = RepositoryRecord(repository="fermata/discord-bot", team="platform", e2e_enabled=True)
+    policy = E2EPolicy.from_product(row, {"TESTER_MODEL": "claude-haiku-4-5"})
+    assert policy.tester_model == "claude-haiku-4-5"
+    env = {"E2E": "off"}
+    E2EPolicy.from_product(row, env)
+    assert env == {"E2E": "off"}  # the probe never leaks into the caller's dict
 
 
 # --- manifest ---

@@ -6,7 +6,8 @@ scheduler: the same choreography, driven unattended by the reconciler loop
 ``migrate`` — the Postgres ledger's schema, from numbered SQL (STORES.md).
 ``backfill`` — the one-shot that carries MVP history into the service stores (A6).
 ``product`` — the registry verbs (C1) behind registration preflight, with
-``check`` as the re-runnable drift catcher (C2).
+``check`` as the re-runnable drift catcher (C2). A registered product's
+policies reach the scheduler from its row, not the env (C3).
 """
 
 from __future__ import annotations
@@ -624,6 +625,19 @@ def _run_burst(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
+def _scheduler_policies(
+    row: RepositoryRecord | None, environ: dict[str, str] | None = None
+) -> tuple[ReviewPolicy, E2EPolicy]:
+    """C3: a registered product's policies come from its row — the row is the
+    entire truth about the declaration, and the env answers only what stays a
+    machine question (credentials, model overrides). `from_env` is dev mode:
+    an unregistered repo on the SQLite ledger still runs env-governed until
+    C4 makes the scheduler registry-driven."""
+    if row is None:
+        return ReviewPolicy.from_env(environ), E2EPolicy.from_env(environ)
+    return ReviewPolicy.from_product(row, environ), E2EPolicy.from_product(row, environ)
+
+
 def _run_scheduler(args: argparse.Namespace) -> int:
     slug = args.github
     if not slug and args.repo is not None:
@@ -639,33 +653,34 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     if creds is None:
         print("error: the scheduler needs the GitHub App configured (it polls as the App)", file=sys.stderr)
         return 2
+    init_telemetry()
+    stores = PlatformStores.open(args.data_dir)
+    if (stores.data_dir / STOP_FILENAME).exists():
+        print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
+        return 2
+    product_row = stores.ledger.get_repository(slug)
+    if product_row is None:
+        # C1: the service ledger refuses tasks for unregistered products (the
+        # tasks→repositories FK). Until C4 makes the scheduler registry-driven,
+        # this is a warning rather than a refusal — the SQLite variant carries no
+        # FK, and the env policies (dev mode) still govern behavior.
+        log.warning(
+            "product is not registered — on the service ledger, claiming a task will fail; "
+            "run `control-plane product register`",
+            repo=slug,
+        )
     try:
-        review = ReviewPolicy.from_env()  # a declaration that can't be honored refuses to start
-        testing = E2EPolicy.from_env()
+        # a declaration that can't be honored refuses to start — from the
+        # registered row (C3) or, dev mode, from the env
+        review, testing = _scheduler_policies(product_row)
     except (ReviewPolicyError, E2EPolicyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if testing.enabled and not review.claude:
         # the funnel (TESTER.md): tests run only after a clean assess — without
         # the claude review provider that trigger never fires
-        print("error: E2E=on requires the claude review provider (tests run after a clean assess)", file=sys.stderr)
+        print("error: e2e on requires the claude review provider (tests run after a clean assess)", file=sys.stderr)
         return 2
-
-    init_telemetry()
-    stores = PlatformStores.open(args.data_dir)
-    if (stores.data_dir / STOP_FILENAME).exists():
-        print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
-        return 2
-    if stores.ledger.get_repository(slug) is None:
-        # C1: the service ledger refuses tasks for unregistered products (the
-        # tasks→repositories FK). Until C4 makes the scheduler registry-driven,
-        # this is a warning rather than a refusal — the SQLite variant carries no
-        # FK, and the env policies below still govern behavior.
-        log.warning(
-            "product is not registered — on the service ledger, claiming a task will fail; "
-            "run `control-plane product register`",
-            repo=slug,
-        )
 
     token_cache = InstallationTokenCache(creds)
     copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
@@ -727,6 +742,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         reviewer=reviewer_login,
         e2e=testing.describe(),
         gate=owner,
+        policy_source="registry row" if product_row is not None else "env (dev mode)",
     )
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
