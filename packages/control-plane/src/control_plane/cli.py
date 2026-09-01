@@ -10,7 +10,9 @@ scheduler: the same choreography, driven unattended by the reconciler loop
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -34,8 +36,14 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.migrate import MigrationError, migrate, status
-from control_plane.models import TaskRecord, task_id_for
-from control_plane.review import REVIEWER_APP_PREFIX, ReviewPolicy, ReviewPolicyError
+from control_plane.models import ProductState, RepositoryRecord, TaskRecord, task_id_for
+from control_plane.review import (
+    PROVIDERS_ENV,
+    REVIEW_ENV,
+    REVIEWER_APP_PREFIX,
+    ReviewPolicy,
+    ReviewPolicyError,
+)
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
 from control_plane.store import (
@@ -43,11 +51,12 @@ from control_plane.store import (
     LEDGER_FILENAME,
     ArchiveError,
     LocalSessionArchive,
+    RegistryError,
     open_archive,
     open_ledger,
 )
 from control_plane.telemetry import init_telemetry
-from control_plane.testing import E2EPolicy, E2EPolicyError
+from control_plane.testing import E2E_ENV, E2EPolicy, E2EPolicyError
 from dev_agent.log import configure_logging
 
 log = structlog.get_logger()
@@ -119,6 +128,78 @@ def build_parser() -> argparse.ArgumentParser:
         "github-check",
         help="preflight the GitHub App: mint a token, show installation + permissions",
     )
+
+    product = sub.add_parser(
+        "product",
+        help="the registry verbs (TO-BE §2): register/list/show/pause/resume/set",
+    )
+    verbs = product.add_subparsers(dest="verb", required=True)
+
+    def _operator_flags(verb: argparse.ArgumentParser) -> None:
+        verb.add_argument("--data-dir", type=Path, default=Path("data"), help="platform store root")
+        verb.add_argument("--actor", default=None, help="who is acting — lands in the audit row (default: the OS login)")
+
+    register = verbs.add_parser(
+        "register",
+        help="register a product; every policy/quota column is materialized — platform defaults unless overridden",
+    )
+    register.add_argument("repository", help="owner/name")
+    register.add_argument("--team", required=True, help="owning team: gate authority, where escalations go")
+    register.add_argument("--review", choices=["on", "off"], default=None, help=f"override the platform ${REVIEW_ENV} default")
+    register.add_argument("--review-providers", default=None, help=f"override ${PROVIDERS_ENV} (comma-separated)")
+    register.add_argument("--e2e", choices=["on", "off"], default=None, help=f"override the platform ${E2E_ENV} default")
+    register.add_argument(
+        "--test-env",
+        action="append",
+        default=[],
+        metavar="NAME=env:REF",
+        help="sandbox credential ref for the tester (repeatable) — a name, never a value",
+    )
+    register.add_argument("--concurrency", type=int, default=1)
+    register.add_argument("--daily-bursts", type=int, default=None, help="default: $SCHEDULER_DAILY_BURST_CEILING")
+    register.add_argument("--usage-share", type=float, default=1.0)
+    register.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(register)
+
+    listing = verbs.add_parser("list", help="every registered product, one line each")
+    _operator_flags(listing)
+
+    show = verbs.add_parser("show", help="one product's row, and its audit trail")
+    show.add_argument("repository", help="owner/name")
+    _operator_flags(show)
+
+    pause = verbs.add_parser("pause", help="stop scheduling a product; requires a reason")
+    pause.add_argument("repository", help="owner/name")
+    pause.add_argument("--reason", required=True, help="why — it lands in the audit row")
+    _operator_flags(pause)
+
+    resume = verbs.add_parser("resume", help="resume a paused product")
+    resume.add_argument("repository", help="owner/name")
+    resume.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(resume)
+
+    set_verb = verbs.add_parser(
+        "set",
+        help="change a live product's policy/quota columns — audited, never retro-propagated from platform defaults",
+    )
+    set_verb.add_argument("repository", help="owner/name")
+    set_verb.add_argument("--team", default=None)
+    set_verb.add_argument("--review", choices=["on", "off"], default=None)
+    set_verb.add_argument("--review-providers", default=None, help="comma-separated; replaces the selector")
+    set_verb.add_argument("--e2e", choices=["on", "off"], default=None)
+    set_verb.add_argument(
+        "--test-env",
+        action="append",
+        default=[],
+        metavar="NAME=env:REF",
+        help="replaces the whole test-env map (repeatable within one call)",
+    )
+    set_verb.add_argument("--concurrency", type=int, default=None)
+    set_verb.add_argument("--daily-bursts", type=int, default=None)
+    set_verb.add_argument("--usage-share", type=float, default=None)
+    set_verb.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(set_verb)
+
     return parser
 
 
@@ -157,6 +238,202 @@ def _backfill(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("\n(dry run — nothing was written)")
     return 0
+
+
+# --- the product registry (C1) ---
+#
+# The operator verbs from TO-BE §2. The CLI's whole job is to *materialize* the
+# row — every policy/quota column filled from the platform's .env-shaped defaults
+# unless a flag overrides it — and to hand it to the ledger, which writes the
+# mutation, its audit row and its outbox event as one. No NULL-means-inherit:
+# after registration the row is the entire truth about the product, and a changed
+# platform default never retro-propagates.
+
+_REPOSITORY_SHAPE = re.compile(r"^[^/\s]+/[^/\s]+$")  # 'owner/name' — the spelling tasks use
+_TEST_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")  # boring env names only — no smuggling
+_SECRET_REF = re.compile(r"^(env|file):.+")  # a name, never a value (D4 resolves them)
+
+
+def _parse_test_env(pairs: list[str]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, ref = pair.partition("=")
+        if not sep or not _TEST_ENV_NAME.match(name):
+            raise RegistryError(f"--test-env wants NAME=ref with an env-shaped NAME, got {pair!r}")
+        if not _SECRET_REF.match(ref):
+            raise RegistryError(
+                f"a secret ref is env:NAME or file:PATH — a reference, never a value (got {ref!r})"
+            )
+        refs[name] = ref
+    return refs
+
+
+def _check_quotas(concurrency: int | None, daily_bursts: int | None, usage_share: float | None) -> None:
+    if concurrency is not None and concurrency < 1:
+        raise RegistryError(f"concurrency must be at least 1, got {concurrency}")
+    if daily_bursts is not None and daily_bursts < 1:
+        raise RegistryError(f"daily bursts must be at least 1, got {daily_bursts}")
+    if usage_share is not None and usage_share <= 0:
+        raise RegistryError(f"usage share must be positive, got {usage_share}")
+
+
+def _review_columns(
+    toggle: str | None, providers: str | None, base: RepositoryRecord | None = None
+) -> tuple[bool, str]:
+    """The review columns, materialized. Toggle and selector are orthogonal —
+    turning review off keeps the curated selector, exactly as `REVIEW=off`
+    leaves `$REVIEW_PROVIDERS` standing in the env world.
+
+    Sources, in precedence order: the flag, then the row being changed (`set`),
+    then the platform env (`register`). Validation routes through
+    ``ReviewPolicy.declared`` — an incoherent declaration must not become a row.
+    Whether *this machine* holds the provider's credentials is deliberately not
+    asked here: that is `from_env`'s startup question, and C2 relocates it to
+    registration preflight.
+    """
+    if toggle is None:
+        if base is not None:
+            toggle = "on" if base.review_enabled else "off"
+        else:
+            toggle = (os.environ.get(REVIEW_ENV) or "off").strip().lower() or "off"
+    if toggle not in ("on", "off"):
+        raise ReviewPolicyError(f"{REVIEW_ENV} must be `on` or `off`, got {toggle!r}")
+    if providers is None:
+        providers = base.review_provider if base is not None else os.environ.get(PROVIDERS_ENV, "")
+    # names are checked whenever any are declared; `on` additionally needs at
+    # least one — the same questions ReviewPolicy.declared asks, asked through it
+    if toggle == "on" or providers.strip():
+        policy = ReviewPolicy.declared({REVIEW_ENV: "on", PROVIDERS_ENV: providers})
+        selector = ",".join(policy.providers)
+    else:
+        selector = ""
+    return toggle == "on", selector
+
+
+def _describe_review(row: RepositoryRecord) -> str:
+    return f"on ({row.review_provider})" if row.review_enabled else "off"
+
+
+def _print_product(row: RepositoryRecord) -> None:
+    refs = " ".join(f"{name}={ref}" for name, ref in sorted(row.test_env_refs.items())) or "—"
+    print(f"  team:       {row.team}")
+    print(f"  state:      {row.state}")
+    print(f"  review:     {_describe_review(row)}")
+    print(f"  e2e:        {'on' if row.e2e_enabled else 'off'}  refs: {refs}")
+    print(
+        f"  quotas:     concurrency={row.concurrency} daily_bursts={row.daily_bursts} "
+        f"usage_share={row.usage_share}"
+    )
+    print(f"  registered: {row.registered_at}   updated: {row.updated_at}")
+    print(f"  last burst: {row.last_burst_at or '—'}")
+
+
+def _product_register(args: argparse.Namespace, ledger, actor: str) -> int:
+    if not _REPOSITORY_SHAPE.match(args.repository):
+        raise RegistryError(f"a product is owner/name, got {args.repository!r}")
+    _check_quotas(args.concurrency, args.daily_bursts, args.usage_share)
+    review_enabled, review_provider = _review_columns(args.review, args.review_providers)
+    env = dict(os.environ)
+    if args.e2e is not None:
+        env[E2E_ENV] = args.e2e
+    row = RepositoryRecord(
+        repository=args.repository,
+        team=args.team,
+        review_enabled=review_enabled,
+        review_provider=review_provider,
+        e2e_enabled=E2EPolicy.from_env(env).enabled,
+        test_env_refs=_parse_test_env(args.test_env),
+        concurrency=args.concurrency,
+        daily_bursts=(
+            args.daily_bursts
+            if args.daily_bursts is not None
+            else Rails.from_env().daily_burst_ceiling
+        ),
+        usage_share=args.usage_share,
+    )
+    ledger.register_repository(row, actor, args.reason)
+    print(f"{args.repository} registered")
+    _print_product(ledger.get_repository(args.repository))
+    return 0
+
+
+def _product_show(args: argparse.Namespace, ledger) -> int:
+    row = ledger.get_repository(args.repository)
+    if row is None:
+        raise RegistryError(f"{args.repository} is not registered")
+    print(row.repository)
+    _print_product(row)
+    print("audit:")
+    for entry in ledger.audit_trail(args.repository):
+        reason = f" — {entry.reason}" if entry.reason else ""
+        print(f"  #{entry.id} {entry.at} {entry.actor} {entry.action}{reason}")
+    return 0
+
+
+def _product_set(args: argparse.Namespace, ledger, actor: str) -> int:
+    changes: dict = {}
+    if args.team is not None:
+        changes["team"] = args.team
+    if args.review is not None or args.review_providers is not None:
+        current = ledger.get_repository(args.repository)
+        if current is None:
+            raise RegistryError(f"{args.repository} is not registered")
+        changes["review_enabled"], changes["review_provider"] = _review_columns(
+            args.review, args.review_providers, base=current
+        )
+    if args.e2e is not None:
+        changes["e2e_enabled"] = args.e2e == "on"
+    if args.test_env:
+        changes["test_env_refs"] = _parse_test_env(args.test_env)
+    _check_quotas(args.concurrency, args.daily_bursts, args.usage_share)
+    for column, value in (
+        ("concurrency", args.concurrency),
+        ("daily_bursts", args.daily_bursts),
+        ("usage_share", args.usage_share),
+    ):
+        if value is not None:
+            changes[column] = value
+    ledger.update_repository(args.repository, changes, actor, args.reason)
+    print(f"{args.repository} set: {', '.join(sorted(changes))}")
+    _print_product(ledger.get_repository(args.repository))
+    return 0
+
+
+def _product(args: argparse.Namespace) -> int:
+    actor = args.actor or getpass.getuser()
+    ledger = open_ledger(args.data_dir.expanduser().resolve())
+    try:
+        if args.verb == "register":
+            return _product_register(args, ledger, actor)
+        if args.verb == "list":
+            rows = ledger.list_repositories()
+            if not rows:
+                print("no products registered")
+            for row in rows:
+                print(
+                    f"{row.repository}  {row.state}  team={row.team}  "
+                    f"review={_describe_review(row)}  e2e={'on' if row.e2e_enabled else 'off'}  "
+                    f"concurrency={row.concurrency}  daily={row.daily_bursts}  share={row.usage_share}"
+                )
+            return 0
+        if args.verb == "show":
+            return _product_show(args, ledger)
+        if args.verb == "pause":
+            ledger.set_repository_state(args.repository, ProductState.PAUSED, actor, args.reason)
+            print(f"{args.repository} paused: {args.reason}")
+            return 0
+        if args.verb == "resume":
+            ledger.set_repository_state(args.repository, ProductState.ACTIVE, actor, args.reason)
+            print(f"{args.repository} active")
+            return 0
+        if args.verb == "set":
+            return _product_set(args, ledger, actor)
+        return 2
+    except (RegistryError, ReviewPolicyError, E2EPolicyError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        ledger.close()
 
 
 def _github_check() -> int:
@@ -261,6 +538,16 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     if (stores.data_dir / STOP_FILENAME).exists():
         print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
         return 2
+    if stores.ledger.get_repository(slug) is None:
+        # C1: the service ledger refuses tasks for unregistered products (the
+        # tasks→repositories FK). Until C4 makes the scheduler registry-driven,
+        # this is a warning rather than a refusal — the SQLite variant carries no
+        # FK, and the env policies below still govern behavior.
+        log.warning(
+            "product is not registered — on the service ledger, claiming a task will fail; "
+            "run `control-plane product register`",
+            repo=slug,
+        )
 
     token_cache = InstallationTokenCache(creds)
     copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
@@ -413,6 +700,8 @@ def main(argv: list[str] | None = None) -> int:
         return _backfill(args)
     if args.command == "github-check":
         return _github_check()
+    if args.command == "product":
+        return _product(args)
     return 2
 
 

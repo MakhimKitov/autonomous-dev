@@ -31,9 +31,16 @@ import structlog
 
 from control_plane.models import (
     BURST_FINALIZE_COLUMNS,
+    EVENT_PRODUCT_PAUSED,
+    EVENT_PRODUCT_REGISTERED,
+    EVENT_PRODUCT_RESUMED,
+    EVENT_PRODUCT_UPDATED,
     EVENT_VIOLATION_RECORDED,
+    AuditRecord,
     BurstRecord,
     Event,
+    ProductState,
+    RepositoryRecord,
     TaskRecord,
     Violation,
     utc_iso,
@@ -123,6 +130,52 @@ class ArchiveError(RuntimeError):
     missing one, or bytes that don't match the checksum the ledger recorded."""
 
 
+class RegistryError(RuntimeError):
+    """A registry verb the ledger must refuse: registering a product twice,
+    mutating one that isn't registered, pausing without a reason, a no-op state
+    change, or `set` reaching for a column that isn't the operator's to set."""
+
+
+# What `product set` may touch — the policy and quota columns, exactly.
+# `state` is deliberately absent: pause/resume own it, with pause's reason
+# discipline; `last_burst_at` and the claim columns are the scheduler's, and the
+# key and timestamps are nobody's. Both backends check against this one tuple.
+PRODUCT_SET_COLUMNS = (
+    "team",
+    "review_enabled",
+    "review_provider",
+    "e2e_enabled",
+    "test_env_refs",
+    "concurrency",
+    "daily_bursts",
+    "usage_share",
+)
+
+
+def _registry_transition(state: str, reason: str) -> tuple[str, str]:
+    """The shared gate for pause/resume: the audit action and event kind for a
+    state, with TO-BE §2's rule — pausing requires a reason — enforced in the
+    one place both backends pass through."""
+    if state == ProductState.PAUSED:
+        if not reason.strip():
+            raise RegistryError("pausing a product requires a reason — it lands in the audit row")
+        return "product.pause", EVENT_PRODUCT_PAUSED
+    if state == ProductState.ACTIVE:
+        return "product.resume", EVENT_PRODUCT_RESUMED
+    raise RegistryError(f"a product is active or paused — {state!r} is neither")
+
+
+def _check_settable(changes: dict) -> None:
+    if not changes:
+        raise RegistryError("nothing to set — name at least one column to change")
+    unknown = sorted(set(changes) - set(PRODUCT_SET_COLUMNS))
+    if unknown:
+        raise RegistryError(
+            f"not settable: {', '.join(unknown)} — `product set` touches only "
+            f"{', '.join(PRODUCT_SET_COLUMNS)}"
+        )
+
+
 def tar_without_credentials(session_dir: Path, destination: Path) -> str:
     """Tar session_dir to destination, minus credential files. Returns sha256."""
 
@@ -182,6 +235,12 @@ class LocalSessionArchive:
 
 
 class Ledger(Protocol):
+    def register_repository(self, repo: RepositoryRecord, actor: str, reason: str = "") -> None: ...
+    def get_repository(self, repository: str) -> RepositoryRecord | None: ...
+    def list_repositories(self) -> list[RepositoryRecord]: ...
+    def set_repository_state(self, repository: str, state: str, actor: str, reason: str = "") -> None: ...
+    def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
+    def audit_trail(self, target: str | None = None) -> list[AuditRecord]: ...
     def upsert_task(self, task: TaskRecord) -> None: ...
     def get_task(self, task_id: str) -> TaskRecord | None: ...
     def tasks_by_status(self, *statuses: str) -> list[TaskRecord]: ...
@@ -241,6 +300,31 @@ def _redact(dsn: str) -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS repositories (
+    repository TEXT PRIMARY KEY,
+    team TEXT NOT NULL,
+    state TEXT NOT NULL,
+    review_enabled INTEGER NOT NULL,
+    review_provider TEXT NOT NULL,
+    e2e_enabled INTEGER NOT NULL,
+    test_env_refs TEXT NOT NULL DEFAULT '{}',
+    concurrency INTEGER NOT NULL,
+    daily_bursts INTEGER NOT NULL,
+    usage_share REAL NOT NULL,
+    last_burst_at TEXT,
+    claimed_by TEXT,
+    claimed_until TEXT,
+    registered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     repository TEXT NOT NULL,
@@ -363,6 +447,102 @@ class SqliteLedger:
             existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    # --- the product registry (C1) ---
+    #
+    # Every mutation writes its audit row and its outbox event in the same
+    # transaction — the SQLite spelling of the Postgres backend's single
+    # data-modifying CTE. The guarantee callers get is identical: no mutation
+    # without its audit row, no audit row without its announcement.
+
+    def _audit_and_announce(self, actor: str, action: str, target: str, reason: str,
+                            kind: str, extra: dict | None = None) -> None:
+        """The two rows every registry mutation trails. Caller commits."""
+        cursor = self._conn.execute(
+            "INSERT INTO audit (actor, action, target, reason, at) VALUES (?, ?, ?, ?, ?)",
+            (actor, action, target, reason, utc_now()),
+        )
+        payload = {"audit_id": cursor.lastrowid, "repository": target, "actor": actor, **(extra or {})}
+        self._conn.execute(
+            "INSERT INTO events (kind, payload, created_at) VALUES (?, ?, ?)",
+            (kind, json.dumps(payload), utc_now()),
+        )
+
+    def register_repository(self, repo: RepositoryRecord, actor: str, reason: str = "") -> None:
+        data = asdict(repo)
+        data["test_env_refs"] = json.dumps(data["test_env_refs"])
+        cols = ", ".join(data)
+        placeholders = ", ".join(f":{k}" for k in data)
+        try:
+            self._conn.execute(f"INSERT INTO repositories ({cols}) VALUES ({placeholders})", data)
+        except sqlite3.IntegrityError as exc:
+            self._conn.rollback()
+            raise RegistryError(f"{repo.repository} is already registered") from exc
+        self._audit_and_announce(actor, "product.register", repo.repository, reason,
+                                 EVENT_PRODUCT_REGISTERED)
+        self._conn.commit()
+
+    def _load_repository(self, row: sqlite3.Row) -> RepositoryRecord:
+        data = dict(row)
+        data["review_enabled"] = bool(data["review_enabled"])
+        data["e2e_enabled"] = bool(data["e2e_enabled"])
+        data["test_env_refs"] = json.loads(data["test_env_refs"])
+        return RepositoryRecord(**data)
+
+    def get_repository(self, repository: str) -> RepositoryRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM repositories WHERE repository = ?", (repository,)
+        ).fetchone()
+        return self._load_repository(row) if row else None
+
+    def list_repositories(self) -> list[RepositoryRecord]:
+        rows = self._conn.execute("SELECT * FROM repositories ORDER BY repository").fetchall()
+        return [self._load_repository(row) for row in rows]
+
+    def set_repository_state(self, repository: str, state: str, actor: str, reason: str = "") -> None:
+        action, kind = _registry_transition(state, reason)
+        cursor = self._conn.execute(
+            "UPDATE repositories SET state = ?, updated_at = ? WHERE repository = ? AND state <> ?",
+            (state, utc_now(), repository, state),
+        )
+        if cursor.rowcount == 0:
+            # the CAS refused; nothing was written, so read to say why
+            self._conn.rollback()
+            existing = self.get_repository(repository)
+            if existing is None:
+                raise RegistryError(f"{repository} is not registered")
+            raise RegistryError(f"{repository} is already {state}")
+        self._audit_and_announce(actor, action, repository, reason, kind)
+        self._conn.commit()
+
+    def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None:
+        _check_settable(changes)
+        values = dict(changes)
+        if "test_env_refs" in values:
+            values["test_env_refs"] = json.dumps(values["test_env_refs"])
+        # column names come from PRODUCT_SET_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = :{column}" for column in values)
+        cursor = self._conn.execute(
+            f"UPDATE repositories SET {assignments}, updated_at = :updated_at "
+            f"WHERE repository = :repository",
+            {**values, "updated_at": utc_now(), "repository": repository},
+        )
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise RegistryError(f"{repository} is not registered")
+        self._audit_and_announce(actor, "product.set", repository, reason,
+                                 EVENT_PRODUCT_UPDATED, extra={"changed": sorted(changes)})
+        self._conn.commit()
+
+    def audit_trail(self, target: str | None = None) -> list[AuditRecord]:
+        select = "SELECT id, actor, action, target, reason, at FROM audit"
+        if target is None:
+            rows = self._conn.execute(f"{select} ORDER BY id").fetchall()
+        else:
+            rows = self._conn.execute(f"{select} WHERE target = ? ORDER BY id", (target,)).fetchall()
+        return [AuditRecord(**dict(row)) for row in rows]
+
+    # --- tasks ---
 
     def upsert_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()

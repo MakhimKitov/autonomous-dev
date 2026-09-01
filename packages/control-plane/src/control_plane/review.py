@@ -34,7 +34,14 @@ class ReviewPolicy:
     reviewer_model: str | None = None  # the claude provider's burst model (slice 2)
 
     @classmethod
-    def from_env(cls, environ: dict[str, str] | None = None) -> ReviewPolicy:
+    def declared(cls, environ: dict[str, str] | None = None) -> ReviewPolicy:
+        """The toggle and selector, validated as a *declaration*: recognized and
+        implemented providers, and `on` names at least one. Credential checks are
+        deliberately not here — whether this machine can honor the declaration is
+        a deployment question, asked by `from_env` at scheduler startup and, at
+        C2, by registration preflight. The registry verbs (C1) materialize rows
+        through this half, so a laptop without the reviewer App can still
+        register a product that declares one."""
         env = dict(os.environ) if environ is None else environ
         toggle = env.get(REVIEW_ENV, "").strip().lower() or "off"
         if toggle not in ("on", "off"):
@@ -56,12 +63,22 @@ class ReviewPolicy:
                     f"review provider {provider!r} is not shipped yet (REVIEWERS.md slices) — "
                     f"available today: {', '.join(IMPLEMENTED)}"
                 )
-        if "copilot" in providers and not env.get(COPILOT_TOKEN_ENV, "").strip():
+        return cls(
+            enabled=True,
+            providers=providers,
+            reviewer_model=env.get(REVIEWER_MODEL_ENV, "").strip() or None,
+        )
+
+    @classmethod
+    def from_env(cls, environ: dict[str, str] | None = None) -> ReviewPolicy:
+        env = dict(os.environ) if environ is None else environ
+        policy = cls.declared(env)
+        if policy.copilot and not env.get(COPILOT_TOKEN_ENV, "").strip():
             raise ReviewPolicyError(
                 f"provider `copilot` declared but {COPILOT_TOKEN_ENV} is unset — GitHub grants "
                 "Copilot review requests only to a user token whose owner holds a Copilot seat"
             )
-        if "claude" in providers and not (
+        if policy.claude and not (
             env.get("REVIEWER_GITHUB_APP_ID", "").strip()
             and env.get("REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH", "").strip()
         ):
@@ -70,11 +87,7 @@ class ReviewPolicy:
                 "REVIEWER_GITHUB_APP_ID and REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH (the PR's "
                 "author can't review it, so findings post as a second App)"
             )
-        return cls(
-            enabled=True,
-            providers=providers,
-            reviewer_model=env.get(REVIEWER_MODEL_ENV, "").strip() or None,
-        )
+        return policy
 
     @property
     def copilot(self) -> bool:

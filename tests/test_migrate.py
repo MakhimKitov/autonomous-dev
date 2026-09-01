@@ -24,7 +24,7 @@ from control_plane.migrate import (
     pending,
     status,
 )
-from control_plane.models import BurstRecord, TaskRecord, Violation
+from control_plane.models import AuditRecord, BurstRecord, RepositoryRecord, TaskRecord, Violation
 from control_plane.store import LEDGER_DSN_ENV
 from psycopg.conninfo import make_conninfo
 
@@ -149,7 +149,13 @@ def test_status_reads_without_writing(fresh_dsn):
 @needs_postgres
 @pytest.mark.parametrize(
     ("table", "record", "extra"),
-    [("tasks", TaskRecord, set()), ("bursts", BurstRecord, set()), ("violations", Violation, {"id"})],
+    [
+        ("tasks", TaskRecord, set()),
+        ("bursts", BurstRecord, set()),
+        ("violations", Violation, {"id"}),
+        ("repositories", RepositoryRecord, set()),
+        ("audit", AuditRecord, set()),
+    ],
 )
 def test_schema_speaks_the_ledger_vocabulary(fresh_dsn, table, record, extra):
     """The columns are exactly the dataclass fields — the drift guard A3's

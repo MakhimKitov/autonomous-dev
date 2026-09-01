@@ -35,21 +35,23 @@
 -- validated form; test_no_constraint_is_left_unvalidated is what makes the
 -- database match them.
 --
--- Shape note: still converging on STORES.md's Stage-A target. Landed: org tables
--- and walls (A4), the session tree (A5). Outstanding: composite task identity —
--- `repository` + `issue_number` + the one-task-per-issue UNIQUE — at A6 (#17), the
--- task/repository claim columns at E1/E2 (#32, #33), the `org_state` STOP row at
--- E3 (#34), `bursts.pinned` with the golden-replay harness that needs it at G4
--- (#45), and `bursts.subscription_id` with the pool at F (#38–41). All but
--- `org_state` are additions to a *live* table, which is why they wait for the
--- stage that needs them rather than landing speculatively here.
+-- Shape note: still converging on STORES.md's target. Landed: org tables and
+-- walls (A4), the session tree (A5), composite task identity (A6), the
+-- tasks→repositories foreign key with the registry that can create a row (C1).
+-- Outstanding: the task/repository claim columns at E1/E2 (#32, #33), the
+-- `org_state` STOP row at E3 (#34), `bursts.pinned` with the golden-replay
+-- harness that needs it at G4 (#45), and `bursts.subscription_id` with the pool
+-- at F (#38–41). All but `org_state` are additions to a *live* table, which is
+-- why they wait for the stage that needs them rather than landing speculatively
+-- here.
 
--- repositories — one row per registered repository; implements TO-BE §2's
+-- repositories — one row per registered product; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
--- not inherited: registration fills every policy/quota column from platform
--- config; the row is the entire truth, no NULL-means-inherit. Empty until C1
--- (#23) ships `product register`; `tasks.repo` gains its foreign key at A6,
--- when that column becomes `repository` and holds 'owner/name'.
+-- not inherited: `product register` (C1) fills every policy/quota column from
+-- platform config unless overridden; the row is the entire truth, no
+-- NULL-means-inherit, and a changed platform default never retro-propagates.
+-- Rows are created by the registry verbs only — each mutation writes its audit
+-- row and outbox event in the same statement.
 CREATE TABLE repositories (
     repository      text PRIMARY KEY,          -- 'owner/name'
     team            text NOT NULL,
@@ -108,13 +110,12 @@ CREATE TABLE subscriptions (
 -- joins the GitHub world for free. `repository` holds the product slug; the
 -- platform's clone path is a runtime argument and belongs in no row.
 --
--- No foreign key into repositories yet, and that is a decision rather than an
--- omission: nothing before C1 (#23) can legitimately create a `repositories` row,
--- so requiring one here would make every task uninsertable in the meantime. C1
--- ships `product register` and adds the reference.
+-- WALL: a task names a registered product (C1). The foreign key waited for the
+-- verb that can create a `repositories` row — before `product register` existed,
+-- requiring one would have made every task uninsertable.
 CREATE TABLE tasks (
     task_id         text PRIMARY KEY,          -- '{owner}/{repo}#{issue_number}'
-    repository      text NOT NULL,             -- 'owner/name'
+    repository      text NOT NULL CONSTRAINT tasks_repository_fk REFERENCES repositories (repository),
     issue_number    integer NOT NULL,
     status          text NOT NULL CONSTRAINT tasks_status_check CHECK (status IN
                       ('open', 'claimed', 'working', 'awaiting_review', 'blocked', 'done')),

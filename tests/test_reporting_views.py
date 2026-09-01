@@ -52,7 +52,14 @@ def views_dsn():
 @pytest.fixture
 def db(views_dsn):
     with psycopg.connect(views_dsn, autocommit=True, row_factory=dict_row) as conn:
-        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries")
+        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories")
+        # the registry wall (C1): the suite's tasks have to name registered products
+        conn.execute(
+            "INSERT INTO repositories (repository, team, state, review_enabled, review_provider, "
+            "e2e_enabled, test_env_refs, concurrency, daily_bursts, usage_share) VALUES "
+            f"('{PRODUCT}', 'owner', 'active', false, '', false, '{{}}', 1, 20, 1.0), "
+            f"('{OTHER}', 'owner', 'active', false, '', false, '{{}}', 1, 20, 1.0)"
+        )
         yield conn
 
 
