@@ -177,7 +177,8 @@ class Event:
 # that emit them (capacity_exhausted at F2, subscription_expiring at F4,
 # task_blocked with the scheduler's own events) — this is the one A4 ships,
 # because the violations feed is the alert signal the platform documents
-# (TO-BE §11: any new violations row is a page).
+# (TO-BE §12: any new violations row is a page — the three forms an adopter can
+# consume it in are OBSERVABILITY.md, "The alert condition").
 EVENT_VIOLATION_RECORDED = "violation_recorded"
 
 # The optional wake channel. A consumer may LISTEN on it to poll sooner; nothing

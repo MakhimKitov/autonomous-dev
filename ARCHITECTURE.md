@@ -10,12 +10,14 @@ this document defines how the pieces fit and what we're testing.
 > task 17 / PR #18 was the proving run). This document remains the *design*; where
 > the build deviated, the subsystem docs are authoritative for as-built behavior:
 > **`SCHEDULER.md`** (loop, state machine, rails), **`REVIEWERS.md`** (review
-> providers), **`TESTER.md`** (E2E test bursts), **`GITHUB-INTERFACE.md`** (protocol).
-> Known as-built deltas: stores are SQLite + a filesystem session archive (§6's
-> Postgres/SeaweedFS is the scale-up design, not built); OTel/Phoenix tracing is not
-> wired yet (structlog + the ledger stand in); the monitor is not built (the tester's
+> providers), **`TESTER.md`** (E2E test bursts), **`STORES.md`** (ledger + archive),
+> **`OBSERVABILITY.md`** (what is emitted and how to look at it),
+> **`GITHUB-INTERFACE.md`** (protocol).
+> Known as-built deltas: both service stores are built and are presence toggles, not
+> §6's scale-up rewrite (`STORES.md`, Stage A); the monitor is not built (the tester's
 > symptom relay already exercises its `auto`-issue pipeline); pre-PR self-review was
-> dropped in favor of reviewer bursts (decision record in REVIEWERS.md).
+> dropped in favor of reviewer bursts (decision record in REVIEWERS.md). Tracing is
+> wired end to end as of Stage B — the delta that used to be listed here.
 
 ---
 
@@ -426,11 +428,18 @@ conventions** where applicable (still experimental) and Claude Code's built-in
 - **Spans stay thin.** The deep record of agent behavior is the session JSONL in the
   object store; spans carry timing/outcome/cost/IDs plus the transcript's object key,
   never embedded content.
-- **Backend (phase 0): Arize Phoenix** — OTel-native, a single container that acts as
-  OTLP collector + trace UI, backed by our existing Postgres. Chosen over Langfuse
-  (v3 self-host needs ~6 services incl. ClickHouse + Redis) at experiment scale;
-  because everything speaks OTLP, the backend is swappable config, not a design
-  commitment.
+- **Backend: none, and a rig to prove it** (B4). Chosen over Langfuse (v3 self-host
+  needs ~6 services incl. ClickHouse + Redis) at experiment scale, Phoenix is still
+  the trace UI — but as one service in a dev-only rig
+  (`docker/compose.telemetry.yaml`), not as a component: TO-BE §12 ships four
+  capabilities and no instrument. Two things changed in the wiring once it was built.
+  A **collector sits in front** rather than Phoenix's own OTLP listener, because logs
+  need a second destination (Phoenix takes traces only), both processes should learn
+  exactly one address, and the swap then happens in a config file instead of in an
+  environment variable the platform sets. And Phoenix keeps **its own store, not our
+  Postgres**: a viewer's tables in the platform database are drift in every
+  `atlas schema diff`, and a rig's state is meant to die with `down`. The correlation
+  join, the alert condition and the reference dashboards are `OBSERVABILITY.md`.
 
 ## 10. Rollout phases
 

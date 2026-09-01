@@ -1,0 +1,317 @@
+{
+  "uid": "reporting",
+  "title": "Reporting — the ledger's own numbers",
+  "description": "Reference panels over the reporting views (B4, #22). An example, not a component: the SQL is examples/dashboards/reporting.sql, which any Postgres tool can run.",
+  "tags": [
+    "autonomous-dev",
+    "reporting"
+  ],
+  "editable": true,
+  "schemaVersion": 41,
+  "refresh": "1m",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Waiting on a human",
+      "description": "awaiting_review: the platform stopped and handed over. blocked: it gave up.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT task_id,\n       repository,\n       issue_number,\n       pr_number,\n       status,\n       attempts,\n       review_rounds,\n       updated_at\n  FROM reporting.task_facts\n WHERE status IN ('awaiting_review', 'blocked')\n ORDER BY updated_at",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Reliability",
+      "description": "ARCHITECTURE §9. Success and blocked are shares of settled tasks (done + blocked).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT repository,\n       tasks,\n       done,\n       blocked,\n       awaiting_review,\n       in_flight,\n       round(success_rate * 100, 1)  AS success_pct,\n       round(blocked_rate * 100, 1)  AS blocked_pct,\n       round(rework_rate * 100, 1)   AS rework_pct,\n       round(cost_per_task, 2)       AS cost_per_task,\n       round(bursts_per_task, 1)     AS bursts_per_task\n  FROM reporting.reliability\n ORDER BY repository",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Capability",
+      "description": "ARCHITECTURE §9. first_pass_pct is a proxy for automated-review pass-rate: the ledger keeps the round count, never the verdict.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT repository,\n       merged,\n       merged_first_pass,\n       round(first_pass_rate * 100, 1)     AS first_pass_pct,\n       round(review_rounds_per_merge, 2)   AS review_rounds_per_merge,\n       round(attempts_per_merge, 2)        AS attempts_per_merge,\n       round(turns_per_merge)              AS turns_per_merge,\n       most_turns_on_one_task,\n       review_bursts,\n       test_bursts,\n       bursts_that_did_not_finish_clean\n  FROM reporting.capability\n ORDER BY repository",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "What the walls stopped",
+      "description": "ARCHITECTURE §9 containment. No breach column: a breach is what the walls missed, so nothing records one.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT repository,\n       tool,\n       reason,\n       hits,\n       bursts,\n       tasks,\n       last_seen\n  FROM reporting.containment\n ORDER BY last_seen DESC",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Wall hits in the last 5 minutes — any row is a page",
+      "description": "TO-BE §12's alert condition, pull form. OBSERVABILITY.md has the exact forms.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT repository,\n       tool,\n       reason,\n       hits,\n       last_seen\n  FROM reporting.containment\n WHERE last_seen > now() - interval '5 minutes'\n ORDER BY last_seen DESC",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Spend, by day",
+      "description": "Dated by the last burst of the task: the money was spent when the bursts ran.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', last_burst_at) AS time,\n       repository                       AS metric,\n       sum(cost_usd)                    AS value\n  FROM reporting.task_facts\n WHERE last_burst_at IS NOT NULL\n GROUP BY 1, 2\n ORDER BY 1",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "The most expensive tasks",
+      "description": "Not a §9 metric — the honest read on 'task difficulty handled', which has none.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ledger"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ledger"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT task_id,\n       status,\n       bursts,\n       turns,\n       round(cost_usd, 2) AS cost_usd,\n       violations\n  FROM reporting.task_facts\n ORDER BY cost_usd DESC NULLS LAST\n LIMIT 10",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      }
+    }
+  ]
+}

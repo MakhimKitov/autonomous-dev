@@ -15,6 +15,14 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest
+      - name: the rig files parse
+        # Neither compose file has a test behind it — the stores rig is booted by the
+        # job below, but the telemetry rig is a laptop tool CI never runs, so a typo
+        # in it would first be found by a human waiting to look at a burst. `config`
+        # interpolates and validates without pulling anything.
+        run: |
+          docker compose -f docker/compose.yaml config -q
+          docker compose -f docker/compose.telemetry.yaml config -q
       - name: migrations take no unsafe locks
         # Needs no database — it reads the SQL. Rules and exclusions live in
         # .squawk.toml, each exclusion with the claim that justifies it.

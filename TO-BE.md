@@ -553,18 +553,33 @@ capabilities:
   families (reliability / containment / capability) ship as documented
   read-only SQL **reporting views** over `tasks`/`bursts`/`violations`. Any
   dashboard tool with a Postgres driver renders them; reference dashboards are
-  examples, not components. No emitted-metrics pipeline — that would mirror
-  ledger facts and drift (labels reflect, the ledger locks). Emitted OTel
+  examples, not components, and are exactly that — `examples/dashboards/` (B4),
+  a portable `.sql` file plus one importable dashboard that embeds it, read by a
+  role holding nothing but SELECT on the views. No emitted-metrics pipeline —
+  that would mirror ledger facts and drift (labels reflect, the ledger locks). Emitted OTel
   metrics stay reserved for process-local facts (tick latency, queue depth)
   when a real operational question demands them.
 - **The alert signal** — the violations feed itself (append-only table + its
   `events` outbox row) plus the documented condition: any new violations row
   is a page. Adopters wire it into their own alerting; the platform emits,
-  never routes.
+  never routes. Written down in three forms at B4 (`OBSERVABILITY.md`, "The alert
+  condition") because they are not equivalent: the pull query a least-privileged
+  dashboard role can run pages at group grain, and only the outbox — or the rows
+  themselves — is exact per violation.
 
-> **Testing rig** (dev-only, never shipped, swappable by a compose edit): OTel
-> collector + VictoriaLogs for logs + Phoenix for LLM-native trace views;
-> `lnav` over the logfmt files as the no-server default for laptop work.
+> **Testing rig** — built at B4: `docker/compose.telemetry.yaml`, dev-only, never
+> shipped, swappable in that file plus `docker/telemetry/collector.yaml`. OTel
+> collector in front (logs need a second destination and Phoenix takes traces only),
+> VictoriaLogs for logs, Phoenix for traces, Grafana for the views; `lnav` over the
+> logfmt files as the no-server default for laptop work. Two measured caveats. The
+> CLI reports usage under its own attribute names, so a viewer's accounting reads zero
+> until something renames them — the rig's collector does, in the OTel GenAI
+> convention, which is the shape of every viewer fix that belongs in a rig rather than
+> in the platform: **translate names, never invent numbers.** Tokens then reconcile
+> with the burst row exactly; Phoenix's *cost* does not, because it prices tokens off
+> its own table (0.64× measured), and the ledger stays the authority for money. And
+> Phoenix has no span-links field, so B1's lineage link is dropped and
+> `burst.resumed_from` is what a viewer reads.
 
 ## 13. Containment at org scale
 
