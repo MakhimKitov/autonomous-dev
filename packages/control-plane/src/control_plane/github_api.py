@@ -8,6 +8,7 @@ issues and PRs).
 
 from __future__ import annotations
 
+import base64
 import re
 import subprocess
 from dataclasses import dataclass
@@ -298,6 +299,27 @@ class GitHubApi:
 
     def repo_owner(self) -> str:
         return self._call("GET", "", "reading the repo")["owner"]["login"]
+
+    # --- repo contents (registration preflight, C2) ---
+
+    def read_file(self, path: str) -> str | None:
+        """The file's text at the default branch's HEAD, or None when nothing
+        readable lives there. 404 is an answer here, not an error — preflight
+        asks about files that are allowed to be missing."""
+        data = self._call("GET", f"/contents/{path}", f"reading {path}", ok=(404,))
+        if (
+            isinstance(data, dict)
+            and data.get("encoding") == "base64"
+            and isinstance(data.get("content"), str)
+        ):
+            return base64.b64decode(data["content"]).decode("utf-8")
+        return None
+
+    def path_exists(self, path: str) -> bool:
+        """Whether anything lives at the path — a directory answers as a list,
+        a file as a typed object, absence as a tolerated 404."""
+        data = self._call("GET", f"/contents/{path}", f"probing {path}", ok=(404,))
+        return isinstance(data, list) or (isinstance(data, dict) and bool(data.get("type")))
 
 
 def slug_from_origin(repo: Path) -> str | None:

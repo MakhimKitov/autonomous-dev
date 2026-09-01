@@ -132,6 +132,7 @@ uv run control-plane product show owner/name                   # the row + its a
 uv run control-plane product pause owner/name --reason "..."   # the reason is required
 uv run control-plane product resume owner/name
 uv run control-plane product set owner/name --e2e on --test-env DISCORD_TOKEN=env:TEST_DISCORD_TOKEN
+uv run control-plane product check owner/name --lint-issue    # re-run preflight; file the gaps (C2)
 ```
 
 Three rules carry the design. **Defaults are materialized, not inherited**:
@@ -146,6 +147,19 @@ a CTE on Postgres, a transaction on SQLite. **A task names a registered product*
 rows for repositories that already had tasks, with placeholder policies the audit
 row tells you to `product set`. Test-env values never enter the ledger: `--test-env`
 takes `NAME=env:REF` / `NAME=file:PATH` references, resolved at D4.
+
+**Registration preflights (C2)**: `register` — and `set`, when it touches a policy
+column — runs `preflight.run_preflight` before the write. The *gate* refuses a
+declaration the platform cannot execute: the org App unable to read the repo, a
+review provider without its credentials on this machine (the old scheduler-startup
+error, relocated), `e2e on` without the claude provider or without a parseable
+`TESTING.md` whose declared env every ref covers *and resolves* (env var set /
+file present — values are never read). Everything else is *socket lint* —
+`CLAUDE.md`, issue forms, PR template, commitlint config — warned and recorded in
+the registration's audit row, never a refusal. `product check` re-runs the same
+preflight against the live repo (exit 1 = drift: the row is no longer executable);
+`--lint-issue` on `register`/`check` files the gaps as a `human` issue in the
+product repo. Quota/team changes and pause/resume never probe GitHub.
 
 ### Task identity
 

@@ -229,6 +229,17 @@ the ephemeral container.
 > `tasks.repository` became a foreign key: a task for an unregistered product is
 > unrepresentable. The scheduler still reads its policies from the env — rows
 > become the source at C3, and the scheduler becomes registry-driven at C4.
+>
+> **As built (C2):** registration preflights (TO-BE §2). The gate refuses a
+> declaration the platform cannot execute — the org App can't read the repo, a
+> review provider without its credentials (the scheduler-startup error,
+> relocated to registration), `e2e on` without a parseable `TESTING.md` whose
+> declared env the product's refs cover and resolve. Everything else is socket
+> lint: warned, recorded in the registration's audit row, re-runnable with
+> `product check` to catch drift; `--lint-issue` files the gaps as a `human`
+> issue in the product repo. All probes read through the org App's own
+> installation token, so "the App can read the repo" and "the manifest is
+> fetchable" are one fact.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

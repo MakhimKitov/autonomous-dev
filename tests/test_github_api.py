@@ -242,3 +242,60 @@ def test_list_open_issues_by_label_filters_prs():
     issues = api.list_open_issues_by_label("auto")
     assert [i.number for i in issues] == [1]
     assert transport.calls[0]["params"]["labels"] == "auto"
+
+
+def test_read_file_decodes_the_contents_answer():
+    """The contents API answers base64 — `read_file` hands back text (C2)."""
+    import base64
+
+    payload = {
+        "type": "file",
+        "encoding": "base64",
+        "content": base64.b64encode("---\nenv: [DISCORD_TOKEN]\n---\n".encode()).decode(),
+    }
+    api, _ = _api({("GET", "/repos/owner/product/contents/TESTING.md"): FakeResponse(200, payload=payload)})
+    assert api.read_file("TESTING.md") == "---\nenv: [DISCORD_TOKEN]\n---\n"
+
+
+def test_read_file_answers_none_for_absence_and_directories():
+    """404 is an answer, not an error — preflight asks about files that are
+    allowed to be missing. A directory is not a readable file either."""
+    api, _ = _api(
+        {
+            ("GET", "/repos/owner/product/contents/CLAUDE.md"): FakeResponse(
+                404, payload={"message": "Not Found"}, text="not found"
+            ),
+            ("GET", "/repos/owner/product/contents/.github"): FakeResponse(
+                200, payload=[{"type": "file", "name": "PULL_REQUEST_TEMPLATE.md"}]
+            ),
+        }
+    )
+    assert api.read_file("CLAUDE.md") is None
+    assert api.read_file(".github") is None
+
+
+def test_path_exists_sees_files_directories_and_absence():
+    api, _ = _api(
+        {
+            ("GET", "/repos/owner/product/contents/.commitlintrc.json"): FakeResponse(
+                200, payload={"type": "file", "encoding": "base64", "content": ""}
+            ),
+            ("GET", "/repos/owner/product/contents/.github/ISSUE_TEMPLATE"): FakeResponse(
+                200, payload=[{"type": "file", "name": "issue.yml"}]
+            ),
+            ("GET", "/repos/owner/product/contents/CLAUDE.md"): FakeResponse(
+                404, payload={"message": "Not Found"}, text="not found"
+            ),
+        }
+    )
+    assert api.path_exists(".commitlintrc.json") is True
+    assert api.path_exists(".github/ISSUE_TEMPLATE") is True
+    assert api.path_exists("CLAUDE.md") is False
+
+
+def test_contents_errors_other_than_404_still_raise():
+    api, _ = _api(
+        {("GET", "/repos/owner/product/contents/TESTING.md"): FakeResponse(503, text="down")}
+    )
+    with pytest.raises(GitHubApiError, match="reading TESTING.md.*503"):
+        api.read_file("TESTING.md")

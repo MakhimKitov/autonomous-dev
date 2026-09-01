@@ -5,6 +5,8 @@ scheduler: the same choreography, driven unattended by the reconciler loop
 (SCHEDULER.md). ``stop`` — the kill switch. ``github-check`` — App preflight.
 ``migrate`` — the Postgres ledger's schema, from numbered SQL (STORES.md).
 ``backfill`` — the one-shot that carries MVP history into the service stores (A6).
+``product`` — the registry verbs (C1) behind registration preflight, with
+``check`` as the re-runnable drift catcher (C2).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import psycopg
@@ -37,6 +40,7 @@ from control_plane.github_auth import (
 )
 from control_plane.migrate import MigrationError, migrate, status
 from control_plane.models import ProductState, RepositoryRecord, TaskRecord, task_id_for
+from control_plane.preflight import PreflightError, run_preflight
 from control_plane.review import (
     PROVIDERS_ENV,
     REVIEW_ENV,
@@ -131,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     product = sub.add_parser(
         "product",
-        help="the registry verbs (TO-BE §2): register/list/show/pause/resume/set",
+        help="the registry verbs (TO-BE §2): register/list/show/check/pause/resume/set",
     )
     verbs = product.add_subparsers(dest="verb", required=True)
 
@@ -159,10 +163,27 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--daily-bursts", type=int, default=None, help="default: $SCHEDULER_DAILY_BURST_CEILING")
     register.add_argument("--usage-share", type=float, default=1.0)
     register.add_argument("--reason", default="", help="lands in the audit row")
+    register.add_argument(
+        "--lint-issue",
+        action="store_true",
+        help="file the socket gaps as a `human` issue in the product repo",
+    )
     _operator_flags(register)
 
     listing = verbs.add_parser("list", help="every registered product, one line each")
     _operator_flags(listing)
+
+    check = verbs.add_parser(
+        "check",
+        help="re-run registration preflight against the live repo — the drift catcher (TO-BE §2)",
+    )
+    check.add_argument("repository", help="owner/name")
+    check.add_argument(
+        "--lint-issue",
+        action="store_true",
+        help="file the socket gaps as a `human` issue in the product repo",
+    )
+    _operator_flags(check)
 
     show = verbs.add_parser("show", help="one product's row, and its audit trail")
     show.add_argument("repository", help="owner/name")
@@ -314,6 +335,47 @@ def _describe_review(row: RepositoryRecord) -> str:
     return f"on ({row.review_provider})" if row.review_enabled else "off"
 
 
+def _preflight_api(repository: str) -> GitHubApi:
+    """Preflight's eye on the product repo: the org App's own installation
+    token, so "the App can read the repo" and "the manifest is fetchable" are
+    one fact, not two checks that can disagree."""
+    creds = AppCredentials.from_env()
+    if creds is None:
+        raise PreflightError(
+            "preflight needs the GitHub App (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY_PATH) — "
+            "it proves the App reads the repo before a declaration becomes a row"
+        )
+    return GitHubApi(repository, InstallationTokenCache(creds))
+
+
+def _with_lint(reason: str, warnings: list[str]) -> str:
+    """TO-BE §2: socket lint is recorded in the registration's audit row — the
+    operator's reason keeps its own words, the lint rides behind them."""
+    if not warnings:
+        return reason
+    lint = "lint: " + "; ".join(warnings)
+    return f"{reason} [{lint}]" if reason else f"[{lint}]"
+
+
+def _file_lint_issue(api, repository: str, warnings: list[str]) -> None:
+    """`--lint-issue` (TO-BE §2): the socket gaps become the product's own
+    backlog. Filed with `human` provenance — deliberate: the content is the
+    platform's deterministic checks, relayed on the operator's explicit flag;
+    the operator is the author, the CLI just types (GITHUB-INTERFACE.md)."""
+    if not warnings:
+        print("socket clean — no lint issue to file")
+        return
+    body = (
+        "Registration preflight (`control-plane product check`) found gaps in this "
+        "repo's platform socket. None of them blocks the platform — it works the "
+        "repo conservatively — but each one filled makes the service better:\n\n"
+        + "\n".join(f"- {w}" for w in warnings)
+        + "\n\n_Filed by the platform operator via `product … --lint-issue` (TO-BE §2)._"
+    )
+    number = api.create_issue(f"Platform socket: {len(warnings)} lint gap(s)", body, ["human"])
+    print(f"lint issue filed: {repository}#{number}")
+
+
 def _print_product(row: RepositoryRecord) -> None:
     refs = " ".join(f"{name}={ref}" for name, ref in sorted(row.test_env_refs.items())) or "—"
     print(f"  team:       {row.team}")
@@ -328,7 +390,7 @@ def _print_product(row: RepositoryRecord) -> None:
     print(f"  last burst: {row.last_burst_at or '—'}")
 
 
-def _product_register(args: argparse.Namespace, ledger, actor: str) -> int:
+def _product_register(args: argparse.Namespace, ledger, actor: str, api_factory) -> int:
     if not _REPOSITORY_SHAPE.match(args.repository):
         raise RegistryError(f"a product is owner/name, got {args.repository!r}")
     _check_quotas(args.concurrency, args.daily_bursts, args.usage_share)
@@ -351,9 +413,18 @@ def _product_register(args: argparse.Namespace, ledger, actor: str) -> int:
         ),
         usage_share=args.usage_share,
     )
-    ledger.register_repository(row, actor, args.reason)
-    print(f"{args.repository} registered")
+    # C2: the gate runs before the write — a declaration the platform cannot
+    # execute never becomes a row; the lint it returns rides the audit reason.
+    api = api_factory(args.repository)
+    warnings = run_preflight(row, api)
+    ledger.register_repository(row, actor, _with_lint(args.reason, warnings))
+    suffix = f" — {len(warnings)} socket gap(s)" if warnings else ""
+    print(f"{args.repository} registered{suffix}")
+    for warning in warnings:
+        print(f"  ⚠ {warning}")
     _print_product(ledger.get_repository(args.repository))
+    if args.lint_issue:
+        _file_lint_issue(api, args.repository, warnings)
     return 0
 
 
@@ -370,14 +441,19 @@ def _product_show(args: argparse.Namespace, ledger) -> int:
     return 0
 
 
-def _product_set(args: argparse.Namespace, ledger, actor: str) -> int:
+# columns whose change can shape the same false declaration `register` refuses —
+# `set` re-asks the gate for exactly these, and stays offline for the rest
+_PREFLIGHT_COLUMNS = ("review_enabled", "review_provider", "e2e_enabled", "test_env_refs")
+
+
+def _product_set(args: argparse.Namespace, ledger, actor: str, api_factory) -> int:
+    current = ledger.get_repository(args.repository)
+    if current is None:
+        raise RegistryError(f"{args.repository} is not registered")
     changes: dict = {}
     if args.team is not None:
         changes["team"] = args.team
     if args.review is not None or args.review_providers is not None:
-        current = ledger.get_repository(args.repository)
-        if current is None:
-            raise RegistryError(f"{args.repository} is not registered")
         changes["review_enabled"], changes["review_provider"] = _review_columns(
             args.review, args.review_providers, base=current
         )
@@ -393,18 +469,51 @@ def _product_set(args: argparse.Namespace, ledger, actor: str) -> int:
     ):
         if value is not None:
             changes[column] = value
+    warnings: list[str] = []
+    if set(changes) & set(_PREFLIGHT_COLUMNS):
+        # the gate, re-asked over the row this set would produce. Lint is
+        # advisory here — recording it stays registration's and `check`'s.
+        warnings = run_preflight(replace(current, **changes), api_factory(args.repository))
     ledger.update_repository(args.repository, changes, actor, args.reason)
     print(f"{args.repository} set: {', '.join(sorted(changes))}")
+    for warning in warnings:
+        print(f"  ⚠ {warning}")
     _print_product(ledger.get_repository(args.repository))
     return 0
 
 
-def _product(args: argparse.Namespace) -> int:
+def _product_check(args: argparse.Namespace, ledger, api_factory) -> int:
+    """`product check` (TO-BE §2): registration preflight, re-run on demand.
+
+    A read, not a mutation — it writes nothing; drift lands in the exit code
+    and on the operator's terminal, and reaches the audit trail only through
+    the action it prompts (`product set`, `pause`)."""
+    row = ledger.get_repository(args.repository)
+    if row is None:
+        raise RegistryError(f"{args.repository} is not registered")
+    api = api_factory(args.repository)
+    try:
+        warnings = run_preflight(row, api)
+    except PreflightError as exc:
+        print(f"{args.repository}: NOT operable — {exc}", file=sys.stderr)
+        return 1
+    if warnings:
+        print(f"{args.repository}: operable — {len(warnings)} socket gap(s)")
+        for warning in warnings:
+            print(f"  ⚠ {warning}")
+    else:
+        print(f"{args.repository}: operable — socket clean")
+    if args.lint_issue:
+        _file_lint_issue(api, args.repository, warnings)
+    return 0
+
+
+def _product(args: argparse.Namespace, api_factory=_preflight_api) -> int:
     actor = args.actor or getpass.getuser()
     ledger = open_ledger(args.data_dir.expanduser().resolve())
     try:
         if args.verb == "register":
-            return _product_register(args, ledger, actor)
+            return _product_register(args, ledger, actor, api_factory)
         if args.verb == "list":
             rows = ledger.list_repositories()
             if not rows:
@@ -418,6 +527,8 @@ def _product(args: argparse.Namespace) -> int:
             return 0
         if args.verb == "show":
             return _product_show(args, ledger)
+        if args.verb == "check":
+            return _product_check(args, ledger, api_factory)
         if args.verb == "pause":
             ledger.set_repository_state(args.repository, ProductState.PAUSED, actor, args.reason)
             print(f"{args.repository} paused: {args.reason}")
@@ -427,9 +538,16 @@ def _product(args: argparse.Namespace) -> int:
             print(f"{args.repository} active")
             return 0
         if args.verb == "set":
-            return _product_set(args, ledger, actor)
+            return _product_set(args, ledger, actor, api_factory)
         return 2
-    except (RegistryError, ReviewPolicyError, E2EPolicyError) as exc:
+    except (
+        RegistryError,
+        ReviewPolicyError,
+        E2EPolicyError,
+        PreflightError,
+        GitHubAuthError,
+        GitHubApiError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
