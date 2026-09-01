@@ -79,8 +79,9 @@ def test_harvest_writes_a_snapshot_per_burst_and_resume_materializes_the_leaf(st
 
 
 def test_the_leaf_is_the_newest_archived_burst_not_the_newest_burst(stores, tmp_path):
-    """Reviewer and tester bursts archive nothing, so they are not nodes: the leaf
-    stays the last *dev* burst, and the partial index says the same thing."""
+    """The leaf stays the last *dev* burst, two ways (B5): a reviewer archives
+    nothing, so it is not a node — and a tester archives *evidence*, snapshot and
+    key and all, which the role filter keeps out of the tree just the same."""
     archive, ledger = stores
 
     dev = _burst("b1", started_at="2026-08-14T09:00:00+00:00")
@@ -101,9 +102,19 @@ def test_the_leaf_is_the_newest_archived_burst_not_the_newest_burst(stores, tmp_
     assert reviewer.session_key is None
     assert ledger.latest_archived_burst("42").burst_id == "b1"
 
-    # and the next dev round resumes the dev, never the reviewer
+    tester = _burst("b3", role="tester", kind="test", started_at="2026-08-14T11:00:00+00:00")
+    tester_volume = prepare_volume(tmp_path / "volumes", "b3", archive)  # never seeded
+    _wrote(tester_volume, '{"tester":1}\n')
+    ledger.record_burst(tester)
+    harvest_volume(tester_volume, tester, archive, ledger)  # B5: archive_session=True
+    ledger.finish_burst(_finished(tester))
+
+    assert tester.session_key == session_key("42", "b3")  # evidence, under its own key
+    assert ledger.latest_archived_burst("42").burst_id == "b1"  # and still not the leaf
+
+    # and the next dev round resumes the dev — never the reviewer, never the tester
     next_volume = prepare_volume(
-        tmp_path / "volumes", "b3", archive, parent=ledger.latest_archived_burst("42")
+        tmp_path / "volumes", "b4", archive, parent=ledger.latest_archived_burst("42")
     )
     assert (next_volume / "projects" / "sess.jsonl").read_text() == '{"dev":1}\n'
 

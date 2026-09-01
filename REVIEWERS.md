@@ -113,10 +113,11 @@ since M0 for exactly this split):
   **read-only** into the reviewer (`:ro`). The prompt has it judge by reading — CI owns
   test execution; a small self-check snippet goes to `/tmp`, never the mount. Its
   session volume is **not seeded** from the task's archive (the dev's transcripts
-  must not even be readable from inside) and is **not archived** back (the archive is
-  task-keyed and holds the dev's resumable session — archiving the reviewer's would
-  overwrite it). The reviewer's transcript survives in `data/volumes/<burst_id>/` for
-  forensics. The shared clone stays safe because the loop is serial and every burst
+  must not even be readable from inside) and is **not archived** back — the reviewer
+  reads and never executes, so there is nothing to prove; the tester, whose whole job
+  is execution, is the role whose transcript is archived as evidence (B5, TESTER.md).
+  The reviewer's transcript survives in `data/volumes/<burst_id>/` for the length of
+  the run. The shared clone stays safe because the loop is serial and every burst
   path re-syncs before mounting.
 - **No findings → an APPROVE review**, which — like a clean Copilot pass — deliberately
   triggers nothing. A dev round fires on a machine `CHANGES_REQUESTED` *or* inline

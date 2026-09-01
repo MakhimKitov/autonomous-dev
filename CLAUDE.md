@@ -150,7 +150,9 @@ reason instead of half-repairing it.
 One immutable snapshot per burst, keyed `sessions/{task_id}/{burst_id}/session.tar.gz`,
 and the ledger owns the lineage: `resumed_from_burst_id` names the parent a volume
 was materialized from, `session_key`/`session_checksum` name what the burst left.
-`latest_archived_burst(task_id)` is the leaf, and `prepare_volume(..., parent=None)`
+`latest_archived_burst(task_id)` is the leaf — the newest **dev** snapshot: a
+tester's volume is archived too (B5), but as evidence the role filter keeps out of
+the tree — and `prepare_volume(..., parent=None)`
 is how an amnesiac burst is expressed — there is deliberately no way to ask for a
 volume that resumes nothing but still holds the session. Snapshots are write-once:
 a retry is a new burst, so a new key, and branching is a ledger write.

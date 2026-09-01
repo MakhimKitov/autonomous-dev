@@ -178,8 +178,13 @@ def execute_burst(
         burst.finished_at = utc_now()
         span.set_attribute("burst.exit_code", exit_code)
 
+        # dev: the session tree's next node. tester: evidence — the transcript is
+        # the record of what the sandbox *did*, and it must outlive the machine
+        # that ran it (B5). Leafhood stays the dev's either way: the leaf query
+        # filters on role, so a tester's snapshot can never be resumed. Reviewers
+        # read and never execute, so there is nothing to prove — not archived.
         outcome = harvest_volume(
-            volume, burst, stores.archive, stores.ledger, archive_session=(role == "dev")
+            volume, burst, stores.archive, stores.ledger, archive_session=(role in ("dev", "tester"))
         )
         if burst.model:
             span.set_attribute("burst.model", burst.model)  # resolved beats requested
