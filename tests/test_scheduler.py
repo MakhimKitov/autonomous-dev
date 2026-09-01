@@ -4,6 +4,7 @@ GitHub is a recording fake; execute_burst is monkeypatched — these tests drive
 the decision layer only (the burst choreography has its own tests).
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -715,6 +716,45 @@ def _tester_rig(rig, monkeypatch, manifest=TEST_MANIFEST, provisioned=True):
     return scheduler, api, stores, spawned, fake_execute
 
 
+def _tester_transcript(stores, *calls, burst_id="fake"):
+    """Write a CLI-shaped transcript into the fake burst's volume — what B6's
+    resolver reads. Each call is (tool_use_id, command)."""
+    projects = stores.data_dir / "volumes" / burst_id / "projects" / "-workspace-repo"
+    projects.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for use_id, command in calls:
+        lines.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": use_id,
+                                "name": "Bash",
+                                "input": {"command": command},
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": use_id, "is_error": False}
+                        ]
+                    },
+                }
+            )
+        )
+    (projects / "sess.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _queued_assess(stores):
     stores.ledger.upsert_task(
         _task(1, status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess")
@@ -774,9 +814,10 @@ def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
         )
     )
     api.prs[2] = _pr()
+    _tester_transcript(stores, ("toolu_boot", "grep -q synced /session/product.log"))
     fake_execute.next_outcome = _assess_outcome(
         '{"verdict": "Clean.", "scenarios": [{"name": "boot", "result": "pass", '
-        '"evidence": "synced"}], "defects": [], "issues": []}'
+        '"tool_use_id": "toolu_boot", "evidence": "synced"}], "defects": [], "issues": []}'
     )
     scheduler.tick()
     task = stores.ledger.get_task(tid(1))
@@ -789,6 +830,8 @@ def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
     assert "sandbox guild" in spawned[0]["prompt"]
     ((pr_number, body),) = scheduler.reviewer_api.commented  # clean run → plain comment
     assert pr_number == 2 and "Machine test report" in body and "✅" in body
+    # B6: the cited-call column is platform-extracted from the transcript
+    assert "`Bash: grep -q synced /session/product.log`" in body
     assert scheduler.reviewer_api.posted == []  # no review costume without PR-caused defects
 
 
@@ -798,9 +841,11 @@ def test_pr_caused_defects_return_to_the_developer(rig, monkeypatch):
         _task(1, status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
     )
     api.prs[2] = _pr()
+    _tester_transcript(stores, ("toolu_roll", "python3 drive_roll.py"))
     fake_execute.next_outcome = _assess_outcome(
         '{"verdict": "One defect.", "scenarios": [{"name": "roll", "result": "fail", '
-        '"evidence": "wrong reply"}], "defects": [{"summary": "bad reply", "repro": "/roll"}]}'
+        '"tool_use_id": "toolu_roll", "evidence": "wrong reply"}], '
+        '"defects": [{"summary": "bad reply", "repro": "/roll"}]}'
     )
     scheduler.tick()
     task = stores.ledger.get_task(tid(1))
@@ -863,6 +908,30 @@ def test_auto_issue_dedup_skips_already_open_symptom(rig, monkeypatch):
     assert scheduler.reviewer_api.filed == []  # matched case-insensitively — not re-filed
     ((_, comment),) = scheduler.reviewer_api.commented
     assert "filed as" not in comment.lower()
+
+
+def test_unresolvable_citation_fails_like_a_malformed_report(rig, monkeypatch):
+    """B6's done-when: a report whose citations don't resolve takes the same
+    rail as JSON that doesn't parse — retry under the attempts cap, then the
+    soft give-up, and nothing is ever posted from the unbacked report."""
+    scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
+    stores.ledger.upsert_task(
+        _task(1, status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
+    )
+    api.prs[2] = _pr()
+    _tester_transcript(stores, ("toolu_real", "true"))  # the transcript exists…
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "Clean.", "scenarios": [{"name": "boot", "result": "pass", '
+        '"tool_use_id": "toolu_invented", "evidence": "looks fine"}]}'  # …the citation doesn't
+    )
+    scheduler.tick()  # attempt 1 → retry
+    task = stores.ledger.get_task(tid(1))
+    assert task.status == TaskStatus.CLAIMED and task.attempts == 1
+    assert scheduler.reviewer_api.commented == [] and scheduler.reviewer_api.posted == []
+    scheduler.tick()  # attempt 2 = rails cap → give up on the test, not the task
+    task = stores.ledger.get_task(tid(1))
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.attempts == 0
+    assert scheduler.reviewer_api.commented == [] and scheduler.reviewer_api.posted == []
 
 
 def test_test_failure_gives_up_softly_never_blocks(rig, monkeypatch):

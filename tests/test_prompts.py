@@ -87,3 +87,9 @@ def test_test_prompt_pins_the_report_contract():
     # B5: the product's own stdout lands on the session volume, so the harvest
     # archives it — the path is the platform's, not the product contract's
     assert "/session/product.log" in prompt
+    # B6: every scenario cites a tool call; the platform resolves it
+    assert '"tool_use_id"' in prompt
+    assert "resolves each citation against your archived transcript" in prompt
+    # the unit suite's status is never the tester's claim
+    assert "CI's fact" in prompt.replace("\n", " ")
+    assert "NEVER construct one from memory" in prompt  # measured: one live run, one fabrication

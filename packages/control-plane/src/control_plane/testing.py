@@ -14,6 +14,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 E2E_ENV = "E2E"
 TESTER_MODEL_ENV = "TESTER_MODEL"
@@ -128,6 +129,14 @@ class ReportError(ValueError):
     """The tester burst's final message wasn't the contracted JSON."""
 
 
+class CitationError(ReportError):
+    """A scenario's citation does not resolve against the burst's transcript.
+
+    A subclass on purpose: B6's contract is that an unbacked claim fails the
+    report *the same way* a malformed one does — one except branch, the same
+    retry rail, and nothing new blocks the task."""
+
+
 @dataclass(slots=True)
 class TestReport:
     """A tester burst's structured report, parsed from its final message."""
@@ -170,8 +179,18 @@ def parse_report(final_text: str) -> TestReport:
         result = str(item.get("result") or "").strip().lower()
         if not name or result not in ("pass", "fail"):
             raise ReportError(f"scenario needs a name and result pass|fail: {item!r}")
+        # B6: the citation is part of the shape. Prose stays optional — it is the
+        # tester's own words; the tool_use_id is what the platform can check.
+        cited = str(item.get("tool_use_id") or "").strip()
+        if not cited:
+            raise ReportError(f"scenario cites no tool_use_id: {item!r}")
         scenarios.append(
-            {"name": name, "result": result, "evidence": str(item.get("evidence") or "").strip()}
+            {
+                "name": name,
+                "result": result,
+                "tool_use_id": cited,
+                "evidence": str(item.get("evidence") or "").strip(),
+            }
         )
     defects = []
     for item in data.get("defects") or []:
@@ -195,21 +214,123 @@ def parse_report(final_text: str) -> TestReport:
     return TestReport(verdict=verdict, scenarios=scenarios, defects=defects, issues=issues)
 
 
+@dataclass(frozen=True, slots=True)
+class CitedCall:
+    """What the transcript records for one cited tool_use_id.
+
+    The platform's column in the posted table: the call and its recorded
+    outcome, extracted from the archived transcript — never from the report.
+    """
+
+    tool: str
+    detail: str  # compact rendering of the call's input (a command, a path)
+
+
+def _transcript_tool_blocks(volume_dir: Path):
+    """Yield every tool_use / tool_result block in this burst's transcript.
+
+    The CLI writes `projects/<cwd-slug>/<session_id>.jsonl` on the session
+    volume. A tester volume is never seeded (TESTER.md), so everything under
+    `projects/` was recorded by *this* burst — which is exactly the resolution
+    domain B6 wants: a citation into the dev's transcript must not resolve.
+    Unparseable lines are skipped, not fatal: the transcript is CLI-written,
+    but the resolver's job is to find citations, not to validate the file.
+    """
+    for path in sorted((volume_dir / "projects").rglob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            content = (record.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result"):
+                    yield block
+
+
+def _call_detail(tool_input: dict) -> str:
+    """One line a reader can recognize the call by. A rendering, not a record —
+    the archived transcript stays the full artifact."""
+    for key in ("command", "file_path", "path", "pattern", "url"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            detail = value
+            break
+    else:
+        detail = json.dumps(tool_input, ensure_ascii=False)
+    detail = " ".join(detail.split())  # newlines flatten: this lands in a table cell
+    return detail if len(detail) <= 80 else detail[:77] + "..."
+
+
+def resolve_citations(report: TestReport, volume_dir: Path) -> dict[str, CitedCall]:
+    """Resolve every scenario's tool_use_id against this burst's transcript (B6).
+
+    Requires, per citation: the id exists in the transcript, and its tool result
+    is present and not an error. Returns ``{tool_use_id: CitedCall}`` for the
+    posted table. Raises ``CitationError`` naming every citation that failed —
+    the report then fails exactly like one that didn't parse. The check is
+    resolvable/not-resolvable only: no grading of prose, no judging whether the
+    cited call *proves* the scenario — that stays the reader's, with the record
+    beside the claim.
+    """
+    uses: dict[str, CitedCall] = {}
+    errored: set[str] = set()
+    answered: set[str] = set()
+    for block in _transcript_tool_blocks(volume_dir):
+        if block["type"] == "tool_use" and isinstance(block.get("id"), str):
+            tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+            uses[block["id"]] = CitedCall(
+                tool=str(block.get("name") or "?"), detail=_call_detail(tool_input)
+            )
+        elif block["type"] == "tool_result" and isinstance(block.get("tool_use_id"), str):
+            answered.add(block["tool_use_id"])
+            if block.get("is_error"):
+                errored.add(block["tool_use_id"])
+
+    resolved: dict[str, CitedCall] = {}
+    problems: list[str] = []
+    for scenario in report.scenarios:
+        cited = scenario["tool_use_id"]
+        if cited not in uses:
+            problems.append(f"scenario {scenario['name']!r}: {cited} is not a tool call in this burst's transcript")
+        elif cited not in answered:
+            problems.append(f"scenario {scenario['name']!r}: {cited} has no recorded result")
+        elif cited in errored:
+            problems.append(f"scenario {scenario['name']!r}: {cited}'s recorded result is an error")
+        else:
+            resolved[cited] = uses[cited]
+    if problems:
+        raise CitationError("; ".join(problems))
+    return resolved
+
+
 def format_test_report(
-    report: TestReport, head_sha: str, model: str | None, filed: list[int] | None = None
+    report: TestReport,
+    head_sha: str,
+    model: str | None,
+    filed: list[int] | None = None,
+    citations: dict[str, CitedCall] | None = None,
 ) -> str:
     """The posted report in uniform (mirrors the review overview — header,
     resolved model, the exact commit the sandbox ran). ``filed`` are the
-    auto-issue numbers the pre-existing defects were relayed to."""
+    auto-issue numbers the pre-existing defects were relayed to. ``citations``
+    is `resolve_citations`' output: the *cited call* column is filled from the
+    transcript by the platform, beside the tester's own words — so a reader can
+    see whether the prose matches the record (B6)."""
     meta = " · ".join(
         part for part in (f"`{model}`" if model else None, f"tested `{head_sha[:7]}`") if part
     )
     lines = ["#### 🧪 Machine test report", f"<sub>{meta}</sub>", "", report.verdict]
     if report.scenarios:
-        lines += ["", "| scenario | result | evidence |", "|---|---|---|"]
+        lines += ["", "| scenario | result | cited call | evidence |", "|---|---|---|---|"]
         for s in report.scenarios:
             mark = "✅ pass" if s["result"] == "pass" else "❌ fail"
-            lines.append(f"| {s['name']} | {mark} | {s['evidence']} |")
+            call = (citations or {}).get(s["tool_use_id"])
+            cell = f"{call.tool}: {call.detail}" if call else s["tool_use_id"]
+            cell = cell.replace("`", "'").replace("|", "\\|")  # it lands in a code span in a table
+            lines.append(f"| {s['name']} | {mark} | `{cell}` | {s['evidence']} |")
     if report.defects:
         lines += ["", "**Defects**", ""]
         lines += [

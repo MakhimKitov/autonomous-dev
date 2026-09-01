@@ -33,6 +33,7 @@ from control_plane.testing import (
     format_test_report,
     parse_manifest,
     parse_report,
+    resolve_citations,
     resolve_test_env,
 )
 
@@ -586,12 +587,22 @@ class Scheduler:
             return
         try:
             report = parse_report((outcome.harvest.result or {}).get("final_text") or "")
+            # B6: every scenario's tool_use_id must resolve against the burst's own
+            # transcript — the volume just harvested, byte-identical to the archived
+            # snapshot (B5). CitationError is a ReportError on purpose: an unbacked
+            # claim fails exactly like JSON that didn't parse — same retry rail,
+            # same "machine test could not run" at the cap, nothing new blocks.
+            citations = resolve_citations(
+                report, self.stores.data_dir / "volumes" / outcome.burst.burst_id
+            )
         except ReportError as exc:
             self._register_failure(task, f"tester output unusable: {exc}")
             return
         model = (outcome.harvest.result or {}).get("model")  # resolved, not requested
         filed = self._file_auto_issues(task, report, head_sha=pr.head_sha)
-        self._post_test_report(task, report, head_sha=pr.head_sha, model=model, filed=filed)
+        self._post_test_report(
+            task, report, head_sha=pr.head_sha, model=model, filed=filed, citations=citations
+        )
         task.status = TaskStatus.AWAITING_REVIEW
         task.next_burst_kind = None
         task.attempts = 0  # machine-stage retries must not poison later dev rounds
@@ -652,6 +663,7 @@ class Scheduler:
         head_sha: str = "",
         model: str | None = None,
         filed: list[int] | None = None,
+        citations=None,
     ) -> None:
         """PR-caused defects post the report as a REQUEST_CHANGES review — the
         existing round machinery returns them to the developer. Otherwise the
@@ -660,7 +672,7 @@ class Scheduler:
         if self.reviewer_api is None:
             log.warning("no reviewer App configured — test report not posted")
             return
-        body = format_test_report(report, head_sha, model, filed=filed)
+        body = format_test_report(report, head_sha, model, filed=filed, citations=citations)
         pr_caused = report.pr_caused
         try:
             if pr_caused:
