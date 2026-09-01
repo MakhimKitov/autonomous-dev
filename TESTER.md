@@ -88,8 +88,15 @@ The reviewer's envelope, reused — with the execution posture inverted:
 - Unlike the reviewer, the tester **must execute** — that is its whole job. The
   read-don't-execute rule does not apply; the sandbox credentials and the empty guild
   are the containment, not abstinence.
-- Session volume not seeded, not archived; transcript survives in
-  `data/volumes/<burst_id>/` for forensics.
+- Session volume not seeded — but **archived**, under the burst's own key like a
+  dev's (B5): the transcript is the strongest evidence the platform holds — the
+  model chooses what its report *says*, not what the CLI recorded it *did*. It is
+  evidence, never memory: `latest_archived_burst` filters on `role = 'dev'`, so a
+  tester's snapshot cannot become the session-tree leaf and no burst can resume it.
+- The product's own stdout is part of that evidence: the envelope prompt has the
+  tester boot the product with output captured to `product.log` on the session
+  volume, so the archive holds what the bot printed and not only what the tester
+  typed. That file is authored by the product process — nobody in the box writes it.
 
 ## Where it sits in the loop
 

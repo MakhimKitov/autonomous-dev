@@ -436,10 +436,13 @@ deliberately dumb storage.
   when the control plane never held the bytes, as with presigned PUT, it is how
   the checksum gets home (`recorded_checksum`).
 - The **credential-exclusion rule is unconditional** (`EXCLUDE_FROM_ARCHIVE`
-  survives verbatim), and reviewer/tester volumes are never seeded and never
-  archived. Under per-burst keys that is no longer a rule about *overwriting* —
-  every burst has its own key — but about what is a node: nothing resumes a
-  reviewer, so it is not one.
+  survives verbatim). Reviewer volumes are never seeded and never archived —
+  nothing resumes a reviewer, and it reads without executing, so there is
+  nothing to prove. **Tester volumes are archived** (B5), under the same key
+  shape — `sessions/{task_id}/{burst_id}/session.tar.gz`, the row's `role`
+  telling the kinds apart — but as *evidence*, not as nodes: the leaf query is
+  role-filtered, so a tester's snapshot is reachable only by its key and can
+  never be what a dev burst resumes.
 - **GC**: snapshots of `done` tasks age out after a retention window, except
   nodes with `pinned = true` (golden-replay fixtures, M4 scenarios) and any
   node on a path to a pinned one.
@@ -465,14 +468,16 @@ by nothing else, because `DockerRunner` keeps putting and getting in-process and
 should not have to fake a capability it never uses.
 
 **Walking the tree** is one query, not a join through the task row:
-`latest_archived_burst(task_id)` returns the leaf — the newest burst with a
-`session_key` — and that is both what the next volume is materialized from and
+`latest_archived_burst(task_id)` returns the leaf — the newest **dev** burst with
+a `session_key` — and that is both what the next volume is materialized from and
 what its `resumed_from_burst_id` points at. `bursts_session_leaf`, a partial index
-on exactly that predicate, serves it. Two consequences worth stating: a burst that
-crashes before harvest never becomes a leaf, so the next one resumes the last node
-that actually produced something; and a `parent` of `None` is the whole mechanism
-behind an amnesiac burst, so there is no way to ask for a volume that resumes
-nothing yet still holds the session.
+on exactly that predicate (`session_key IS NOT NULL AND role = 'dev'`, 0011),
+serves it. Three consequences worth stating: a burst that crashes before harvest
+never becomes a leaf, so the next one resumes the last node that actually produced
+something; an archived *tester* burst never becomes one either — its snapshot is
+evidence, and the role filter is what lets B5 archive it without a new column; and
+a `parent` of `None` is the whole mechanism behind an amnesiac burst, so there is
+no way to ask for a volume that resumes nothing yet still holds the session.
 
 ## From the MVP
 

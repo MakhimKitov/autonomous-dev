@@ -73,12 +73,13 @@ def harvest_volume(
 ) -> HarvestOutcome:
     """Fold a finished burst's volume back into the platform stores.
 
-    ``archive_session=False`` for reviewer and tester bursts. Under the per-burst
-    key scheme it can no longer *overwrite* anything — every burst has its own key
-    — so the reason is the one STORES.md gives rather than the one the MVP had:
-    their volumes are never seeded and never archived, because nothing resumes
-    them and they are not nodes in the dev's session tree. The transcript still
-    exists in the volume directory for the length of the run."""
+    ``archive_session=False`` for reviewer bursts only (B5): they read and never
+    execute, so there is nothing to prove. A *tester's* volume is archived — not
+    as a node but as evidence: the transcript records what the sandbox did (every
+    tool call with its verbatim result), which is stronger than anything the
+    report says. Archiving it cannot make it resumable: `latest_archived_burst`
+    is role-filtered, so leafhood stays the dev's and a snapshot with a non-dev
+    role is reachable only by its key."""
     result: dict | None = None
     result_path = volume / BURST_RESULT_FILENAME
     if result_path.is_file():

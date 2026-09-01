@@ -84,3 +84,6 @@ def test_test_prompt_pins_the_report_contract():
     assert '"preexisting": true|false' in prompt
     assert "symptom.yml" in prompt
     assert "human triages it before anyone acts" in prompt
+    # B5: the product's own stdout lands on the session volume, so the harvest
+    # archives it — the path is the platform's, not the product contract's
+    assert "/session/product.log" in prompt

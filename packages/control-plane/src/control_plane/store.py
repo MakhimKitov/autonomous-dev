@@ -426,12 +426,15 @@ class SqliteLedger:
         return BurstRecord(**dict(row)) if row else None
 
     def latest_archived_burst(self, task_id: str) -> BurstRecord | None:
-        """The leaf of this task's session tree: the newest burst that archived a
-        snapshot. What the next burst's volume is materialized from, and what its
-        `resumed_from_burst_id` points at."""
+        """The leaf of this task's session tree: the newest *dev* burst that
+        archived a snapshot. What the next burst's volume is materialized from,
+        and what its `resumed_from_burst_id` points at. The role filter is what
+        makes a tester's archived snapshot evidence rather than memory (B5):
+        without it, one archived tester burst and the next dev round would
+        resume the tester's session."""
         row = self._conn.execute(
             "SELECT * FROM bursts WHERE task_id = ? AND session_key IS NOT NULL "
-            "ORDER BY started_at DESC, burst_id DESC LIMIT 1",
+            "AND role = 'dev' ORDER BY started_at DESC, burst_id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
         return BurstRecord(**dict(row)) if row else None

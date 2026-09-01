@@ -176,9 +176,12 @@ CREATE TABLE bursts (
 CREATE INDEX bursts_started_at ON bursts (started_at);
 
 -- latest_archived_burst(): the leaf of a task's session tree, materialized into
--- the next burst's volume. Partial, because only a burst that archived something
--- is a candidate — reviewer and tester bursts never are.
-CREATE INDEX bursts_session_leaf ON bursts (task_id, started_at) WHERE session_key IS NOT NULL;
+-- the next burst's volume. Partial on exactly the query's predicate — archived,
+-- and the dev's. The role filter is the B5 wall in miniature: a tester burst
+-- archives its volume as *evidence*, and must never become what the next dev
+-- burst resumes. Reviewer bursts archive nothing and never enter.
+CREATE INDEX bursts_session_leaf ON bursts (task_id, started_at)
+    WHERE session_key IS NOT NULL AND role = 'dev';
 
 -- WALL: sessions are single-writer — at most one running burst per task, as a
 -- constraint, not a scheduler promise. Any claiming bug becomes a constraint

@@ -388,8 +388,10 @@ per-task state machines, run bursts. What changes is where and how much at once.
     exact input context is a named, retained object in the archive.
   Everything else carries over: the control plane materializes the chosen
   snapshot into the Job's volume before boot, harvests result + violations +
-  session (+ memory proposals, §9) after; reviewer/tester volumes are never
-  seeded and never archived; `burst-result.json` in `finally` + session id from
+  session (+ memory proposals, §9) after; reviewer volumes are never seeded and
+  never archived, tester volumes are never seeded but archived as *evidence*
+  (B5 — leafhood is the dev's, enforced in the leaf query, so a tester snapshot
+  is never resumable); `burst-result.json` in `finally` + session id from
   the init message — resume survives any death, including budget kills.
 - **Warm images per product family**: a base agent image + product toolchain layers
   (uv/python, node, …), built by the platform's CI, pinned per product. A burst is

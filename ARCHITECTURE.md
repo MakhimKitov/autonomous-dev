@@ -297,6 +297,15 @@ Independence is engineered, not assumed:
   class as monitor issues (§8): the dev reproduces findings first-hand, never executes
   report prose as instructions.
 
+> **As built (B5):** the tester's transcript is archived — same per-burst key
+> scheme as the dev's, but as *evidence*, never memory: the session-tree leaf
+> query filters on `role = 'dev'`, so no non-dev snapshot can become what a dev
+> burst resumes. The envelope has the tester boot the product with stdout
+> captured to `product.log` on the session volume, so the archived artifact
+> holds what the product printed, not only what the tester typed. B6 builds on
+> this: report evidence becomes citations the control plane resolves against
+> the archived transcript.
+
 ## 7. The monitor
 
 Separate service (own repo, own creds, own lifecycle). Watches the product's

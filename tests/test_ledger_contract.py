@@ -319,9 +319,9 @@ def test_the_trace_pair_goes_in_at_spawn_and_is_empty_when_there_was_none(ledger
 
 
 def test_the_leaf_is_the_newest_burst_that_archived_something(ledger):
-    """What `prepare_volume` asks for. Bursts that archive nothing — reviewer,
-    tester, anything that crashed before harvest — are not nodes, so they can
-    never become the leaf."""
+    """What `prepare_volume` asks for. Bursts that archive nothing — a reviewer,
+    anything that crashed before harvest — are not nodes, so they can never
+    become the leaf."""
     ledger.upsert_task(_task())
     assert ledger.latest_archived_burst(tid(42)) is None
 
@@ -339,6 +339,47 @@ def test_the_leaf_is_the_newest_burst_that_archived_something(ledger):
 
     assert ledger.latest_archived_burst(tid(42)).burst_id == "b3"
     assert ledger.latest_archived_burst("nobody") is None
+
+
+def test_an_archived_tester_burst_never_becomes_the_leaf(ledger):
+    """Leafhood is the dev's (B5). Tester volumes are archived as *evidence* —
+    snapshot, key, checksum, everything a node has — so the only thing standing
+    between an archived tester burst and the next dev burst resuming the tester's
+    session is the role filter in this query. The newest snapshot here is the
+    tester's; the leaf must still be the dev's — and a task whose only snapshots
+    are a tester's has no leaf at all."""
+    ledger.upsert_task(_task())
+    for burst_id, started, role, kind in [
+        ("b-dev", "2026-08-14T09:00:00+00:00", Role.DEV, BurstKind.WORK),
+        ("b-test", "2026-08-14T10:00:00+00:00", Role.TESTER, BurstKind.TEST),
+    ]:
+        burst = _burst(
+            burst_id,
+            started_at=started,
+            role=role,
+            kind=kind,
+            session_key=session_key(tid(), burst_id),
+            session_checksum="c" * 64,
+        )
+        ledger.record_burst(burst)
+        burst.status = BurstStatus.SUCCEEDED
+        burst.finished_at = started
+        ledger.finish_burst(burst)
+
+    assert ledger.latest_archived_burst(tid(42)).burst_id == "b-dev"
+
+    ledger.upsert_task(_task(43))  # only a tester's snapshot: evidence, no leaf
+    ledger.record_burst(
+        _burst(
+            "b-test-only",
+            issue_number=43,
+            role=Role.TESTER,
+            kind=BurstKind.TEST,
+            session_key=session_key(tid(43), "b-test-only"),
+            session_checksum="c" * 64,
+        )
+    )
+    assert ledger.latest_archived_burst(tid(43)) is None
 
 
 def test_the_leaf_is_per_task(ledger):
