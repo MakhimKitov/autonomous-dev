@@ -112,6 +112,16 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def plan_backfill(data_dir: Path, repository: str, destination: Ledger) -> Plan:
     """Work out what to carry over, without touching anything."""
+    if destination.get_repository(repository) is None:
+        # the registry wall (C1): tasks name a registered product, backfilled ones
+        # included — and the seed in migration 0012 only covers repositories the
+        # destination already has tasks for, which a backfill target by definition
+        # doesn't. Registering is the operator's declaration, not this verb's.
+        raise BackfillError(
+            f"{repository} is not registered in the destination ledger. "
+            f"Run `control-plane product register {repository} --team <team>` first — "
+            "registration is where its policies and quotas get declared."
+        )
     source = _open_source(data_dir)
     try:
         plan = Plan(repository=repository)

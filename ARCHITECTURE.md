@@ -220,6 +220,15 @@ the ephemeral container.
 > task-keyed blob, and the ledger owns the lineage. The full as-built data model —
 > ledger tables, both stores, and the GitHub entities they reference —
 > is drawn in `diagrams/data-model.drawio` (+ `.png`).
+>
+> **As built (C1):** the product registry opened — `control-plane product
+> register|list|show|pause|resume|set`, the platform's first operator verbs.
+> Registration materializes every policy/quota column from the platform env into
+> the `repositories` row (no NULL-means-inherit, no retro-propagation), each
+> mutation writes its `audit` row and outbox event in the same statement, and
+> `tasks.repository` became a foreign key: a task for an unregistered product is
+> unrepresentable. The scheduler still reads its policies from the env — rows
+> become the source at C3, and the scheduler becomes registry-driven at C4.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

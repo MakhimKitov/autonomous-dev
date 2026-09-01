@@ -42,6 +42,13 @@ class TaskStatus(StrEnum):
     DONE = "done"  # PR merged; issue auto-closed
 
 
+class ProductState(StrEnum):
+    """A registered product is scheduled or it is not — nothing in between."""
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -71,6 +78,47 @@ def task_id_for(repository: str, issue_number: int) -> str:
     for one issue unrepresentable rather than unlikely.
     """
     return f"{repository}#{issue_number}"
+
+
+@dataclass(slots=True)
+class RepositoryRecord:
+    """One registered product — the tenancy unit (TO-BE §2).
+
+    Every policy and quota column holds a materialized value, never a
+    NULL-that-means-inherit: `product register` fills them from platform
+    defaults unless overridden, and after that the row is the entire truth
+    about the product. A changed platform default never retro-propagates —
+    changing a live product is `product set`, an audited operator action.
+    """
+
+    repository: str  # 'owner/name' — the primary key, same spelling tasks use
+    team: str  # owning team: gate authority, where escalations go
+    state: str = ProductState.ACTIVE
+    review_enabled: bool = False
+    review_provider: str = ""  # the selector, spelled as REVIEW_PROVIDERS spells it
+    e2e_enabled: bool = False
+    test_env_refs: dict = field(default_factory=dict)  # name → secret ref, never a value
+    concurrency: int = 1
+    daily_bursts: int = 20  # mirrors Rails.daily_burst_ceiling
+    usage_share: float = 1.0
+    last_burst_at: str | None = None  # least-recently-served scheduling (C4)
+    claimed_by: str | None = None  # observation lease (E2)
+    claimed_until: str | None = None
+    registered_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class AuditRecord:
+    """One operator mutation, as the ledger recorded it — the read shape of the
+    `audit` table (append-only by grant; TO-BE §2, "The audit log starts here")."""
+
+    id: int
+    actor: str
+    action: str  # 'product.register' | 'product.pause' | 'product.resume' | 'product.set'
+    target: str
+    reason: str
+    at: str
 
 
 @dataclass(slots=True)
@@ -180,6 +228,14 @@ class Event:
 # (TO-BE §12: any new violations row is a page — the three forms an adopter can
 # consume it in are OBSERVABILITY.md, "The alert condition").
 EVENT_VIOLATION_RECORDED = "violation_recorded"
+
+# The registry's announcements (C1): one kind per operator verb, written in the
+# same statement as the mutation and its audit row. The payload names the audit
+# row (`audit_id`) so a consumer can read the who/why without a second contract.
+EVENT_PRODUCT_REGISTERED = "product_registered"
+EVENT_PRODUCT_PAUSED = "product_paused"
+EVENT_PRODUCT_RESUMED = "product_resumed"
+EVENT_PRODUCT_UPDATED = "product_updated"
 
 # The optional wake channel. A consumer may LISTEN on it to poll sooner; nothing
 # is allowed to depend on a notification arriving.

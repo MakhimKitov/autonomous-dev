@@ -70,7 +70,11 @@ CREATE TABLE violations (
 
 @pytest.fixture
 def destination():
-    """An empty migrated ledger of its own, dropped afterwards."""
+    """An empty migrated ledger of its own, dropped afterwards — with the product
+    registered, which is the documented step before any backfill (C1: a task
+    names a registered product, and a backfill target has no tasks for 0012's
+    seed to materialize one from)."""
+    from control_plane.models import RepositoryRecord
     from control_plane.postgres import PostgresLedger
 
     name = f"backfill_{uuid4().hex[:8]}"
@@ -79,6 +83,9 @@ def destination():
     dsn = make_conninfo(DSN, dbname=name)
     migrate(dsn)
     ledger = PostgresLedger(dsn)
+    ledger.register_repository(
+        RepositoryRecord(repository=REPOSITORY, team="owners"), actor="backfill-fixture"
+    )
     try:
         yield ledger
     finally:
@@ -323,3 +330,12 @@ def test_a_blob_with_no_dev_burst_is_reported_not_dropped_silently(mvp, destinat
 def test_no_source_says_so(tmp_path, destination):
     with pytest.raises(BackfillError, match="no ledger to read"):
         plan_backfill(tmp_path, REPOSITORY, destination)
+
+
+def test_an_unregistered_destination_refuses_and_names_the_verb(mvp, destination):
+    """The registry wall (C1) reaches the one-shot too: tasks name a registered
+    product, and registering is the operator's declaration, not this verb's to
+    improvise. The refusal happens at planning, so a dry run says it as well."""
+    data_dir, _ = mvp
+    with pytest.raises(BackfillError, match="product register other/name"):
+        plan_backfill(data_dir, "other/name", destination)

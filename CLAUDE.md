@@ -121,6 +121,32 @@ lists from the dataclass, so a field with no SQLite column fails the first inser
 and CI's `test` job (which runs single-node) goes red. The fourth is not — CI only
 ever creates fresh files, so it is the one to remember.
 
+### The product registry
+
+The tenancy unit is a registered product (TO-BE §2); the verbs are C1's:
+
+```bash
+uv run control-plane product register owner/name --team bots   # defaults materialized from .env
+uv run control-plane product list
+uv run control-plane product show owner/name                   # the row + its audit trail
+uv run control-plane product pause owner/name --reason "..."   # the reason is required
+uv run control-plane product resume owner/name
+uv run control-plane product set owner/name --e2e on --test-env DISCORD_TOKEN=env:TEST_DISCORD_TOKEN
+```
+
+Three rules carry the design. **Defaults are materialized, not inherited**:
+`register` fills every policy/quota column from the platform env (validated
+through `ReviewPolicy.declared` — an incoherent declaration never becomes a row),
+and a changed platform default never retro-propagates — changing a live product is
+`product set`, audited. **Every mutation is one write**: the row change, its
+`audit` row (actor, action, target, reason) and its outbox event commit together —
+a CTE on Postgres, a transaction on SQLite. **A task names a registered product**:
+`tasks.repository` is a foreign key (the registry wall), so on the service ledger
+`run` and `backfill` need the product registered first — migration 0012 seeded
+rows for repositories that already had tasks, with placeholder policies the audit
+row tells you to `product set`. Test-env values never enter the ledger: `--test-env`
+takes `NAME=env:REF` / `NAME=file:PATH` references, resolved at D4.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).

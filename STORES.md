@@ -112,12 +112,12 @@ walls (below). Migrations are numbered SQL files applied by the
 agree — a migrated database diffed against that file must come back empty
 (`ARCHITECTURE.md` §12, "Schema authoring"). Read the block below as the *target*
 and `schema.sql` as what exists: Stage A closed most of the gap (org tables and
-walls at A4, per-burst snapshots at A5, derived task identity at A6), and what
-remains arrives with the stage that needs it — `tasks.repository`'s foreign key
-into `repositories` with the registry that can create one (C1), the claim columns
-at E1/E2, `org_state` at E3, `bursts.subscription_id` with the pool at F,
-`bursts.pinned` with the harness that pins fixtures at G4. `schema.sql`'s header
-carries that list, and it is the shorter document to keep honest.
+walls at A4, per-burst snapshots at A5, derived task identity at A6), C1 added
+`tasks.repository`'s foreign key along with the registry verbs that can create a
+`repositories` row, and what remains arrives with the stage that needs it — the
+claim columns at E1/E2, `org_state` at E3, `bursts.subscription_id` with the pool
+at F, `bursts.pinned` with the harness that pins fixtures at G4. `schema.sql`'s
+header carries that list, and it is the shorter document to keep honest.
 
 Four things here are outside what a schema diff can see, all measured rather than
 assumed: the `roles_pipeline_guard` trigger, every grant, the seeded role rows,
@@ -186,12 +186,11 @@ CREATE TABLE subscriptions (
 
 -- tasks — one GitHub issue worked to completion. The id is derived, never
 -- invented: '{owner}/{repo}#{issue_number}', so it is stable across replicas
--- and joins the GitHub world for free (A6). The foreign key below is the one
--- part not yet built: nothing before C1 can create a `repositories` row, so
--- requiring one would make every task uninsertable in the meantime.
+-- and joins the GitHub world for free (A6). The foreign key is the registry
+-- wall (C1): a task for a product nobody registered is unrepresentable.
 CREATE TABLE tasks (
     task_id         text PRIMARY KEY,          -- '{owner}/{repo}#{issue_number}'
-    repository      text NOT NULL REFERENCES repositories (repository),  -- the FK: C1
+    repository      text NOT NULL REFERENCES repositories (repository),  -- the registry wall (C1)
     issue_number    integer NOT NULL,
     status          text NOT NULL CHECK (status IN
                       ('open', 'claimed', 'working', 'awaiting_review', 'blocked', 'done')),
@@ -310,6 +309,7 @@ INSERT INTO org_state DEFAULT VALUES;
 | One running burst per task | `bursts_one_running_per_task` partial unique index |
 | A burst finalizes exactly once | CAS: `UPDATE bursts SET … WHERE burst_id = $1 AND status = 'running'` — rowcount 0 means already finalized or killed; plus the `running ⟺ finished_at IS NULL` CHECK |
 | One task per issue | `UNIQUE (repository, issue_number)`; the derived `task_id` makes collisions unrepresentable |
+| A task names a registered product | `tasks_repository_fk` (C1): the scheduler cannot invent tenants, and neither can a bug — `product register` is the only way a repository enters the ledger |
 | `violations` / `audit` / `events` are append-only | grants: `platform_app` gets `SELECT, INSERT` only — append-only is a grant, not a promise |
 | Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to the wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows, plus renames of `role` itself and deletion — a row that can be dropped and re-inserted is not frozen. CHECKs pin the `identity`/`sink` enumerations for every row, and `platform_app` holds no write grant on `roles` at all, so the runtime cannot open a trust slot |
 | No secret values at rest | nothing to enforce — no column exists for a value; refs only |
@@ -401,7 +401,11 @@ instruments (`TO-BE.md` §12).
   above. An event without its mutation, or a mutation without its event,
   cannot be observed. `violation_recorded` is the first kind (A4) — the alert
   signal `TO-BE.md` §12 documents, and the exact form of the condition
-  (`OBSERVABILITY.md`); `capacity_exhausted`, `subscription_expiring` and
+  (`OBSERVABILITY.md`). The registry verbs added four (C1): `product_registered`,
+  `product_paused`, `product_resumed`, `product_updated`, each written in the
+  same statement as the row change *and* its audit row — three tables, one
+  write — with the payload naming its audit row (`audit_id`) so a consumer can
+  read the who/why. `capacity_exhausted`, `subscription_expiring` and
   `task_blocked` arrive with the stages that raise them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
   — at-least-once, ordered, replayable; each consumer keeps its own cursor, and

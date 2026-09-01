@@ -29,13 +29,14 @@ from control_plane.models import (
     BurstKind,
     BurstRecord,
     BurstStatus,
+    RepositoryRecord,
     Role,
     TaskRecord,
     TaskStatus,
     Violation,
     task_id_for,
 )
-from control_plane.store import LEDGER_DSN_ENV, SqliteLedger, session_key
+from control_plane.store import LEDGER_DSN_ENV, RegistryError, SqliteLedger, session_key
 from psycopg.conninfo import make_conninfo
 
 DSN = os.environ.get(LEDGER_DSN_ENV, "").strip()
@@ -61,7 +62,7 @@ def pg_dsn():
 
 @pytest.fixture(params=BACKENDS)
 def ledger(request, tmp_path):
-    """A empty ledger of each backend in turn."""
+    """A ledger of each backend in turn, holding one registered product."""
     if request.param == "sqlite":
         backend = SqliteLedger(tmp_path / "ledger.sqlite3")
     else:
@@ -72,8 +73,15 @@ def ledger(request, tmp_path):
             # memory_entries references bursts, so it comes along — TRUNCATE
             # refuses to leave a referencing table out (CASCADE would take
             # whatever else appeared later, which is not the same promise).
-            conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries")
+            conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
         backend = PostgresLedger(dsn)
+    # The registry wall (C1): a task names a registered product, so the suite's
+    # product exists before any test inserts one — registered through the verb,
+    # exactly as an operator would. Every backend's event stream therefore opens
+    # with `product_registered`, which the outbox tests account for.
+    backend.register_repository(
+        RepositoryRecord(repository=REPOSITORY, team="owners"), actor="contract-fixture"
+    )
     yield backend
     backend.close()
 
@@ -445,14 +453,16 @@ def test_every_violation_announces_itself(ledger):
     transaction on SQLite, the same contract either way."""
     ledger.record_violation(Violation(task_id=tid(42), burst_id="b1", tool="Bash", reason="WALL"))
 
+    # the stream opens with the fixture's registration — the registry's own
+    # announcements share the outbox (C1)
     events = ledger.events()
-    assert [event.kind for event in events] == ["violation_recorded"]
+    assert [event.kind for event in events] == ["product_registered", "violation_recorded"]
 
-    payload = dict(events[0].payload)
+    payload = dict(events[-1].payload)
     # the id of the row it announces, so a consumer can read the rest of it
     assert isinstance(payload.pop("violation_id"), int)
     assert payload == {"task_id": tid(), "burst_id": "b1", "tool": "Bash", "reason": "WALL"}
-    assert events[0].created_at  # an ISO string, like every other timestamp here
+    assert events[-1].created_at  # an ISO string, like every other timestamp here
 
 
 def test_the_cursor_is_the_consumers_own_position(ledger):
@@ -462,7 +472,8 @@ def test_the_cursor_is_the_consumers_own_position(ledger):
         ledger.record_violation(Violation(task_id=tid(42), burst_id="b1", tool=tool, reason="WALL"))
 
     everything = ledger.events()
-    assert [event.payload["tool"] for event in everything] == ["Read", "Write", "Bash"]
+    # .get: the first event is the fixture's product_registered, which has no tool
+    assert [event.payload.get("tool") for event in everything] == [None, "Read", "Write", "Bash"]
     assert [event.id for event in everything] == sorted(event.id for event in everything)
 
     after_first = ledger.events(after_id=everything[0].id)
@@ -474,13 +485,172 @@ def test_the_cursor_is_the_consumers_own_position(ledger):
 def test_a_violation_and_its_event_are_one_write(ledger):
     """Provoked rather than asserted: a violation the database refuses must leave
     no event behind, or the platform pages someone about a row that isn't there."""
+    before = ledger.events()  # the fixture's registration, and nothing else
     with pytest.raises((sqlite3.IntegrityError, psycopg.IntegrityError)):
         ledger.record_violation(
             Violation(task_id=None, burst_id="b1", tool="Bash", reason="WALL")  # task_id is NOT NULL
         )
 
     assert ledger.violations() == []
-    assert ledger.events() == []
+    assert ledger.events() == before
+
+
+# --- the product registry (C1) ---
+
+
+PRODUCT = "owner/registered"  # the suite's own product; REPOSITORY is the fixture's
+
+
+def _product(repository=PRODUCT, **kwargs):
+    kwargs.setdefault("team", "bots")
+    return RepositoryRecord(repository=repository, **kwargs)
+
+
+def test_a_registration_is_the_row_the_operator_declared(ledger):
+    """Materialized, not inherited: every column comes back exactly as declared —
+    booleans as booleans, the refs map as a map, the share as a float."""
+    row = _product(
+        review_enabled=True,
+        review_provider="claude,copilot",
+        e2e_enabled=True,
+        test_env_refs={"DISCORD_TOKEN": "env:TEST_DISCORD_TOKEN", "GUILD_ID": "env:TEST_GUILD_ID"},
+        concurrency=2,
+        daily_bursts=7,
+        usage_share=0.5,
+    )
+    ledger.register_repository(row, actor="maksim", reason="the second product")
+
+    loaded = ledger.get_repository(PRODUCT)
+    assert loaded is not None
+    assert asdict(loaded) == asdict(row)
+    assert loaded.review_enabled is True and loaded.e2e_enabled is True
+    assert isinstance(loaded.usage_share, float)
+    assert ledger.get_repository("ghost/none") is None
+
+
+def test_products_list_in_one_order(ledger):
+    for slug in ("zzz/last", "aaa/first"):
+        ledger.register_repository(_product(repository=slug), "op")
+    assert [r.repository for r in ledger.list_repositories()] == ["aaa/first", REPOSITORY, "zzz/last"]
+
+
+def test_registering_twice_is_refused_and_leaves_no_trail(ledger):
+    ledger.register_repository(_product(), actor="op")
+    with pytest.raises(RegistryError, match="already registered"):
+        ledger.register_repository(_product(team="other"), actor="op")
+    assert len(ledger.audit_trail(PRODUCT)) == 1
+    assert ledger.get_repository(PRODUCT).team == "bots"  # the first declaration stands
+
+
+def test_the_audit_trail_is_queryable_from_the_first_verb(ledger):
+    """C1's done-when, verbatim. actor, action, target, reason — TO-BE §2."""
+    ledger.register_repository(_product(), actor="maksim", reason="onboarding")
+
+    entry = ledger.audit_trail(PRODUCT)[-1]
+    assert (entry.actor, entry.action, entry.target, entry.reason) == (
+        "maksim", "product.register", PRODUCT, "onboarding",
+    )
+    assert isinstance(entry.id, int) and entry.at  # a cursor and an ISO stamp
+
+    everything = ledger.audit_trail()  # unfiltered: the fixture's registration first
+    assert [e.target for e in everything] == [REPOSITORY, PRODUCT]
+    assert [e.id for e in everything] == sorted(e.id for e in everything)
+
+
+def test_every_registry_mutation_announces_itself(ledger):
+    """Mutation, audit row, outbox event — one write, each verb (C1). The payload
+    names its audit row, so a consumer can read the who/why without guessing."""
+    ledger.register_repository(_product(), actor="op")
+    ledger.set_repository_state(PRODUCT, "paused", "op", "rate limited")
+    ledger.set_repository_state(PRODUCT, "active", "op")
+    ledger.update_repository(PRODUCT, {"daily_bursts": 9}, "op", "quota bump")
+
+    events = [e for e in ledger.events() if e.kind.startswith("product_")]
+    assert [e.kind for e in events] == [
+        "product_registered",  # the fixture's
+        "product_registered",
+        "product_paused",
+        "product_resumed",
+        "product_updated",
+    ]
+    updated = events[-1]
+    assert updated.payload["repository"] == PRODUCT
+    assert updated.payload["actor"] == "op"
+    assert updated.payload["changed"] == ["daily_bursts"]
+    audit_ids = {entry.id for entry in ledger.audit_trail()}
+    assert all(event.payload["audit_id"] in audit_ids for event in events)
+
+
+def test_pause_and_resume_flip_state_exactly_once(ledger):
+    """The transition is a CAS: a no-op flip is refused, and a refusal leaves no
+    audit row and no event — the trail records what happened, never what didn't."""
+    ledger.register_repository(_product(), "op")
+    ledger.set_repository_state(PRODUCT, "paused", "op", "incident")
+    assert ledger.get_repository(PRODUCT).state == "paused"
+    with pytest.raises(RegistryError, match="already paused"):
+        ledger.set_repository_state(PRODUCT, "paused", "op", "again")
+
+    ledger.set_repository_state(PRODUCT, "active", "op")
+    assert ledger.get_repository(PRODUCT).state == "active"
+    with pytest.raises(RegistryError, match="already active"):
+        ledger.set_repository_state(PRODUCT, "active", "op")
+
+    assert [a.action for a in ledger.audit_trail(PRODUCT)] == [
+        "product.register", "product.pause", "product.resume",
+    ]
+
+
+def test_pausing_needs_a_reason(ledger):
+    ledger.register_repository(_product(), "op")
+    with pytest.raises(RegistryError, match="reason"):
+        ledger.set_repository_state(PRODUCT, "paused", "op", "  ")
+    assert ledger.get_repository(PRODUCT).state == "active"
+
+
+def test_a_state_the_registry_does_not_speak_is_refused(ledger):
+    ledger.register_repository(_product(), "op")
+    with pytest.raises(RegistryError, match="neither"):
+        ledger.set_repository_state(PRODUCT, "retired", "op", "sunset")
+
+
+def test_the_unregistered_cannot_be_mutated(ledger):
+    with pytest.raises(RegistryError, match="not registered"):
+        ledger.set_repository_state("ghost/none", "paused", "op", "reason")
+    with pytest.raises(RegistryError, match="not registered"):
+        ledger.update_repository("ghost/none", {"team": "x"}, "op")
+
+
+def test_set_touches_only_the_operator_columns(ledger):
+    ledger.register_repository(_product(), "op")
+    with pytest.raises(RegistryError, match="not settable"):
+        ledger.update_repository(PRODUCT, {"state": "paused"}, "op")  # pause/resume own state
+    with pytest.raises(RegistryError, match="nothing to set"):
+        ledger.update_repository(PRODUCT, {}, "op")
+    assert [a.action for a in ledger.audit_trail(PRODUCT)] == ["product.register"]
+
+
+def test_set_changes_the_row_and_bumps_updated_at(ledger):
+    ledger.register_repository(_product(), "op")
+    before = ledger.get_repository(PRODUCT)
+
+    changes = {
+        "team": "platform",
+        "review_enabled": True,
+        "review_provider": "claude",
+        "e2e_enabled": True,
+        "test_env_refs": {"TOKEN": "env:TEST_TOKEN"},
+        "concurrency": 3,
+        "daily_bursts": 11,
+        "usage_share": 0.25,
+    }
+    ledger.update_repository(PRODUCT, changes, "op", "declared for real")
+
+    after = ledger.get_repository(PRODUCT)
+    for column, value in changes.items():
+        assert getattr(after, column) == value
+    assert after.updated_at > before.updated_at
+    assert after.registered_at == before.registered_at
+    assert after.state == before.state  # set never touches it
 
 
 # --- the adapter edge ---

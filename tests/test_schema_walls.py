@@ -1,8 +1,8 @@
 """The walls, provoked (A4, #15).
 
-STORES.md's "Walls in the schema" table names six guarantees the database is
+STORES.md's "Walls in the schema" table names the guarantees the database is
 supposed to enforce. This file attacks each of them and requires an error. That
-is not belt-and-braces: two of the six — the `roles_pipeline_guard` trigger and
+is not belt-and-braces: two of them — the `roles_pipeline_guard` trigger and
 the append-only grants — are invisible to `atlas schema diff`, which reads
 neither triggers nor privileges, so these tests are the *only* thing standing
 behind them. A migration that dropped the trigger would pass CI's drift check.
@@ -68,10 +68,21 @@ def walls_dsn():
 
 @pytest.fixture
 def db(walls_dsn):
-    """An autocommit connection over an empty ledger, seeded roles intact."""
+    """An autocommit connection over an empty ledger, seeded roles intact.
+
+    The two products the suite's tasks name are re-seeded raw: the registry wall
+    (C1) makes a task row need them, and raw INSERTs — not the verb — keep the
+    audit/events tables clean for the tests that provoke their grants.
+    """
     with psycopg.connect(walls_dsn, autocommit=True) as conn:
-        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries")
+        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
         conn.execute("DELETE FROM roles WHERE kind = 'custom'")  # a previous test's leftovers
+        conn.execute(
+            "INSERT INTO repositories (repository, team, state, review_enabled, review_provider, "
+            "e2e_enabled, test_env_refs, concurrency, daily_bursts, usage_share) VALUES "
+            "('owner/product', 'owner', 'active', false, '', false, '{}', 1, 20, 1.0), "
+            "('owner/other', 'owner', 'active', false, '', false, '{}', 1, 20, 1.0)"
+        )
         yield conn
 
 
@@ -149,6 +160,18 @@ def test_a_task_always_names_its_issue(db):
             db,
             "INSERT INTO tasks (task_id, repository, status) "
             "VALUES ('owner/product#8', 'owner/product', 'open')",
+        )
+
+
+def test_a_task_names_a_registered_product(db):
+    """The registry wall (C1): `tasks.repository` is a foreign key into
+    `repositories`, so a task for a product nobody registered is unrepresentable
+    — the scheduler cannot invent tenants, and neither can a bug."""
+    with pytest.raises(psycopg.errors.ForeignKeyViolation, match="tasks_repository_fk"):
+        attempt(
+            db,
+            "INSERT INTO tasks (task_id, repository, issue_number, status) "
+            "VALUES ('ghost/none#1', 'ghost/none', 1, 'open')",
         )
 
 
@@ -449,9 +472,10 @@ def test_the_evidence_tables_are_append_only(db, table, verb):
         attempt(db, statement, role="platform_app")
 
 
-@pytest.mark.parametrize("table", ["tasks", "bursts"])
+@pytest.mark.parametrize("table", ["tasks", "bursts", "repositories"])
 def test_the_runtime_cannot_delete_its_own_state(db, table):
-    """No DELETE grant anywhere: retention is platform_admin's, on a horizon."""
+    """No DELETE grant anywhere: retention is platform_admin's, on a horizon —
+    and unregistering a product is not a verb (C1 granted INSERT/UPDATE only)."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, f"DELETE FROM {table}", role="platform_app")
 
@@ -466,12 +490,6 @@ def test_the_runtime_cannot_delete_its_own_state(db, table):
             "('shadow', 'pipeline', '', '[]', 'claude-sonnet-5', 1.0, 10, 'rw', 'none', 'event')",
         ),
         (
-            "a product",
-            "INSERT INTO repositories (repository, team, state, review_enabled, review_provider, "
-            "e2e_enabled, test_env_refs, concurrency, daily_bursts, usage_share) "
-            "VALUES ('o/r', 't', 'active', true, 'copilot', false, '{}', 1, 10, 1.0)",
-        ),
-        (
             "a subscription",
             "INSERT INTO subscriptions (subscription_id, member, secret_ref, cap_tokens, "
             "expires_at, status) VALUES ('s1', 'm', 'env:TOKEN', 100, now(), 'active')",
@@ -479,11 +497,39 @@ def test_the_runtime_cannot_delete_its_own_state(db, table):
     ],
 )
 def test_the_runtime_cannot_register_what_operators_register(db, what, statement):
-    """Registration, role composition and the subscription pool are operator
-    verbs. Each grows the app role a grant in the stage that ships it (C1, D5,
-    F1) — until then the runtime reads them and nothing more."""
+    """Role composition and the subscription pool are operator verbs. Each grows
+    the app role a grant in the stage that ships it (D5, F1) — until then the
+    runtime reads them and nothing more. Products left this list at C1: the
+    registry verbs run through the service, so `repositories` is now written
+    under the runtime grants (see test_the_registry_verbs_run_under_them)."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, statement, role="platform_app")
+
+
+def test_the_registry_verbs_run_under_the_runtime_grants(db, walls_dsn):
+    """The C1 grant, exercised by the real methods as the real role: each verb is
+    one CTE writing repositories + audit + events and returning through
+    pg_notify, so like the outbox statement it is checked per table *and* per
+    returned column — the statement most likely to work as platform_admin in a
+    test and fail as platform_app in production."""
+    from control_plane.models import RepositoryRecord
+    from control_plane.postgres import PostgresLedger
+
+    ledger = PostgresLedger(walls_dsn)
+    try:
+        ledger._conn.execute("SET ROLE platform_app")  # for the rest of the session
+        ledger.register_repository(
+            RepositoryRecord(repository="newly/registered", team="bots"), actor="op"
+        )
+        ledger.set_repository_state("newly/registered", "paused", "op", "rehearsal")
+        ledger.update_repository("newly/registered", {"concurrency": 2}, "op")
+
+        assert [a.action for a in ledger.audit_trail("newly/registered")] == [
+            "product.register", "product.pause", "product.set",
+        ]
+        assert ledger.get_repository("newly/registered").concurrency == 2
+    finally:
+        ledger.close()
 
 
 def test_the_runtime_can_do_its_job(db):
@@ -512,6 +558,15 @@ def test_the_runtime_can_do_its_job(db):
         role="platform_app",
     )
     attempt(db, "INSERT INTO audit (actor, action, target) VALUES ('op','stop','owner/product#1')", role="platform_app")
+    # C1: the registry verbs write repositories under the runtime grants
+    attempt(
+        db,
+        "INSERT INTO repositories (repository, team, state, review_enabled, review_provider, "
+        "e2e_enabled, test_env_refs, concurrency, daily_bursts, usage_share) "
+        "VALUES ('owner/second', 'bots', 'active', false, '', false, '{}', 1, 20, 1.0)",
+        role="platform_app",
+    )
+    attempt(db, "UPDATE repositories SET team = 'platform' WHERE repository = 'owner/second'", role="platform_app")
     for readable in ("roles", "repositories", "subscriptions", "memory_entries", "events"):
         attempt(db, f"SELECT count(*) FROM {readable}", role="platform_app")
 

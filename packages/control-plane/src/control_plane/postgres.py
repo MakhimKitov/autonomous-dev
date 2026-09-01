@@ -41,17 +41,23 @@ from typing import Any
 import psycopg
 import structlog
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 
 from control_plane.models import (
     BURST_FINALIZE_COLUMNS,
     EVENT_CHANNEL,
+    EVENT_PRODUCT_REGISTERED,
+    EVENT_PRODUCT_UPDATED,
     EVENT_VIOLATION_RECORDED,
+    AuditRecord,
     BurstRecord,
     Event,
+    RepositoryRecord,
     TaskRecord,
     Violation,
     utc_now,
 )
+from control_plane.store import RegistryError, _check_settable, _registry_transition
 
 log = structlog.get_logger()
 
@@ -62,9 +68,12 @@ _TASK_TIMESTAMPS = ("last_burst_at", "created_at", "updated_at")
 _BURST_TIMESTAMPS = ("started_at", "finished_at")
 _VIOLATION_TIMESTAMPS = ("at",)
 _EVENT_TIMESTAMPS = ("created_at",)
+_REPOSITORY_TIMESTAMPS = ("last_burst_at", "claimed_until", "registered_at", "updated_at")
+_AUDIT_TIMESTAMPS = ("at",)
 
 # numeric → float on load; see the module docstring.
 _BURST_NUMERICS = ("cost_usd",)
+_REPOSITORY_NUMERICS = ("usage_share",)
 
 # What finish_burst writes: BURST_FINALIZE_COLUMNS in models.py, shared with the
 # SQLite backend so the two CAS statements cannot drift apart.
@@ -133,6 +142,124 @@ class PostgresLedger:
                 pass
             self._conn = self._connect()
             return self._conn.execute(sql, params)
+
+    # --- the product registry (C1) ---
+    #
+    # Every mutation is one data-modifying CTE writing three tables: the change,
+    # its audit row (actor, action, target, reason — TO-BE §2, "The audit log
+    # starts here"), and the outbox event announcing it, with pg_notify riding
+    # along as the wake channel exactly as record_violation's does. One
+    # statement, so a mutation cannot exist without its trail — the same
+    # guarantee the SQLite backend gives with one transaction.
+
+    def register_repository(self, repo: RepositoryRecord, actor: str, reason: str = "") -> None:
+        data = _bind(repo, _REPOSITORY_TIMESTAMPS)
+        data["test_env_refs"] = Json(data["test_env_refs"])
+        columns = ", ".join(data)
+        placeholders = ", ".join(f"%({column})s" for column in data)
+        try:
+            self._execute(
+                f"WITH registered AS ("
+                f"    INSERT INTO repositories ({columns}) VALUES ({placeholders})"
+                f"    RETURNING repository"
+                f"), recorded AS ("
+                f"    INSERT INTO audit (actor, action, target, reason)"
+                f"    SELECT %(_actor)s, 'product.register', repository, %(_reason)s FROM registered"
+                f"    RETURNING id, target"
+                f"), announced AS ("
+                f"    INSERT INTO events (kind, payload)"
+                f"    SELECT %(_kind)s, jsonb_build_object("
+                f"        'audit_id', id, 'repository', target, 'actor', %(_actor)s)"
+                f"    FROM recorded RETURNING id"
+                f") SELECT pg_notify(%(_channel)s, id::text) FROM announced",
+                {**data, "_actor": actor, "_reason": reason,
+                 "_kind": EVENT_PRODUCT_REGISTERED, "_channel": EVENT_CHANNEL},
+            )
+        except psycopg.errors.UniqueViolation as exc:
+            raise RegistryError(f"{repo.repository} is already registered") from exc
+
+    def get_repository(self, repository: str) -> RepositoryRecord | None:
+        row = self._execute(
+            "SELECT * FROM repositories WHERE repository = %s", (repository,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _load(row, RepositoryRecord, _REPOSITORY_TIMESTAMPS, _REPOSITORY_NUMERICS)
+
+    def list_repositories(self) -> list[RepositoryRecord]:
+        rows = self._execute("SELECT * FROM repositories ORDER BY repository").fetchall()
+        return [
+            _load(row, RepositoryRecord, _REPOSITORY_TIMESTAMPS, _REPOSITORY_NUMERICS)
+            for row in rows
+        ]
+
+    def set_repository_state(self, repository: str, state: str, actor: str, reason: str = "") -> None:
+        action, kind = _registry_transition(state, reason)
+        cursor = self._execute(
+            # updated_at binds from Python, not now(): utc_now() is the one clock
+            # every ledger write uses, and mixing in the server's would let a
+            # sub-millisecond skew order a product's history backwards.
+            "WITH changed AS ("
+            "    UPDATE repositories SET state = %(state)s, updated_at = %(updated_at)s"
+            "    WHERE repository = %(repository)s AND state <> %(state)s"
+            "    RETURNING repository"
+            "), recorded AS ("
+            "    INSERT INTO audit (actor, action, target, reason)"
+            "    SELECT %(actor)s, %(action)s, repository, %(reason)s FROM changed"
+            "    RETURNING id, target"
+            "), announced AS ("
+            "    INSERT INTO events (kind, payload)"
+            "    SELECT %(kind)s, jsonb_build_object("
+            "        'audit_id', id, 'repository', target, 'actor', %(actor)s)"
+            "    FROM recorded RETURNING id"
+            ") SELECT pg_notify(%(channel)s, id::text) FROM announced",
+            {"repository": repository, "state": state, "actor": actor, "action": action,
+             "reason": reason, "kind": kind, "channel": EVENT_CHANNEL,
+             "updated_at": _to_datetime(utc_now())},
+        )
+        if not cursor.fetchall():  # the CAS refused — nothing was written; say why
+            existing = self.get_repository(repository)
+            if existing is None:
+                raise RegistryError(f"{repository} is not registered")
+            raise RegistryError(f"{repository} is already {state}")
+
+    def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None:
+        _check_settable(changes)
+        values = dict(changes)
+        if "test_env_refs" in values:
+            values["test_env_refs"] = Json(values["test_env_refs"])
+        # column names come from PRODUCT_SET_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = %({column})s" for column in values)
+        cursor = self._execute(
+            f"WITH changed AS ("
+            f"    UPDATE repositories SET {assignments}, updated_at = %(_updated_at)s"
+            f"    WHERE repository = %(_repository)s"
+            f"    RETURNING repository"
+            f"), recorded AS ("
+            f"    INSERT INTO audit (actor, action, target, reason)"
+            f"    SELECT %(_actor)s, 'product.set', repository, %(_reason)s FROM changed"
+            f"    RETURNING id, target"
+            f"), announced AS ("
+            f"    INSERT INTO events (kind, payload)"
+            f"    SELECT %(_kind)s, jsonb_build_object("
+            f"        'audit_id', id, 'repository', target, 'actor', %(_actor)s,"
+            f"        'changed', %(_changed)s)"
+            f"    FROM recorded RETURNING id"
+            f") SELECT pg_notify(%(_channel)s, id::text) FROM announced",
+            {**values, "_repository": repository, "_actor": actor, "_reason": reason,
+             "_kind": EVENT_PRODUCT_UPDATED, "_changed": Json(sorted(changes)),
+             "_channel": EVENT_CHANNEL, "_updated_at": _to_datetime(utc_now())},
+        )
+        if not cursor.fetchall():
+            raise RegistryError(f"{repository} is not registered")
+
+    def audit_trail(self, target: str | None = None) -> list[AuditRecord]:
+        select = "SELECT id, actor, action, target, reason, at FROM audit"
+        if target is None:
+            rows = self._execute(f"{select} ORDER BY id").fetchall()
+        else:
+            rows = self._execute(f"{select} WHERE target = %s ORDER BY id", (target,)).fetchall()
+        return [_load(row, AuditRecord, _AUDIT_TIMESTAMPS) for row in rows]
 
     # --- tasks ---
 
