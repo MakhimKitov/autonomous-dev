@@ -202,12 +202,14 @@ class PostgresLedger:
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
 
     def latest_archived_burst(self, task_id: str) -> BurstRecord | None:
-        """The leaf of this task's session tree — the newest burst that archived a
-        snapshot. Served by `bursts_session_leaf`, the partial index on exactly
-        this predicate."""
+        """The leaf of this task's session tree — the newest *dev* burst that
+        archived a snapshot. Served by `bursts_session_leaf`, the partial index
+        on exactly this predicate (0011 narrowed both to `role = 'dev'`): a
+        tester's archived snapshot is evidence, never what the next dev burst
+        resumes (B5)."""
         row = self._execute(
             "SELECT * FROM bursts WHERE task_id = %s AND session_key IS NOT NULL "
-            "ORDER BY started_at DESC, burst_id DESC LIMIT 1",
+            "AND role = 'dev' ORDER BY started_at DESC, burst_id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
