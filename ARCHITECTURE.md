@@ -240,6 +240,14 @@ the ephemeral container.
 > issue in the product repo. All probes read through the org App's own
 > installation token, so "the App can read the repo" and "the manifest is
 > fetchable" are one fact.
+>
+> **As built (C3):** a registered product's policies reach the scheduler from
+> its row — `ReviewPolicy.from_product` / `E2EPolicy.from_product`, the same
+> constructor registration preflight (C2) uses, so registration and startup can
+> never disagree about honorability. The row is the entire truth about the
+> declaration (toggle + selector); the env answers only machine questions —
+> credentials and model overrides. `from_env` stays as dev mode for
+> unregistered repos, until C4 makes the scheduler registry-driven.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

@@ -161,6 +161,17 @@ preflight against the live repo (exit 1 = drift: the row is no longer executable
 `--lint-issue` on `register`/`check` files the gaps as a `human` issue in the
 product repo. Quota/team changes and pause/resume never probe GitHub.
 
+**Row-sourced policy (C3)**: at scheduler startup, a registered product's review
+and e2e policies come from its row (`ReviewPolicy.from_product` /
+`E2EPolicy.from_product`) — the row is the entire truth about the declaration, and
+a machine-level `REVIEW=off` never silently degrades a registered product. The env
+keeps answering only what stays a machine question: credentials (the honor-check
+fires from the row exactly as it did from env — registration preflight and startup
+share the constructor) and the `REVIEWER_MODEL`/`TESTER_MODEL` overrides (the row
+has no model column on purpose). `from_env` remains dev mode: an unregistered repo
+on the SQLite ledger runs env-governed until C4 makes the scheduler
+registry-driven.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).

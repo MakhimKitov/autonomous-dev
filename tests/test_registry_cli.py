@@ -13,7 +13,9 @@ C2 wiring: the gate runs before the write, the lint lands in the audit row, and
 import pytest
 from control_plane import cli
 from control_plane.github_api import GitHubApiError
+from control_plane.models import RepositoryRecord
 from control_plane.preflight import PreflightError
+from control_plane.review import ReviewPolicyError
 from control_plane.store import SqliteLedger
 
 
@@ -426,3 +428,43 @@ def test_preflight_needs_the_app(monkeypatch):
     reads the repo — registration refuses rather than guesses."""
     with pytest.raises(PreflightError, match="GITHUB_APP_ID"):
         cli._preflight_api("owner/product")
+
+
+# --- C3: the scheduler's policies come from the row ---
+
+
+def _registered_row(**overrides):
+    defaults = dict(
+        repository="owner/product",
+        team="bots",
+        review_enabled=True,
+        review_provider="claude",
+        e2e_enabled=True,
+    )
+    defaults.update(overrides)
+    return RepositoryRecord(**defaults)
+
+
+def test_scheduler_policies_come_from_the_row(monkeypatch):
+    """C3 done-when: the startup honor-check fires from the row exactly as from
+    env — and the row, not the machine's REVIEW/E2E, is the declaration."""
+    declare_reviewer_creds(monkeypatch)
+    monkeypatch.setenv("REVIEW", "off")
+    monkeypatch.setenv("E2E", "off")
+    review, testing = cli._scheduler_policies(_registered_row())
+    assert review.enabled and review.claude and testing.enabled
+
+
+def test_row_honor_check_fires_at_startup():
+    # hermetic env: the row declares claude, this machine holds no reviewer App
+    with pytest.raises(ReviewPolicyError, match="reviewer App is not configured"):
+        cli._scheduler_policies(_registered_row())
+
+
+def test_the_unregistered_still_run_env_governed(monkeypatch):
+    """Dev mode: no row, `from_env` governs — until C4 turns the scheduler
+    registry-driven."""
+    review, testing = cli._scheduler_policies(None)
+    assert not review.enabled and not testing.enabled
+    monkeypatch.setenv("E2E", "on")
+    assert cli._scheduler_policies(None)[1].enabled

@@ -2,6 +2,7 @@
 
 import pytest
 from control_plane.github_api import COPILOT_REVIEWER
+from control_plane.models import RepositoryRecord
 from control_plane.review import (
     FindingsError,
     ReviewPolicy,
@@ -85,6 +86,68 @@ def test_selector_is_trimmed_and_case_insensitive():
         {"REVIEW": "on", "REVIEW_PROVIDERS": " Copilot , ", "GITHUB_COPILOT_REVIEW_TOKEN": "ghp_x"}
     )
     assert policy.providers == ("copilot",)
+
+
+# --- from_product (C3): the row declares, the env answers honorability ---
+
+REVIEWER_CREDS = {
+    "REVIEWER_GITHUB_APP_ID": "42",
+    "REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH": "/keys/reviewer.pem",
+}
+
+
+def _row(**overrides):
+    defaults = dict(repository="fermata/discord-bot", team="platform")
+    defaults.update(overrides)
+    return RepositoryRecord(**defaults)
+
+
+def test_row_policy_equals_env_policy():
+    # done-when (C3): honor-checks fire from row-sourced policy exactly as from env
+    row = _row(review_enabled=True, review_provider="claude")
+    from_row = ReviewPolicy.from_product(row, dict(REVIEWER_CREDS))
+    from_env = ReviewPolicy.from_env(
+        dict(REVIEWER_CREDS, REVIEW="on", REVIEW_PROVIDERS="claude")
+    )
+    assert from_row == from_env
+
+
+def test_row_overrides_the_machine_toggle():
+    # the row is the entire truth about the declaration — a machine-level
+    # REVIEW=off never silently degrades a registered product's review
+    row = _row(review_enabled=True, review_provider="claude")
+    env = dict(REVIEWER_CREDS, REVIEW="off", REVIEW_PROVIDERS="copilot")
+    policy = ReviewPolicy.from_product(row, env)
+    assert policy.enabled and policy.providers == ("claude",)
+
+
+def test_row_off_ignores_the_machine_selector():
+    env = {"REVIEW": "on", "REVIEW_PROVIDERS": "copilot", "GITHUB_COPILOT_REVIEW_TOKEN": "ghp_x"}
+    assert not ReviewPolicy.from_product(_row(), env).enabled
+
+
+def test_row_claude_without_the_reviewer_app_refuses():
+    with pytest.raises(ReviewPolicyError, match="REVIEWER_GITHUB_APP_ID"):
+        ReviewPolicy.from_product(_row(review_enabled=True, review_provider="claude"), {})
+
+
+def test_row_copilot_without_the_token_refuses():
+    with pytest.raises(ReviewPolicyError, match="GITHUB_COPILOT_REVIEW_TOKEN"):
+        ReviewPolicy.from_product(_row(review_enabled=True, review_provider="copilot"), {})
+
+
+def test_reviewer_model_stays_a_machine_answer():
+    # the row has no model column on purpose: which model reviews is a
+    # deployment fact, not product policy
+    row = _row(review_enabled=True, review_provider="claude")
+    policy = ReviewPolicy.from_product(row, dict(REVIEWER_CREDS, REVIEWER_MODEL="claude-opus-5"))
+    assert policy.reviewer_model == "claude-opus-5"
+
+
+def test_from_product_never_mutates_the_environ():
+    env = dict(REVIEWER_CREDS, REVIEW="off")
+    ReviewPolicy.from_product(_row(review_enabled=True, review_provider="claude"), env)
+    assert env["REVIEW"] == "off" and "REVIEW_PROVIDERS" not in env
 
 
 # --- the reviewer burst's findings contract ---

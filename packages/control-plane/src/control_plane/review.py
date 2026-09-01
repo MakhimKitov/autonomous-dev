@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV
+from control_plane.models import RepositoryRecord
 
 REVIEW_ENV = "REVIEW"
 PROVIDERS_ENV = "REVIEW_PROVIDERS"
@@ -38,10 +39,11 @@ class ReviewPolicy:
         """The toggle and selector, validated as a *declaration*: recognized and
         implemented providers, and `on` names at least one. Credential checks are
         deliberately not here — whether this machine can honor the declaration is
-        a deployment question, asked by `from_env` at scheduler startup and, at
-        C2, by registration preflight. The registry verbs (C1) materialize rows
-        through this half, so a laptop without the reviewer App can still
-        register a product that declares one."""
+        a deployment question, asked at scheduler startup (`from_env`, or
+        `from_product` for a registered row — C3) and by registration preflight
+        (C2). The registry verbs (C1) materialize rows through this half, so a
+        laptop without the reviewer App can still register a product that
+        declares one."""
         env = dict(os.environ) if environ is None else environ
         toggle = env.get(REVIEW_ENV, "").strip().lower() or "off"
         if toggle not in ("on", "off"):
@@ -88,6 +90,26 @@ class ReviewPolicy:
                 "author can't review it, so findings post as a second App)"
             )
         return policy
+
+    @classmethod
+    def from_product(
+        cls, row: RepositoryRecord, environ: dict[str, str] | None = None
+    ) -> ReviewPolicy:
+        """The registered product's policy, honor-checked on this machine (C3).
+
+        The row is the entire truth about *what* was declared — its toggle and
+        selector override whatever ``REVIEW``/``REVIEW_PROVIDERS`` say, so a
+        machine-level `off` never silently degrades a registered product. The
+        env still answers *whether this deployment can honor it*: credentials
+        and ``REVIEWER_MODEL`` are deployment facts, not product policy (the
+        row has no model column on purpose). Delegates to `from_env` on a probe
+        env, so both sources fire the exact same honor-checks — registration
+        preflight (C2) and scheduler startup share this constructor.
+        """
+        probe = dict(os.environ) if environ is None else dict(environ)
+        probe[REVIEW_ENV] = "on" if row.review_enabled else "off"
+        probe[PROVIDERS_ENV] = row.review_provider
+        return cls.from_env(probe)
 
     @property
     def copilot(self) -> bool:

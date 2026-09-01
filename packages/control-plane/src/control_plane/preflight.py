@@ -25,7 +25,7 @@ from typing import Protocol
 from control_plane.github_api import GitHubApiError
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import RepositoryRecord
-from control_plane.review import PROVIDERS_ENV, REVIEW_ENV, ReviewPolicy, ReviewPolicyError
+from control_plane.review import ReviewPolicy, ReviewPolicyError
 from control_plane.testing import MANIFEST_FILENAME, ManifestError, TestManifest, parse_manifest
 
 # the commit vocabulary is shared platform-wide (GITHUB-INTERFACE.md); any of
@@ -76,13 +76,12 @@ def run_preflight(
             f"`control-plane github-check` shows the installation ({exc})"
         ) from exc
 
-    # 2. Declared review providers must have their credentials — from_env's
-    #    startup question, asked where the declaration is made instead.
-    probe = dict(env)
-    probe[REVIEW_ENV] = "on" if row.review_enabled else "off"
-    probe[PROVIDERS_ENV] = row.review_provider
+    # 2. Declared review providers must have their credentials — the startup
+    #    question, asked where the declaration is made. The same constructor
+    #    the scheduler uses on a registered row (C3), so registration and
+    #    startup can never disagree about honorability.
     try:
-        ReviewPolicy.from_env(probe)
+        ReviewPolicy.from_product(row, env)
     except ReviewPolicyError as exc:
         raise PreflightError(str(exc)) from exc
 
