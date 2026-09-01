@@ -77,11 +77,22 @@ The reviewer's envelope, reused — with the execution posture inverted:
   session** — no shared context with the dev or reviewer.
 - **No GitHub credential.** The report returns through the harvest as the final
   message: `{"verdict": str, "scenarios": [{"name", "result": "pass|fail",
-  "evidence"}], "defects": [{"summary", "repro", "preexisting": bool}],
-  "issues": [{"title", "body"}]}`. The control plane posts it. The `issues` are
-  the complete symptom reports the tester **authors** for pre-existing defects —
-  the platform relays them verbatim: authorship stays with the agent, the
-  credential stays outside the box.
+  "tool_use_id", "evidence"}], "defects": [{"summary", "repro", "preexisting":
+  bool}], "issues": [{"title", "body"}]}`. The control plane posts it. The
+  `issues` are the complete symptom reports the tester **authors** for
+  pre-existing defects — the platform relays them verbatim: authorship stays
+  with the agent, the credential stays outside the box.
+- **Evidence is a citation, not prose** (B6). Each scenario's `tool_use_id` names
+  one tool call from the burst's own run; on harvest the control plane resolves it
+  against the archived transcript (B5) and requires the id to exist with a recorded,
+  non-error result. A citation that doesn't resolve fails the report exactly like
+  JSON that doesn't parse — the same retry rail, then "machine test could not run",
+  never a blocked task. The posted table carries a platform-filled *cited call*
+  column (the call and what it ran) beside the tester's own words, so a reader sees
+  whether the prose matches the record. No grading of prose, no second model — a
+  citation resolves or it doesn't. The tester lost exactly one ability: asserting
+  something it did not do. Claims that are already someone else's artifact stay
+  theirs — the unit suite's status is CI's check run, never a tester scenario.
 - Clone mounted at the PR head, read-only; the tester copies to scratch and boots
   there. (A product too heavy for copy-boot gets a platform-prepared throwaway copy —
   decide when such a product exists.)

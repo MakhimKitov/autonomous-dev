@@ -302,9 +302,14 @@ Independence is engineered, not assumed:
 > query filters on `role = 'dev'`, so no non-dev snapshot can become what a dev
 > burst resumes. The envelope has the tester boot the product with stdout
 > captured to `product.log` on the session volume, so the archived artifact
-> holds what the product printed, not only what the tester typed. B6 builds on
-> this: report evidence becomes citations the control plane resolves against
-> the archived transcript.
+> holds what the product printed, not only what the tester typed. On top of it
+> (B6), a scenario's evidence is a **citation, not prose**: each cites a
+> `tool_use_id` from its own run, the control plane resolves it against the
+> transcript (exists, has a recorded non-error result), an unresolvable
+> citation fails the report the way malformed JSON does, and the posted table
+> carries a platform-extracted *cited call* column beside the tester's words.
+> The tester cannot assert what it did not do; judging whether the cited call
+> *proves* the claim stays with the human reader, record in hand.
 
 ## 7. The monitor
 
