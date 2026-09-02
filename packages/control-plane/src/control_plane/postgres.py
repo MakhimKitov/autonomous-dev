@@ -283,14 +283,24 @@ class PostgresLedger:
         row = self._execute("SELECT * FROM tasks WHERE task_id = %s", (task_id,)).fetchone()
         return None if row is None else _load(row, TaskRecord, _TASK_TIMESTAMPS)
 
-    def tasks_by_status(self, *statuses: str) -> list[TaskRecord]:
+    def tasks_by_status(
+        self, *statuses: str, repository: str | None = None
+    ) -> list[TaskRecord]:
         # ORDER BY created_at alone is not a total order, and an unbroken tie is
         # resolved by the plan — index order under one, heap order under another.
         # `task_id` makes the answer the query's rather than the planner's (A7).
-        rows = self._execute(
-            "SELECT * FROM tasks WHERE status = ANY(%s) ORDER BY created_at, task_id",
-            (list(statuses),),
-        ).fetchall()
+        # The repository scope is C4: a product's scheduler sees only its own.
+        if repository is None:
+            rows = self._execute(
+                "SELECT * FROM tasks WHERE status = ANY(%s) ORDER BY created_at, task_id",
+                (list(statuses),),
+            ).fetchall()
+        else:
+            rows = self._execute(
+                "SELECT * FROM tasks WHERE status = ANY(%s) AND repository = %s "
+                "ORDER BY created_at, task_id",
+                (list(statuses), repository),
+            ).fetchall()
         return [_load(row, TaskRecord, _TASK_TIMESTAMPS) for row in rows]
 
     # --- bursts ---
@@ -341,17 +351,45 @@ class PostgresLedger:
         ).fetchone()
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
 
-    def running_bursts(self) -> list[BurstRecord]:
-        rows = self._execute(
-            "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
-        ).fetchall()
+    def running_bursts(self, repository: str | None = None) -> list[BurstRecord]:
+        # a burst carries no repository column — the task it belongs to does (C4)
+        if repository is None:
+            rows = self._execute(
+                "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
+            ).fetchall()
+        else:
+            rows = self._execute(
+                "SELECT b.* FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
+                "WHERE b.status = 'running' AND t.repository = %s "
+                "ORDER BY b.started_at, b.burst_id",
+                (repository,),
+            ).fetchall()
         return [_load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS) for row in rows]
 
-    def bursts_started_since(self, since_iso: str) -> int:
-        row = self._execute(
-            "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= %s", (_to_datetime(since_iso),)
-        ).fetchone()
+    def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int:
+        if repository is None:
+            row = self._execute(
+                "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= %s",
+                (_to_datetime(since_iso),),
+            ).fetchone()
+        else:
+            row = self._execute(
+                "SELECT COUNT(*) AS n FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
+                "WHERE b.started_at >= %s AND t.repository = %s",
+                (_to_datetime(since_iso), repository),
+            ).fetchone()
         return int(row["n"])
+
+    def touch_repository_burst(self, repository: str, at: str) -> None:
+        """Stamp the least-recently-served cursor (C4) — the fleet marks the
+        product whose turn it just took. Operational state, not an operator
+        mutation: no audit row, no event, `updated_at` untouched."""
+        cursor = self._execute(
+            "UPDATE repositories SET last_burst_at = %s WHERE repository = %s",
+            (_to_datetime(at), repository),
+        )
+        if cursor.rowcount == 0:
+            log.warning("touch of an unregistered product ignored", repo=repository)
 
     # --- violations, and the outbox row each one announces ---
 

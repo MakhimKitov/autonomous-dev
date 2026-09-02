@@ -2,7 +2,8 @@
 
 ``burst`` — the M0/M1 manual driver: one burst, by hand. ``run`` — the M2
 scheduler: the same choreography, driven unattended by the reconciler loop
-(SCHEDULER.md). ``stop`` — the kill switch. ``github-check`` — App preflight.
+(SCHEDULER.md); without ``--github`` it serves every active product in the
+registry through one serial loop (C4). ``stop`` — the kill switch. ``github-check`` — App preflight.
 ``migrate`` — the Postgres ledger's schema, from numbered SQL (STORES.md).
 ``backfill`` — the one-shot that carries MVP history into the service stores (A6).
 ``product`` — the registry verbs (C1) behind registration preflight, with
@@ -50,7 +51,7 @@ from control_plane.review import (
     ReviewPolicyError,
 )
 from control_plane.runner import DEFAULT_IMAGE
-from control_plane.scheduler import STOP_FILENAME, Rails, Scheduler
+from control_plane.scheduler import STOP_FILENAME, Fleet, Rails, Scheduler
 from control_plane.store import (
     LEDGER_DSN_ENV,
     LEDGER_FILENAME,
@@ -91,14 +92,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="model for this burst (default: $DEV_AGENT_MODEL, else the pinned platform default)",
     )
 
-    run = sub.add_parser("run", help="the M2 scheduler: reconcile GitHub ↔ ledger, spawn bursts")
+    run = sub.add_parser(
+        "run",
+        help="the M2 scheduler: reconcile GitHub ↔ ledger, spawn bursts — "
+        "every active registered product (C4), or one repo via --github",
+    )
     run.add_argument(
         "--repo",
         type=Path,
         default=None,
         help="operator clone — used only to derive owner/name; bursts mount the platform clone",
     )
-    run.add_argument("--github", default=None, help="owner/name (default: parsed from --repo's origin)")
+    run.add_argument(
+        "--github",
+        default=None,
+        help="serve just this owner/name (env-governed dev mode when unregistered); "
+        "omit to serve the registry's active products",
+    )
     run.add_argument("--owner", default=None, help="the human owner's login (default: the repo owner)")
     run.add_argument("--data-dir", type=Path, default=Path("data"))
     run.add_argument("--image", default=DEFAULT_IMAGE)
@@ -638,13 +648,158 @@ def _scheduler_policies(
     return ReviewPolicy.from_product(row, environ), E2EPolicy.from_product(row, environ)
 
 
+def _serve(engine, interval: int, once: bool) -> int:
+    """The loop both modes share: tick, honor STOP, kill the live burst on a
+    signal. ``engine`` is a Scheduler (one product) or a Fleet (C4)."""
+
+    def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
+        engine.stop_path.touch()
+        if engine.current_burst_id:
+            subprocess.run(
+                ["docker", "kill", f"burst-{engine.current_burst_id}"],
+                check=False,
+                capture_output=True,
+            )
+        log.info("stop requested — exiting after this tick")
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    while True:
+        try:
+            engine.tick()
+        except (GitHubApiError, GitHubAuthError) as exc:
+            log.warning("github error — retrying next tick", error=str(exc))
+        if engine.stop_requested():
+            log.info("STOP flag present — exiting")
+            break
+        if once:
+            break
+        time.sleep(interval)
+    trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
+    return 0
+
+
+def _run_fleet(
+    args: argparse.Namespace,
+    stores: PlatformStores,
+    token_cache: InstallationTokenCache,
+    copilot_token: str | None,
+    rails: Rails,
+    interval: int,
+    clones_root: Path,
+) -> int:
+    """C4: serve every active product in the registry through one serial loop.
+
+    Startup refuses if any active declaration can't be honored on this machine
+    (the C3 honor-check, per row) — after that the Fleet re-reads the registry
+    every tick, so register/pause/set take effect without a restart. One shared
+    token cache: the org App has one installation here; per-org installations
+    arrive with the TO-BE's org-wide Apps.
+    """
+    rows = [row for row in stores.ledger.list_repositories() if row.state == ProductState.ACTIVE]
+    if not rows:
+        print(
+            "error: no active products registered — `control-plane product register` one, "
+            "or pass --github owner/name for the env-governed dev mode",
+            file=sys.stderr,
+        )
+        return 2
+    policies: dict[str, tuple[ReviewPolicy, E2EPolicy]] = {}
+    for row in rows:
+        try:
+            policies[row.repository] = _scheduler_policies(row)
+        except (ReviewPolicyError, E2EPolicyError) as exc:
+            print(f"error: {row.repository}: {exc}", file=sys.stderr)
+            return 2
+        review, testing = policies[row.repository]
+        if testing.enabled and not review.claude:
+            # preflighted at registration (C2); re-asserted because the funnel
+            # (TESTER.md) is a startup invariant, not a registration artifact
+            print(
+                f"error: {row.repository}: e2e on requires the claude review provider "
+                "(tests run after a clean assess)",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Mint the reviewer App whenever it is configured — not only when a current
+    # row declares claude — so a claude product registered mid-run finds it live.
+    needs_claude = any(policies[row.repository][0].claude for row in rows)
+    reviewer_cache = reviewer_login = None
+    try:
+        reviewer_creds = AppCredentials.from_env(prefix=REVIEWER_APP_PREFIX)
+        if reviewer_creds is not None:
+            minted = mint_installation_token(reviewer_creds)
+            reviewer_login = minted.bot_login
+            reviewer_cache = InstallationTokenCache(reviewer_creds)
+    except GitHubAuthError as exc:
+        if needs_claude:
+            print(f"error: reviewer App: {exc}", file=sys.stderr)
+            return 2
+        log.warning("reviewer App not usable — claude reviews would degrade", error=str(exc))
+    if needs_claude and reviewer_cache is None:
+        print(
+            "error: a product declares the claude provider but the reviewer App is not configured",
+            file=sys.stderr,
+        )
+        return 2
+
+    def build_scheduler(row: RepositoryRecord) -> Scheduler:
+        slug = row.repository
+        review, testing = _scheduler_policies(row)  # honor-checked every build (C3)
+        api = GitHubApi(slug, token_cache, copilot_token=copilot_token)
+        reviewer_api = (
+            GitHubApi(slug, reviewer_cache)
+            if review.claude and reviewer_cache is not None
+            else None
+        )
+
+        def sync_clone() -> Path:
+            return prepare_clone(clones_root, slug, token_cache())
+
+        def sync_clone_ref(ref: str) -> Path:
+            return prepare_clone(clones_root, slug, token_cache(), ref=ref)
+
+        return Scheduler(
+            stores,
+            api,
+            clones_root / slug.replace("/", "__"),  # synced before every burst
+            args.owner or api.repo_owner(),
+            rails=replace(rails, daily_burst_ceiling=row.daily_bursts),  # the row's quota
+            review=review,
+            testing=testing,
+            reviewer_api=reviewer_api,
+            reviewer_login=reviewer_login,
+            image=args.image,
+            model=args.model,
+            sync_clone=sync_clone,
+            sync_clone_ref=sync_clone_ref,
+        )
+
+    log.info(
+        "fleet starting",
+        products=[row.repository for row in rows],
+        interval_s=interval,
+        rails=str(rails),
+    )
+    for row in rows:
+        review, testing = policies[row.repository]
+        log.info(
+            "switchboard",
+            repo=row.repository,
+            review=review.describe(),
+            e2e=testing.describe(),
+            daily_bursts=row.daily_bursts,
+            policy_source="registry row",
+        )
+    return _serve(Fleet(stores, build_scheduler), interval, args.once)
+
+
 def _run_scheduler(args: argparse.Namespace) -> int:
     slug = args.github
     if not slug and args.repo is not None:
         slug = slug_from_origin(args.repo.expanduser().resolve())
-    if not slug:
-        print("error: pass --github owner/name (or --repo, to derive it from origin)", file=sys.stderr)
-        return 2
     try:
         creds = AppCredentials.from_env()
     except GitHubAuthError as exc:
@@ -658,6 +813,14 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     if (stores.data_dir / STOP_FILENAME).exists():
         print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
         return 2
+    token_cache = InstallationTokenCache(creds)
+    copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
+    rails = Rails.from_env()
+    interval = args.interval if args.interval is not None else rails.poll_interval_s
+    clones_root = stores.data_dir / "clones"
+    if slug is None:
+        # C4: no --github names no product — the registry does
+        return _run_fleet(args, stores, token_cache, copilot_token, rails, interval, clones_root)
     product_row = stores.ledger.get_repository(slug)
     if product_row is None:
         # C1: the service ledger refuses tasks for unregistered products (the
@@ -682,8 +845,6 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         print("error: e2e on requires the claude review provider (tests run after a clean assess)", file=sys.stderr)
         return 2
 
-    token_cache = InstallationTokenCache(creds)
-    copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
     api = GitHubApi(slug, token_cache, copilot_token=copilot_token)
 
     reviewer_api = reviewer_login = None
@@ -711,8 +872,6 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     except (GitHubApiError, CloneError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    rails = Rails.from_env()
-    interval = args.interval if args.interval is not None else rails.poll_interval_s
     scheduler = Scheduler(
         stores,
         api,
@@ -745,32 +904,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         policy_source="registry row" if product_row is not None else "env (dev mode)",
     )
 
-    def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
-        scheduler.stop_path.touch()
-        if scheduler.current_burst_id:
-            subprocess.run(
-                ["docker", "kill", f"burst-{scheduler.current_burst_id}"],
-                check=False,
-                capture_output=True,
-            )
-        log.info("stop requested — exiting after this tick")
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    while True:
-        try:
-            scheduler.tick()
-        except (GitHubApiError, GitHubAuthError) as exc:
-            log.warning("github error — retrying next tick", error=str(exc))
-        if scheduler.stop_requested():
-            log.info("STOP flag present — exiting")
-            break
-        if args.once:
-            break
-        time.sleep(interval)
-    trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
-    return 0
+    return _serve(scheduler, interval, args.once)
 
 
 def _stop(args: argparse.Namespace) -> int:
