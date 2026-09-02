@@ -3,6 +3,12 @@
 Task state lives on ``TaskRecord.status``; labels are reflective only. Serial
 by design — one burst globally. Each tick re-derives every decision from
 GitHub + the ledger, so a killed or crashed scheduler resumes cleanly.
+
+A ``Scheduler`` is one product's engine — its ledger reads are scoped to its
+repository, so two products in one ledger cannot see each other's tasks. The
+``Fleet`` (C4) multiplexes N of them through the same serial loop: every tick
+observes every active product, then at most one burst runs — the least
+recently served product goes first.
 """
 
 from __future__ import annotations
@@ -21,15 +27,30 @@ from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Review
 from control_plane.github_auth import GitHubAuthError
-from control_plane.models import BurstStatus, TaskRecord, TaskStatus, task_id_for, utc_now
+from control_plane.models import (
+    BurstStatus,
+    ProductState,
+    RepositoryRecord,
+    TaskRecord,
+    TaskStatus,
+    task_id_for,
+    utc_now,
+)
 from control_plane.prompts import assess_prompt, review_prompt, test_prompt, work_prompt
-from control_plane.review import FindingsError, ReviewPolicy, format_review_body, parse_findings
+from control_plane.review import (
+    FindingsError,
+    ReviewPolicy,
+    ReviewPolicyError,
+    format_review_body,
+    parse_findings,
+)
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.testing import (
     MANIFEST_FILENAME,
     ManifestError,
     ReportError,
     E2EPolicy,
+    E2EPolicyError,
     format_test_report,
     parse_manifest,
     parse_report,
@@ -144,7 +165,7 @@ class Scheduler:
 
     def reconcile_running(self) -> None:
         """Ledger says running, docker says gone → the scheduler died mid-burst."""
-        for burst in self.stores.ledger.running_bursts():
+        for burst in self.stores.ledger.running_bursts(repository=self.api.repo):
             if self._container_alive(burst.burst_id):
                 continue
             burst.status = BurstStatus.KILLED
@@ -152,7 +173,9 @@ class Scheduler:
             self.stores.ledger.finish_burst(burst)
             log.warning("burst died without a result — marked killed", burst=burst.burst_id)
         # a WORKING task with no live burst is the same crash, seen from the task side
-        for task in self.stores.ledger.tasks_by_status(TaskStatus.WORKING):
+        for task in self.stores.ledger.tasks_by_status(
+            TaskStatus.WORKING, repository=self.api.repo
+        ):
             self._register_failure(task, "the scheduler crashed or was killed mid-burst")
 
     def _container_alive(self, burst_id: str) -> bool:
@@ -220,7 +243,9 @@ class Scheduler:
 
     def _park_blocked_issues(self) -> None:
         """The agent set `blocked` (contract rule 9) — stop scheduling the task."""
-        for task in self.stores.ledger.tasks_by_status(TaskStatus.CLAIMED, TaskStatus.AWAITING_REVIEW):
+        for task in self.stores.ledger.tasks_by_status(
+            TaskStatus.CLAIMED, TaskStatus.AWAITING_REVIEW, repository=self.api.repo
+        ):
             issue = self.api.get_issue(task.issue_number)
             if "blocked" in issue.labels:
                 task.status = TaskStatus.BLOCKED
@@ -229,7 +254,9 @@ class Scheduler:
                 log.info("issue carries `blocked` — parked for a human", issue=task.task_id)
 
     def _advance_awaiting_review(self) -> None:
-        for task in self.stores.ledger.tasks_by_status(TaskStatus.AWAITING_REVIEW):
+        for task in self.stores.ledger.tasks_by_status(
+            TaskStatus.AWAITING_REVIEW, repository=self.api.repo
+        ):
             if not task.pr_number:
                 continue
             number = task.issue_number
@@ -316,11 +343,14 @@ class Scheduler:
     # --- spawning ---
 
     def pick_next(self) -> TaskRecord | None:
-        claimed = self.stores.ledger.tasks_by_status(TaskStatus.CLAIMED)
+        claimed = self.stores.ledger.tasks_by_status(
+            TaskStatus.CLAIMED, repository=self.api.repo
+        )
         if not claimed:
             return None
         day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        if self.stores.ledger.bursts_started_since(day_start) >= self.rails.daily_burst_ceiling:
+        started = self.stores.ledger.bursts_started_since(day_start, repository=self.api.repo)
+        if started >= self.rails.daily_burst_ceiling:
             log.warning("daily burst ceiling reached — not spawning", ceiling=self.rails.daily_burst_ceiling)
             return None
         now = datetime.now(UTC)
@@ -774,3 +804,90 @@ class Scheduler:
             task.status = TaskStatus.CLAIMED  # next_burst_kind unchanged — retry the same kind
             log.warning("attempt failed — will retry", task=task.task_id, attempt=task.attempts, reason=reason)
         self.stores.ledger.upsert_task(task)
+
+
+# --- the fleet (C4): one serial loop, N products ---
+
+
+def _least_recently_served(row: RepositoryRecord) -> tuple[bool, str, str]:
+    """Never-served first (no stamp), then the oldest stamp; the slug breaks
+    ties so two products registered together take turns deterministically."""
+    return (row.last_burst_at is not None, row.last_burst_at or "", row.repository)
+
+
+class Fleet:
+    """The registry-driven multiplexer (C4).
+
+    Reads the active products fresh every tick and builds each one's
+    ``Scheduler`` anew — registration, ``pause``/``resume`` and ``product set``
+    take effect on the next tick with no cache to invalidate. Every tick
+    observes every product (state advances everywhere), then spawns at most
+    one burst: the least recently served product with a claimable task under
+    its own daily quota. With one active product this degenerates to exactly
+    the single-product loop — observe, then at most one burst.
+
+    A product's trouble stays its own: a build or observe failure is logged
+    and skips that product for the tick, never the fleet.
+    """
+
+    def __init__(
+        self,
+        stores: PlatformStores,
+        build_scheduler: Callable[[RepositoryRecord], Scheduler],
+    ) -> None:
+        self.stores = stores
+        self.build_scheduler = build_scheduler
+        self.current: Scheduler | None = None  # whoever holds the burst turn
+
+    @property
+    def current_burst_id(self) -> str | None:
+        """For the kill switch — the one live burst, whichever product owns it."""
+        return self.current.current_burst_id if self.current is not None else None
+
+    @property
+    def stop_path(self) -> Path:
+        return self.stores.data_dir / STOP_FILENAME
+
+    def stop_requested(self) -> bool:
+        return self.stop_path.exists()
+
+    def tick(self) -> None:
+        if self.stop_requested():
+            return
+        pairs: list[tuple[RepositoryRecord, Scheduler]] = []
+        for row in self.stores.ledger.list_repositories():
+            if row.state != ProductState.ACTIVE:
+                continue  # paused products are ignored entirely — no observe, no spawn
+            try:
+                pairs.append((row, self.build_scheduler(row)))
+            except (ReviewPolicyError, E2EPolicyError, GitHubApiError, GitHubAuthError) as exc:
+                # `set` preflights on this machine (C2), so this is drift since
+                # registration (env changed, repo unreachable) — quarantine the
+                # product for the tick, not the fleet
+                log.error("product skipped this tick", repo=row.repository, error=str(exc))
+        if not pairs:
+            log.warning("no operable active products — idle tick")
+            return
+        for row, sched in pairs:
+            if self.stop_requested():  # `stop` may land during observation
+                return
+            try:
+                sched.reconcile_running()
+                sched.observe()
+            except (GitHubApiError, GitHubAuthError) as exc:
+                log.warning("observe failed — product skipped this tick", repo=row.repository, error=str(exc))
+        for row, sched in sorted(pairs, key=lambda pair: _least_recently_served(pair[0])):
+            if self.stop_requested():
+                return
+            task = sched.pick_next()
+            if task is None:
+                continue
+            # the turn is the unit of fairness, stamped when taken — a spawn
+            # that then fails still spent this product's place in line
+            self.stores.ledger.touch_repository_burst(row.repository, utc_now())
+            self.current = sched
+            try:
+                sched.run_task_burst(task)
+            finally:
+                self.current = None
+            return  # one burst per tick — the loop stays serial

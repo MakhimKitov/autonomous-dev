@@ -172,6 +172,17 @@ has no model column on purpose). `from_env` remains dev mode: an unregistered re
 on the SQLite ledger runs env-governed until C4 makes the scheduler
 registry-driven.
 
+**Registry-driven scheduler (C4)**: `run` without `--github` serves every active
+registered product through one serial loop (`Fleet`). The registry is re-read
+every tick (register/pause/set need no restart); each product's scheduler is
+built from its row, with the row's `daily_bursts` as its ceiling. At most one
+burst per tick — the least recently served product first
+(`repositories.last_burst_at`, stamped via `touch_repository_burst`: operational
+state, no audit row). A product's scheduler reads only its own tasks and bursts
+(repository-scoped ledger queries), and one product's trouble quarantines that
+product for the tick, never the fleet. `--github owner/name` still pins one repo
+— dev mode when unregistered. SCHEDULER.md "The fleet" has the full contract.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).

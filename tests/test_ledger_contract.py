@@ -35,6 +35,7 @@ from control_plane.models import (
     TaskStatus,
     Violation,
     task_id_for,
+    utc_now,
 )
 from control_plane.store import LEDGER_DSN_ENV, RegistryError, SqliteLedger, session_key
 from psycopg.conninfo import make_conninfo
@@ -748,3 +749,92 @@ def test_the_dsn_password_never_reaches_the_log():
     # nothing to redact when there are no credentials in it
     assert _redact("postgresql://localhost:5432/platform") == "postgresql://localhost:5432/platform"
     assert _redact("host=localhost dbname=platform") == "host=localhost dbname=platform"
+
+
+# --- C4: per-product scoping — a product's scheduler sees only its own rows ---
+
+NEIGHBOR = "owner/neighbor"
+
+
+def _neighbor_task(issue_number=7, **kwargs):
+    return TaskRecord(
+        task_id=task_id_for(NEIGHBOR, issue_number),
+        repository=NEIGHBOR,
+        issue_number=issue_number,
+        **kwargs,
+    )
+
+
+def _with_neighbor(ledger):
+    ledger.register_repository(_product(repository=NEIGHBOR), "op")
+
+
+def test_tasks_by_status_scopes_to_one_product(ledger):
+    _with_neighbor(ledger)
+    ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    ledger.upsert_task(_neighbor_task(2, status=TaskStatus.CLAIMED))
+
+    both = ledger.tasks_by_status(TaskStatus.CLAIMED)
+    assert {t.repository for t in both} == {REPOSITORY, NEIGHBOR}
+    assert [t.repository for t in ledger.tasks_by_status(TaskStatus.CLAIMED, repository=REPOSITORY)] == [
+        REPOSITORY
+    ]
+    assert ledger.tasks_by_status(TaskStatus.CLAIMED, repository="ghost/none") == []
+
+
+def test_running_bursts_scope_through_the_task(ledger):
+    """A burst carries no repository column — the scope rides the join to its task."""
+    _with_neighbor(ledger)
+    ledger.upsert_task(_task(1))
+    ledger.upsert_task(_neighbor_task(2))
+    ledger.record_burst(_burst("b-ours", issue_number=1))
+    ledger.record_burst(BurstRecord(burst_id="b-theirs", task_id=task_id_for(NEIGHBOR, 2)))
+
+    assert {b.burst_id for b in ledger.running_bursts()} == {"b-ours", "b-theirs"}
+    assert [b.burst_id for b in ledger.running_bursts(repository=NEIGHBOR)] == ["b-theirs"]
+
+
+def test_the_daily_count_scopes_to_one_product(ledger):
+    """The per-product quota (C4): a neighbor's spend never counts against ours."""
+    _with_neighbor(ledger)
+    ledger.upsert_task(_task(1))
+    ledger.upsert_task(_neighbor_task(2))
+    ledger.record_burst(_burst("b-ours", issue_number=1, started_at="2026-09-02T10:00:00+00:00"))
+    # finished, not running — one *running* burst per task is a wall (A4)
+    for n in range(3):
+        ledger.record_burst(
+            BurstRecord(
+                burst_id=f"b-theirs-{n}",
+                task_id=task_id_for(NEIGHBOR, 2),
+                status=BurstStatus.SUCCEEDED,
+                started_at=f"2026-09-02T10:00:0{n + 1}+00:00",
+                finished_at=f"2026-09-02T10:00:0{n + 2}+00:00",
+            )
+        )
+
+    since = "2026-09-02T00:00:00+00:00"
+    assert ledger.bursts_started_since(since) == 4
+    assert ledger.bursts_started_since(since, repository=REPOSITORY) == 1
+    assert ledger.bursts_started_since(since, repository=NEIGHBOR) == 3
+
+
+def test_touch_stamps_the_lrs_cursor_and_nothing_else(ledger):
+    """`touch_repository_burst` is operational state, not an operator mutation:
+    the stamp lands, `updated_at` stays, no audit row, no event."""
+    before = ledger.get_repository(REPOSITORY)
+    audit_before = len(ledger.audit_trail())
+    events_before = len(ledger.events())
+    at = utc_now()
+
+    ledger.touch_repository_burst(REPOSITORY, at)
+
+    after = ledger.get_repository(REPOSITORY)
+    assert after.last_burst_at == at
+    assert after.updated_at == before.updated_at
+    assert len(ledger.audit_trail()) == audit_before
+    assert len(ledger.events()) == events_before
+
+
+def test_touch_of_the_unregistered_is_a_quiet_no_op(ledger):
+    ledger.touch_repository_burst("ghost/none", utc_now())  # logs a warning, raises nothing
+    assert ledger.get_repository("ghost/none") is None

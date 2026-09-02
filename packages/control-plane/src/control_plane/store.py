@@ -240,16 +240,19 @@ class Ledger(Protocol):
     def list_repositories(self) -> list[RepositoryRecord]: ...
     def set_repository_state(self, repository: str, state: str, actor: str, reason: str = "") -> None: ...
     def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
+    def touch_repository_burst(self, repository: str, at: str) -> None: ...
     def audit_trail(self, target: str | None = None) -> list[AuditRecord]: ...
     def upsert_task(self, task: TaskRecord) -> None: ...
     def get_task(self, task_id: str) -> TaskRecord | None: ...
-    def tasks_by_status(self, *statuses: str) -> list[TaskRecord]: ...
+    def tasks_by_status(
+        self, *statuses: str, repository: str | None = None
+    ) -> list[TaskRecord]: ...
     def record_burst(self, burst: BurstRecord) -> None: ...
     def finish_burst(self, burst: BurstRecord) -> None: ...
     def get_burst(self, burst_id: str) -> BurstRecord | None: ...
     def latest_archived_burst(self, task_id: str) -> BurstRecord | None: ...
-    def running_bursts(self) -> list[BurstRecord]: ...
-    def bursts_started_since(self, since_iso: str) -> int: ...
+    def running_bursts(self, repository: str | None = None) -> list[BurstRecord]: ...
+    def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int: ...
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
     def events(self, after_id: int = 0) -> list[Event]: ...
@@ -561,14 +564,20 @@ class SqliteLedger:
         row = self._conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         return TaskRecord(**dict(row)) if row else None
 
-    def tasks_by_status(self, *statuses: str) -> list[TaskRecord]:
+    def tasks_by_status(
+        self, *statuses: str, repository: str | None = None
+    ) -> list[TaskRecord]:
         # `task_id` breaks the tie: the scheduler takes the first row as "oldest
         # first", and two tasks created in the same microsecond would otherwise be
-        # ordered by whatever the storage happened to return (gate A7).
+        # ordered by whatever the storage happened to return (gate A7). The
+        # repository scope is C4: a product's scheduler sees only its own tasks.
         marks = ", ".join("?" for _ in statuses)
-        rows = self._conn.execute(
-            f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at, task_id", statuses
-        ).fetchall()
+        query = f"SELECT * FROM tasks WHERE status IN ({marks})"
+        params: list = list(statuses)
+        if repository is not None:
+            query += " AND repository = ?"
+            params.append(repository)
+        rows = self._conn.execute(query + " ORDER BY created_at, task_id", params).fetchall()
         return [TaskRecord(**dict(row)) for row in rows]
 
     def record_burst(self, burst: BurstRecord) -> None:
@@ -619,13 +628,22 @@ class SqliteLedger:
         ).fetchone()
         return BurstRecord(**dict(row)) if row else None
 
-    def running_bursts(self) -> list[BurstRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
-        ).fetchall()
+    def running_bursts(self, repository: str | None = None) -> list[BurstRecord]:
+        # a burst carries no repository column — the task it belongs to does (C4)
+        if repository is None:
+            rows = self._conn.execute(
+                "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT b.* FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
+                "WHERE b.status = 'running' AND t.repository = ? "
+                "ORDER BY b.started_at, b.burst_id",
+                (repository,),
+            ).fetchall()
         return [BurstRecord(**dict(row)) for row in rows]
 
-    def bursts_started_since(self, since_iso: str) -> int:
+    def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int:
         """The count since an *instant*, which is not the same as since a string.
 
         SQLite has no timestamp type, so this is a text comparison — sound only
@@ -633,12 +651,31 @@ class SqliteLedger:
         chronologically ('+' < '.' < digits, so an absent microsecond field sorts
         before a present one). The caller's stamp gets the same spelling via
         `utc_iso`; without it, an offset like +06:00 compares by clock reading and
-        the daily rail counts the wrong bursts (gate A7).
+        the daily rail counts the wrong bursts (gate A7). Scoped to one product's
+        tasks when `repository` is given — the per-product daily quota (C4).
         """
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= ?", (utc_iso(since_iso),)
-        ).fetchone()
+        if repository is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM bursts WHERE started_at >= ?", (utc_iso(since_iso),)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
+                "WHERE b.started_at >= ? AND t.repository = ?",
+                (utc_iso(since_iso), repository),
+            ).fetchone()
         return int(row["n"])
+
+    def touch_repository_burst(self, repository: str, at: str) -> None:
+        """Stamp the least-recently-served cursor (C4) — the fleet marks the
+        product whose turn it just took. Operational state, not an operator
+        mutation: no audit row, no event, `updated_at` untouched."""
+        cursor = self._conn.execute(
+            "UPDATE repositories SET last_burst_at = ? WHERE repository = ?", (at, repository)
+        )
+        self._conn.commit()
+        if cursor.rowcount == 0:
+            log.warning("touch of an unregistered product ignored", repo=repository)
 
     def record_violation(self, violation: Violation) -> None:
         """Record the violation and announce it — both rows, or neither.

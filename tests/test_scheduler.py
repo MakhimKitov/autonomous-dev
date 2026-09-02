@@ -963,3 +963,59 @@ def test_auto_issue_claims_with_tainted_framing(rig):
     assert task is not None and task.status in (TaskStatus.CLAIMED, TaskStatus.WORKING, TaskStatus.AWAITING_REVIEW)
     assert "tainted data" in spawned[0]["prompt"]  # auto provenance framing
     assert "reproduce" in spawned[0]["prompt"]
+
+
+# --- C4: a product's scheduler sees only its own rows ---
+
+NEIGHBOR = "owner2/neighbor"
+
+
+def _neighbor_task(stores, number=9, status=TaskStatus.CLAIMED, **kwargs):
+    """A neighbor product's task in the same ledger — what the fleet makes normal."""
+    task = TaskRecord(
+        task_id=task_id_for(NEIGHBOR, number),
+        repository=NEIGHBOR,
+        issue_number=number,
+        status=status,
+        **kwargs,
+    )
+    stores.ledger.upsert_task(task)
+    return task
+
+
+def test_pick_next_never_takes_a_neighbors_task(rig):
+    scheduler, _, stores, _, _ = rig
+    _neighbor_task(stores)
+    assert scheduler.pick_next() is None
+
+
+def test_observation_never_parks_a_neighbors_task(rig):
+    """Pre-C4, `observe` would ask *our* GitHub about the neighbor's issue
+    number — same number, wrong repo. The blocked label on our issue 9 must not
+    park the neighbor's task 9."""
+    scheduler, api, stores, _, _ = rig
+    foreign = _neighbor_task(stores, number=9)
+    api.issues[9] = Issue(number=9, title="t", body="b", labels=["blocked"])
+    scheduler.observe()
+    assert stores.ledger.get_task(foreign.task_id).status == TaskStatus.CLAIMED
+
+
+def test_reconcile_never_fails_a_neighbors_working_task(rig):
+    scheduler, api, stores, _, _ = rig
+    foreign = _neighbor_task(stores, status=TaskStatus.WORKING)
+    scheduler.reconcile_running()
+    assert stores.ledger.get_task(foreign.task_id).status == TaskStatus.WORKING
+    assert api.comments == []  # and nobody commented on our repo about it
+
+
+def test_daily_quota_counts_only_our_own_bursts(rig):
+    """The neighbor burned bursts today; our product's quota is untouched."""
+    scheduler, api, stores, spawned, _ = rig
+    scheduler.rails.daily_burst_ceiling = 1
+    foreign = _neighbor_task(stores, status=TaskStatus.DONE)
+    stores.ledger.record_burst(
+        BurstRecord(burst_id="theirs", task_id=foreign.task_id, started_at=utc_now())
+    )
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    picked = scheduler.pick_next()
+    assert picked is not None and picked.task_id == tid(1)

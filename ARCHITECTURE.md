@@ -248,6 +248,15 @@ the ephemeral container.
 > declaration (toggle + selector); the env answers only machine questions —
 > credentials and model overrides. `from_env` stays as dev mode for
 > unregistered repos, until C4 makes the scheduler registry-driven.
+>
+> **As built (C4):** the scheduler is registry-driven — `run` without `--github`
+> serves every active product through one serial loop (`Fleet`, SCHEDULER.md).
+> The registry is re-read every tick, so register/pause/set take effect without
+> a restart; fairness is least-recently-served on `repositories.last_burst_at`,
+> quota is the row's `daily_bursts`, and every ledger query a product's
+> scheduler makes is scoped to its repository — two products in one ledger
+> cannot see each other's tasks. One burst per tick keeps the trust-first
+> serial invariant; with one product the loop degenerates to the MVP's.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

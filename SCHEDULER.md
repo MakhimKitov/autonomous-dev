@@ -115,6 +115,24 @@ tick():
 `control-plane run` loops the tick (`--interval`, default 60 s); `--once` runs a single
 tick — the unit CI and humans debug with.
 
+## The fleet (C4)
+
+`run` without `--github` serves **every active registered product** through the same
+serial loop. Each tick the fleet re-reads the registry — `register`, `pause`/`resume`
+and `product set` take effect on the next tick, no restart — and builds each product's
+scheduler from its row: policies via `from_product` (C3), the row's `daily_bursts` as
+its ceiling. Every product is observed every tick; then at most **one burst** runs —
+the **least recently served** product (`repositories.last_burst_at`, never-served
+first, slug breaks ties) with a claimable task under its own quota. One burst per tick
+keeps the loop serial; per-product concurrency arrives with real runners (TO-BE §6).
+
+Isolation is structural: a product's scheduler reads only its own tasks and bursts
+(the ledger queries are repository-scoped), and one product's trouble — an
+unhonorable declaration, an unreachable repo, a failed observe — quarantines that
+product for the tick, never the fleet. With one active product the fleet degenerates
+to exactly the single-product loop. `--github owner/name` still pins one repo:
+registered → its row's policies (C3); unregistered → the env-governed dev mode.
+
 ## Prompts
 
 The contract (product `CLAUDE.md`, baked as system prompt) owns *behavior*; the prompt
@@ -135,7 +153,7 @@ Defaults, `.env`-overridable:
 |---|---|
 | work attempts / task | 3 |
 | review rounds / task | 3 |
-| daily burst ceiling (global) | 20 |
+| daily burst ceiling | 20 — per product: a registered row's `daily_bursts` (C4) |
 | failure cooldown / task | 5 min |
 | poll interval | 60 s |
 | per-burst | `max_budget_usd` 2.0 (a **hard cap** on estimated cost — the SDK kills the burst mid-run; falsified "advisory" on task 17) · `max_turns` 100 |
