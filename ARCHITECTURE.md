@@ -257,6 +257,14 @@ the ephemeral container.
 > scheduler makes is scoped to its repository — two products in one ledger
 > cannot see each other's tasks. One burst per tick keeps the trust-first
 > serial invariant; with one product the loop degenerates to the MVP's.
+>
+> **As built (D1):** App credentials follow the role-prefix scheme (TO-BE §4) —
+> one App per pipeline role, the dev App on the bare `GITHUB_APP_*` names and
+> reviewer/tester/monitor on the same names behind their prefix (`MONITOR_`
+> reserved until T4). App names are the adopter's choice; the prefixes are the
+> platform's contract. `github-check` preflights every configured role — a
+> declared App that cannot mint is a check failure, never a silent skip. The
+> tester's own posting identity arrives at D3.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

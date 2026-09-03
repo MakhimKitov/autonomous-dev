@@ -5,6 +5,7 @@ import json
 import jwt as pyjwt
 import pytest
 from control_plane.github_auth import (
+    ROLE_PREFIXES,
     AppCredentials,
     GitHubAuthError,
     bot_git_identity,
@@ -56,6 +57,33 @@ def test_credentials_from_env(tmp_path):
         AppCredentials.from_env(
             {"GITHUB_APP_ID": "7", "GITHUB_APP_PRIVATE_KEY_PATH": "/nope.pem"}
         )
+
+
+def test_the_role_prefix_scheme_is_the_contract():
+    # TO-BE §4 (D1): App names are the adopter's choice — the platform knows
+    # roles only through these prefixes. The dev App reads the bare names.
+    assert ROLE_PREFIXES == {
+        "dev": "",
+        "reviewer": "REVIEWER_",
+        "tester": "TESTER_",
+        "monitor": "MONITOR_",
+    }
+
+
+def test_credentials_from_env_behind_a_role_prefix(tmp_path):
+    key_file = tmp_path / "tester.pem"
+    key_file.write_text(PRIVATE_PEM, encoding="utf-8")
+    env = {
+        "GITHUB_APP_ID": "1",  # the dev App must never bleed into another role
+        "TESTER_GITHUB_APP_ID": "9",
+        "TESTER_GITHUB_APP_PRIVATE_KEY_PATH": str(key_file),
+        "TESTER_GITHUB_APP_INSTALLATION_ID": "77",
+    }
+    creds = AppCredentials.from_env(env, prefix="TESTER_")
+    assert creds and creds.app_id == "9" and creds.installation_id == "77"
+    assert AppCredentials.from_env(env, prefix="MONITOR_") is None
+    with pytest.raises(GitHubAuthError, match="TESTER_GITHUB_APP_ID"):
+        AppCredentials.from_env({"TESTER_GITHUB_APP_PRIVATE_KEY_PATH": str(key_file)}, prefix="TESTER_")
 
 
 def test_discovery_single_installation():

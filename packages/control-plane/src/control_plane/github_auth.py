@@ -25,6 +25,20 @@ APP_ID = "GITHUB_APP_ID"
 PRIVATE_KEY_PATH = "GITHUB_APP_PRIVATE_KEY_PATH"
 INSTALLATION_ID = "GITHUB_APP_INSTALLATION_ID"
 
+# The role-prefix scheme (TO-BE §4, D1): one org-level App per pipeline role.
+# App names are the adopter's choice — the platform's contract is these env
+# prefixes over the same three names. The dev App reads them bare; MONITOR_ is
+# reserved now, its App arrives with the monitor at T4.
+REVIEWER_APP_PREFIX = "REVIEWER_"
+TESTER_APP_PREFIX = "TESTER_"
+MONITOR_APP_PREFIX = "MONITOR_"
+ROLE_PREFIXES: dict[str, str] = {
+    "dev": "",
+    "reviewer": REVIEWER_APP_PREFIX,
+    "tester": TESTER_APP_PREFIX,
+    "monitor": MONITOR_APP_PREFIX,
+}
+
 # requests-compatible callables, injectable for tests
 HttpGet = Callable[..., Any]
 HttpPost = Callable[..., Any]
