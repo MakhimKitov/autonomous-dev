@@ -499,6 +499,7 @@ def test_review_off_ignores_copilot_findings(rig):
 # --- the claude provider: assess bursts (REVIEWERS.md slice 2) ---
 
 REVIEWER_LOGIN = "discord-ai-reviewer[bot]"
+TESTER_LOGIN = "discord-ai-tester[bot]"
 CLAUDE_ON = ReviewPolicy(enabled=True, providers=("claude", "copilot"))
 
 
@@ -706,6 +707,11 @@ Boot: run the bot in the sandbox guild.
 def _tester_rig(rig, monkeypatch, manifest=TEST_MANIFEST, provisioned=True):
     scheduler, api, stores, spawned, fake_execute = _claude_rig(rig)
     scheduler.testing = E2EPolicy(enabled=True)
+    # D3: reports and auto issues post under the tester App's own identity —
+    # a second fake, so a post to the wrong identity fails the assertion
+    scheduler.tester_api = FakeReviewerApi()
+    scheduler.tester_login = TESTER_LOGIN
+    scheduler.machine_reviewers.add(TESTER_LOGIN)
     scheduler.repo.mkdir(parents=True, exist_ok=True)
     if manifest is not None:
         (scheduler.repo / "TESTING.md").write_text(manifest, encoding="utf-8")
@@ -828,11 +834,13 @@ def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
     assert spawned[0]["extra_env"] == {"DISCORD_TOKEN": "sandbox-token"}
     # the testing contract's prose rides the task prompt
     assert "sandbox guild" in spawned[0]["prompt"]
-    ((pr_number, body),) = scheduler.reviewer_api.commented  # clean run → plain comment
+    ((pr_number, body),) = scheduler.tester_api.commented  # clean run → plain comment
     assert pr_number == 2 and "Machine test report" in body and "✅" in body
     # B6: the cited-call column is platform-extracted from the transcript
     assert "`Bash: grep -q synced /session/product.log`" in body
-    assert scheduler.reviewer_api.posted == []  # no review costume without PR-caused defects
+    assert scheduler.tester_api.posted == []  # no review costume without PR-caused defects
+    # D3: nothing about the test run rides the reviewer identity
+    assert scheduler.reviewer_api.commented == [] and scheduler.reviewer_api.filed == []
 
 
 def test_pr_caused_defects_return_to_the_developer(rig, monkeypatch):
@@ -852,14 +860,14 @@ def test_pr_caused_defects_return_to_the_developer(rig, monkeypatch):
     assert task.status == TaskStatus.AWAITING_REVIEW
     # the report wears the review costume — the existing round machinery
     # (machine reviewer + CHANGES_REQUESTED) returns the defect to the dev
-    ((pr_number, body, findings, event),) = scheduler.reviewer_api.posted
+    ((pr_number, body, findings, event),) = scheduler.tester_api.posted
     assert (pr_number, findings, event) == (2, [], "REQUEST_CHANGES")
     assert "Machine test report" in body and "- **bad reply** — /roll" in body
-    assert scheduler.reviewer_api.commented == []
+    assert scheduler.tester_api.commented == []
 
     # next tick observes the review and queues the dev round
     api.issues[1] = _issue(labels=("in-progress",))
-    api.reviews[2] = [Review(id=50, author=REVIEWER_LOGIN, state="CHANGES_REQUESTED", body=body)]
+    api.reviews[2] = [Review(id=50, author=TESTER_LOGIN, state="CHANGES_REQUESTED", body=body)]
     scheduler.observe()
     task = stores.ledger.get_task(tid(1))
     assert task.status == TaskStatus.CLAIMED and task.next_burst_kind == "review"
@@ -880,14 +888,14 @@ def test_preexisting_defects_file_auto_issues(rig, monkeypatch):
     task = stores.ledger.get_task(tid(1))
     assert task.status == TaskStatus.AWAITING_REVIEW
     # the tester authored it; the platform relayed it verbatim + mechanical provenance
-    ((title, body, labels),) = scheduler.reviewer_api.filed
+    ((title, body, labels),) = scheduler.tester_api.filed
     assert title == "bot log lines never reach stdout" and labels == ["auto"]
     assert body.startswith("### Summary\nlogging")
     assert "Machine-filed (`auto` provenance)" in body and "`ready`" in body
     # pre-existing only → the report stays a comment, and it links the issue
-    ((_, comment),) = scheduler.reviewer_api.commented
+    ((_, comment),) = scheduler.tester_api.commented
     assert "*(pre-existing)*" in comment and "#101" in comment
-    assert scheduler.reviewer_api.posted == []
+    assert scheduler.tester_api.posted == []
 
 
 def test_auto_issue_dedup_skips_already_open_symptom(rig, monkeypatch):
@@ -896,7 +904,7 @@ def test_auto_issue_dedup_skips_already_open_symptom(rig, monkeypatch):
         _task(1, status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
     )
     api.prs[2] = _pr()
-    scheduler.reviewer_api.open_auto = [
+    scheduler.tester_api.open_auto = [
         Issue(number=90, title="Bot log lines never reach stdout", body="", labels=["auto"])
     ]
     fake_execute.next_outcome = _assess_outcome(
@@ -905,8 +913,8 @@ def test_auto_issue_dedup_skips_already_open_symptom(rig, monkeypatch):
         '"issues": [{"title": "bot log lines never reach stdout", "body": "### Summary\\nlogging"}]}'
     )
     scheduler.tick()
-    assert scheduler.reviewer_api.filed == []  # matched case-insensitively — not re-filed
-    ((_, comment),) = scheduler.reviewer_api.commented
+    assert scheduler.tester_api.filed == []  # matched case-insensitively — not re-filed
+    ((_, comment),) = scheduler.tester_api.commented
     assert "filed as" not in comment.lower()
 
 
@@ -927,11 +935,11 @@ def test_unresolvable_citation_fails_like_a_malformed_report(rig, monkeypatch):
     scheduler.tick()  # attempt 1 → retry
     task = stores.ledger.get_task(tid(1))
     assert task.status == TaskStatus.CLAIMED and task.attempts == 1
-    assert scheduler.reviewer_api.commented == [] and scheduler.reviewer_api.posted == []
+    assert scheduler.tester_api.commented == [] and scheduler.tester_api.posted == []
     scheduler.tick()  # attempt 2 = rails cap → give up on the test, not the task
     task = stores.ledger.get_task(tid(1))
     assert task.status == TaskStatus.AWAITING_REVIEW and task.attempts == 0
-    assert scheduler.reviewer_api.commented == [] and scheduler.reviewer_api.posted == []
+    assert scheduler.tester_api.commented == [] and scheduler.tester_api.posted == []
 
 
 def test_test_failure_gives_up_softly_never_blocks(rig, monkeypatch):

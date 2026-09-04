@@ -43,11 +43,13 @@ FULL_SOCKET = {
     ".commitlintrc.json": "{}",
 }
 
-# what ReviewPolicy.from_env wants to see for the shipped providers
+# what the policy honor-checks want to see for the shipped providers + e2e (D3)
 CREDS = {
     "GITHUB_COPILOT_REVIEW_TOKEN": "github_pat_fake",
     "REVIEWER_GITHUB_APP_ID": "12345",
     "REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH": "/keys/reviewer.pem",
+    "TESTER_GITHUB_APP_ID": "77",
+    "TESTER_GITHUB_APP_PRIVATE_KEY_PATH": "/keys/tester.pem",
 }
 
 
@@ -139,6 +141,14 @@ def test_a_file_ref_resolves_against_the_filesystem(tmp_path):
         run_preflight(row, FakeRepo(FULL_SOCKET), environ=dict(CREDS))
     key.write_text("fake-token")
     assert run_preflight(row, FakeRepo(FULL_SOCKET), environ=dict(CREDS)) == []
+
+
+def test_e2e_without_the_tester_app_refuses():
+    # D3: the report's identity is part of the declaration's executability —
+    # the same honor-check the scheduler fires, asked at the gate
+    environ = {k: v for k, v in E2E_ENVIRON.items() if not k.startswith("TESTER_GITHUB_")}
+    with pytest.raises(PreflightError, match="tester App"):
+        run_preflight(_e2e_row(), FakeRepo(FULL_SOCKET), environ=environ)
 
 
 def test_a_satisfiable_e2e_declaration_passes():

@@ -36,6 +36,8 @@ def hermetic_platform_env(monkeypatch):
         "GITHUB_APP_INSTALLATION_ID",
         "REVIEWER_GITHUB_APP_ID",
         "REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH",
+        "TESTER_GITHUB_APP_ID",
+        "TESTER_GITHUB_APP_PRIVATE_KEY_PATH",
         "TEST_DISCORD_TOKEN",
         "TEST_GUILD_ID",
     ):
@@ -109,6 +111,12 @@ def declare_reviewer_creds(monkeypatch):
     monkeypatch.setenv("REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH", "/keys/reviewer.pem")
 
 
+def declare_tester_creds(monkeypatch):
+    """Same presence-only story for the tester App (D3) — e2e on requires it."""
+    monkeypatch.setenv("TESTER_GITHUB_APP_ID", "77")
+    monkeypatch.setenv("TESTER_GITHUB_APP_PRIVATE_KEY_PATH", "/keys/tester.pem")
+
+
 def test_register_materializes_the_platform_defaults(tmp_path, monkeypatch):
     """TO-BE §2: `product register` fills every policy/quota column from
     .env-shaped platform defaults — the row is the entire truth."""
@@ -117,6 +125,7 @@ def test_register_materializes_the_platform_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("E2E", "on")
     monkeypatch.setenv("SCHEDULER_DAILY_BURST_CEILING", "7")
     declare_reviewer_creds(monkeypatch)
+    declare_tester_creds(monkeypatch)
 
     assert run(tmp_path, "register", "owner/product", "--team", "bots") == 0
 
@@ -287,6 +296,7 @@ def test_a_false_declaration_is_refused(tmp_path, monkeypatch, capsys):
     """C2's done-when, half one: `--e2e on` against a repo with no TESTING.md
     is a declaration the platform cannot execute — refused, never a row."""
     declare_reviewer_creds(monkeypatch)
+    declare_tester_creds(monkeypatch)
     files = {name: text for name, text in FULL_SOCKET.items() if name != "TESTING.md"}
 
     assert run(
@@ -342,6 +352,7 @@ def test_set_asks_the_gate_for_policy_columns(tmp_path, monkeypatch, capsys):
     """`set` can shape the same false declaration register refuses — flipping
     e2e on without a satisfiable manifest is refused, and the row stands."""
     declare_reviewer_creds(monkeypatch)
+    declare_tester_creds(monkeypatch)
     assert run(
         tmp_path, "register", "owner/product", "--team", "bots",
         "--review", "on", "--review-providers", "claude",
@@ -374,6 +385,7 @@ def test_check_reruns_preflight_and_catches_drift(tmp_path, monkeypatch, capsys)
     """`product check` (TO-BE §2): the same preflight, on demand. A socket
     that rotted after registration flips the exit code, not the row."""
     declare_reviewer_creds(monkeypatch)
+    declare_tester_creds(monkeypatch)
     monkeypatch.setenv("TEST_DISCORD_TOKEN", "fake-token")
     manifest = "---\nenv: [DISCORD_TOKEN]\n---\nprose"
     healthy = FakeProductRepo(dict(FULL_SOCKET, **{"TESTING.md": manifest}))
@@ -449,6 +461,7 @@ def test_scheduler_policies_come_from_the_row(monkeypatch):
     """C3 done-when: the startup honor-check fires from the row exactly as from
     env — and the row, not the machine's REVIEW/E2E, is the declaration."""
     declare_reviewer_creds(monkeypatch)
+    declare_tester_creds(monkeypatch)
     monkeypatch.setenv("REVIEW", "off")
     monkeypatch.setenv("E2E", "off")
     review, testing = cli._scheduler_policies(_registered_row())
@@ -467,4 +480,5 @@ def test_the_unregistered_still_run_env_governed(monkeypatch):
     review, testing = cli._scheduler_policies(None)
     assert not review.enabled and not testing.enabled
     monkeypatch.setenv("E2E", "on")
+    declare_tester_creds(monkeypatch)
     assert cli._scheduler_policies(None)[1].enabled

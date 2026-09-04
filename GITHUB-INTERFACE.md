@@ -206,8 +206,9 @@ App approvals satisfy a bare count, which would quietly dissolve the human gate.
 |---|---|---|---|
 | Dev agent | App "dev" | `contents:write`, `pull_requests:write`, `issues:write` (comment + `blocked`) | merge, admin, secrets, settings |
 | Control plane | the dev App (shared) + the reviewer App for posting | labels, comments, reviews, test reports, relayed `auto` issues | merge, push to default |
-| Reviewer App | the `REVIEWER_`-prefixed App (separate — GitHub forbids a PR's author reviewing it) | `pull_requests:write` (reviews) + `issues:write` (symptom relay) | write code, merge, satisfy the CODEOWNERS gate |
-| Reviewer burst / Tester | **none** — findings/reports return via harvest; the control plane posts them | — | any GitHub call at all |
+| Reviewer App | the `REVIEWER_`-prefixed App (separate — GitHub forbids a PR's author reviewing it) | `pull_requests:write` (reviews) | write code, merge, satisfy the CODEOWNERS gate |
+| Reviewer burst / Tester burst | **none** — findings/reports return via harvest; the control plane posts them | — | any GitHub call at all |
+| Tester App (D3) | the `TESTER_`-prefixed App — the control plane posts test reports + relayed `auto` issues (symptom relay) under it | `pull_requests:write` (report reviews) + `issues:write` | write code, merge, satisfy the CODEOWNERS gate |
 | Monitor (phase 1+, not built) | App "monitor" (separate) | `issues:write` | anything else |
 | Human owner | maintainer account | full, incl. merge | — |
 | Copilot (optional) | GitHub Copilot review, requested on the owner's PAT | read (PR diff) | write |
@@ -216,8 +217,8 @@ App credentials reach the platform through the role-prefix env scheme (D1): the
 dev App reads `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH`, the other roles the
 same names behind `REVIEWER_`, `TESTER_`, `MONITOR_`. App names are the adopter's
 choice — the prefixes are the contract, and `control-plane github-check` preflights
-every configured role. The tester posts under the reviewer App until D3; `MONITOR_`
-is reserved until the monitor exists (T4). Tokens come in two tiers (D2): the
+every configured role. Test reports and relayed `auto` issues post under the tester
+App (D3); `MONITOR_` is reserved until the monitor exists (T4). Tokens come in two tiers (D2): the
 control plane's cached tokens carry the App's full grant, while a burst token is
 minted fresh per spawn, pinned to the task's repository and the role's permission
 subset — product A's burst token is rejected on product B by GitHub itself.

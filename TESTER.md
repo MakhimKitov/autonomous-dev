@@ -139,12 +139,13 @@ work ok, PR open ──► assess ──findings──► dev round ──push�
 
 ## Posting
 
-Everything posts as the **reviewer App** with a `#### 🧪 Machine test report` header
-(distinct voice, no new App to provision): the report (comment, or `REQUEST_CHANGES`
+Everything posts as the **tester App** (`TESTER_`-prefixed credentials — D3) with a
+`#### 🧪 Machine test report` header: the report (comment, or `REQUEST_CHANGES`
 review when PR-caused defects exist) and the relayed `auto` issues — which require
-**Issues: read/write** on the App, alongside its pull-request permission. A dedicated
-tester App is the clean provenance answer once reports carry weight; the seam
-(`AppCredentials.from_env` prefix) already exists.
+**Issues: read/write** on the App, alongside its pull-request permission. `E2E=on`
+without that App is a startup/preflight refusal, never a silent degrade. (Slice 1
+rode the reviewer App as a deliberate deferral; D3 gave the tester its own
+provenance.)
 
 ## Config
 
@@ -173,5 +174,5 @@ platform config — everything product-specific rides in the product's `TESTING.
 
 Product-specific logic in the platform (ever) · driving Discord as a human user
 (ToS-violating automation — the product contract defines what E2E means within the
-rules) · performance/load testing · a tester App identity (slice-1 rides the reviewer
-App) · testing unmerged *platform* changes (the tester tests the product).
+rules) · performance/load testing · testing unmerged *platform* changes (the tester
+tests the product).

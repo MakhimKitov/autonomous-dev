@@ -33,6 +33,12 @@ Boot: `uv run python -m bot`.
 
 # --- policy ---
 
+TESTER_CREDS = {
+    "TESTER_GITHUB_APP_ID": "77",
+    "TESTER_GITHUB_APP_PRIVATE_KEY_PATH": "/keys/tester.pem",
+}
+
+
 
 def test_policy_ships_off():
     assert E2EPolicy.from_env({}) == E2EPolicy()
@@ -40,9 +46,20 @@ def test_policy_ships_off():
 
 
 def test_policy_on_with_optional_model():
-    policy = E2EPolicy.from_env({"E2E": "on", "TESTER_MODEL": "claude-x"})
+    policy = E2EPolicy.from_env(dict(TESTER_CREDS, E2E="on", TESTER_MODEL="claude-x"))
     assert policy.enabled and policy.tester_model == "claude-x"
-    assert E2EPolicy.from_env({"E2E": "on"}).tester_model is None
+    assert E2EPolicy.from_env(dict(TESTER_CREDS, E2E="on")).tester_model is None
+
+
+def test_policy_on_without_the_tester_app_refuses():
+    # D3: reports post under the tester App's own identity — e2e declared
+    # without that App is a startup error, never a silent degrade
+    with pytest.raises(E2EPolicyError, match="TESTER_GITHUB_APP_ID"):
+        E2EPolicy.from_env({"E2E": "on"})
+    with pytest.raises(E2EPolicyError, match="tester App"):
+        E2EPolicy.from_env({"E2E": "on", "TESTER_GITHUB_APP_ID": "77"})
+    # off never asks the credential question
+    assert E2EPolicy.from_env({"E2E": "off"}).enabled is False
 
 
 def test_policy_rejects_anything_but_on_off():
@@ -54,17 +71,17 @@ def test_policy_from_product_row_governs():
     # C3: the row overrides the machine's E2E toggle in both directions
     on = RepositoryRecord(repository="fermata/discord-bot", team="platform", e2e_enabled=True)
     off = RepositoryRecord(repository="fermata/discord-bot", team="platform")
-    assert E2EPolicy.from_product(on, {"E2E": "off"}).enabled is True
+    assert E2EPolicy.from_product(on, dict(TESTER_CREDS, E2E="off")).enabled is True
     assert E2EPolicy.from_product(off, {"E2E": "on"}).enabled is False
 
 
 def test_policy_from_product_model_stays_a_machine_answer():
     row = RepositoryRecord(repository="fermata/discord-bot", team="platform", e2e_enabled=True)
-    policy = E2EPolicy.from_product(row, {"TESTER_MODEL": "claude-haiku-4-5"})
+    policy = E2EPolicy.from_product(row, dict(TESTER_CREDS, TESTER_MODEL="claude-haiku-4-5"))
     assert policy.tester_model == "claude-haiku-4-5"
-    env = {"E2E": "off"}
+    env = dict(TESTER_CREDS, E2E="off")
     E2EPolicy.from_product(row, env)
-    assert env == {"E2E": "off"}  # the probe never leaks into the caller's dict
+    assert env == dict(TESTER_CREDS, E2E="off")  # the probe never leaks into the caller's dict
 
 
 # --- manifest ---

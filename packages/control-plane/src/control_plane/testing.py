@@ -47,6 +47,18 @@ class E2EPolicy:
             raise E2EPolicyError(f"{E2E_ENV} must be on|off, got {raw!r}")
         if raw == "off":
             return cls()
+        if not (
+            env.get("TESTER_GITHUB_APP_ID", "").strip()
+            and env.get("TESTER_GITHUB_APP_PRIVATE_KEY_PATH", "").strip()
+        ):
+            # declared-but-unhonorable is a startup error, never a silent
+            # degrade — test reports and tester-authored issues post under the
+            # tester's own identity (D3), so e2e needs that App to exist here
+            raise E2EPolicyError(
+                "E2E=on but the tester App is not configured — set TESTER_GITHUB_APP_ID and "
+                "TESTER_GITHUB_APP_PRIVATE_KEY_PATH (test reports post under the tester's "
+                "own identity, not the reviewer's)"
+            )
         return cls(enabled=True, tester_model=(env.get(TESTER_MODEL_ENV) or "").strip() or None)
 
     @classmethod

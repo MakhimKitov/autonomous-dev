@@ -36,6 +36,7 @@ from control_plane.github_api import COPILOT_TOKEN_ENV, GitHubApi, GitHubApiErro
 from control_plane.github_auth import (
     REVIEWER_APP_PREFIX,
     ROLE_PREFIXES,
+    TESTER_APP_PREFIX,
     AppCredentials,
     GitHubAuthError,
     InstallationTokenCache,
@@ -768,6 +769,29 @@ def _run_fleet(
         )
         return 2
 
+    # Same for the tester App (D3): reports and auto issues post as its identity.
+    # E2EPolicy already refuses e2e-on without the credentials; this catches
+    # credentials that exist but cannot mint (revoked key, no installation).
+    needs_tester = any(policies[row.repository][1].enabled for row in rows)
+    tester_cache = tester_login = None
+    try:
+        tester_creds = AppCredentials.from_env(prefix=TESTER_APP_PREFIX)
+        if tester_creds is not None:
+            minted = mint_installation_token(tester_creds)
+            tester_login = minted.bot_login
+            tester_cache = InstallationTokenCache(tester_creds)
+    except GitHubAuthError as exc:
+        if needs_tester:
+            print(f"error: tester App: {exc}", file=sys.stderr)
+            return 2
+        log.warning("tester App not usable — test reports would degrade", error=str(exc))
+    if needs_tester and tester_cache is None:
+        print(
+            "error: a product declares e2e but the tester App is not configured",
+            file=sys.stderr,
+        )
+        return 2
+
     def build_scheduler(row: RepositoryRecord) -> Scheduler:
         slug = row.repository
         review, testing = _scheduler_policies(row)  # honor-checked every build (C3)
@@ -776,6 +800,9 @@ def _run_fleet(
             GitHubApi(slug, reviewer_cache)
             if review.claude and reviewer_cache is not None
             else None
+        )
+        tester_api = (
+            GitHubApi(slug, tester_cache) if testing.enabled and tester_cache is not None else None
         )
 
         def sync_clone() -> Path:
@@ -794,6 +821,8 @@ def _run_fleet(
             testing=testing,
             reviewer_api=reviewer_api,
             reviewer_login=reviewer_login,
+            tester_api=tester_api,
+            tester_login=tester_login,
             image=args.image,
             model=args.model,
             sync_clone=sync_clone,
@@ -813,6 +842,7 @@ def _run_fleet(
             repo=row.repository,
             review=review.describe(),
             e2e=testing.describe(),
+            tester=tester_login,
             daily_bursts=row.daily_bursts,
             policy_source="registry row",
         )
@@ -881,6 +911,17 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         reviewer_login = minted.bot_login
         reviewer_api = GitHubApi(slug, InstallationTokenCache(reviewer_creds))
 
+    tester_api = tester_login = None
+    if testing.enabled:  # reports post as the tester App's own identity (D3)
+        try:
+            tester_creds = AppCredentials.from_env(prefix=TESTER_APP_PREFIX)
+            minted = mint_installation_token(tester_creds)
+        except GitHubAuthError as exc:
+            print(f"error: tester App: {exc}", file=sys.stderr)
+            return 2
+        tester_login = minted.bot_login
+        tester_api = GitHubApi(slug, InstallationTokenCache(tester_creds))
+
     clones_root = stores.data_dir / "clones"
 
     def sync_clone() -> Path:
@@ -905,6 +946,8 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         testing=testing,
         reviewer_api=reviewer_api,
         reviewer_login=reviewer_login,
+        tester_api=tester_api,
+        tester_login=tester_login,
         image=args.image,
         model=args.model,
         sync_clone=sync_clone,
@@ -923,6 +966,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         review=review.describe(),
         reviewer=reviewer_login,
         e2e=testing.describe(),
+        tester=tester_login,
         gate=owner,
         policy_source="registry row" if product_row is not None else "env (dev mode)",
     )

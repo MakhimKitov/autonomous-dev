@@ -116,6 +116,8 @@ class Scheduler:
         testing: E2EPolicy | None = None,
         reviewer_api: GitHubApi | None = None,
         reviewer_login: str | None = None,
+        tester_api: GitHubApi | None = None,
+        tester_login: str | None = None,
         image: str = DEFAULT_IMAGE,
         model: str | None = None,
         sync_clone: Callable[[], Path] | None = None,
@@ -130,9 +132,15 @@ class Scheduler:
         self.testing = testing or E2EPolicy()  # ships off (TESTER.md)
         self.reviewer_api = reviewer_api  # posts the claude provider's findings (second App)
         self.reviewer_login = reviewer_login  # that App's bot login, learned at startup
+        self.tester_api = tester_api  # posts test reports + auto issues (the tester App, D3)
+        self.tester_login = tester_login
         self.machine_reviewers = set(self.review.machine_reviewers())
         if self.review.claude and reviewer_login:
             self.machine_reviewers.add(reviewer_login)
+        if self.testing.enabled and tester_login:
+            # the tester's REQUEST_CHANGES (pr-caused defects) must return the
+            # task to the developer through the same round machinery
+            self.machine_reviewers.add(tester_login)
         self.image = image
         self.model = model
         self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
@@ -641,17 +649,18 @@ class Scheduler:
     def _file_auto_issues(self, task: TaskRecord, report, head_sha: str = "") -> list[int]:
         """Relay the tester-authored issues for pre-existing defects (TESTER.md):
         `auto` provenance, never `ready` — a human triages before anyone acts.
-        The control plane adds only mechanical provenance, never content.
+        The control plane adds only mechanical provenance, never content, and
+        posts under the tester App — the finding's own identity (D3).
         Advisory end to end: any failure degrades to 'not filed', logged."""
         if not report.issues:
             return []
-        if self.reviewer_api is None:
-            log.warning("no reviewer App configured — auto issues not filed")
+        if self.tester_api is None:
+            log.warning("no tester App configured — auto issues not filed")
             return []
         try:
             existing = {
                 issue.title.strip().lower()
-                for issue in self.reviewer_api.list_open_issues_by_label(AUTO_PROVENANCE_LABEL)
+                for issue in self.tester_api.list_open_issues_by_label(AUTO_PROVENANCE_LABEL)
             }
         except GitHubApiError as exc:
             log.warning("auto-issue dedup listing failed — not filing blind", error=str(exc))
@@ -675,7 +684,7 @@ class Scheduler:
                 f"a human adds `ready` to authorize work._"
             )
             try:
-                number = self.reviewer_api.create_issue(
+                number = self.tester_api.create_issue(
                     issue["title"], body, [AUTO_PROVENANCE_LABEL]
                 )
             except GitHubApiError as exc:
@@ -699,16 +708,16 @@ class Scheduler:
         existing round machinery returns them to the developer. Otherwise the
         report is a plain comment, advisory to the human gate. Posting failures
         degrade, never block."""
-        if self.reviewer_api is None:
-            log.warning("no reviewer App configured — test report not posted")
+        if self.tester_api is None:
+            log.warning("no tester App configured — test report not posted")
             return
         body = format_test_report(report, head_sha, model, filed=filed, citations=citations)
         pr_caused = report.pr_caused
         try:
             if pr_caused:
-                self.reviewer_api.post_review(task.pr_number, body, [], event="REQUEST_CHANGES")
+                self.tester_api.post_review(task.pr_number, body, [], event="REQUEST_CHANGES")
             else:
-                self.reviewer_api.comment(task.pr_number, body)
+                self.tester_api.comment(task.pr_number, body)
             log.info(
                 "test report posted",
                 pr=task.pr_number,

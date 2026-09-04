@@ -190,7 +190,7 @@ env prefix over the same three names — the dev App reads `GITHUB_APP_ID` /
 T4). App names are the adopter's choice — the prefix scheme is the contract.
 `control-plane github-check` preflights every configured role: a declared App
 that can't mint fails the check (exit 1), an unconfigured role is reported and
-skipped. The tester still posts under the reviewer App until D3.
+skipped.
 
 **Burst-token downscoping (D2)**: two token tiers (TO-BE §4). The control plane
 keeps the App's full grant, cached (`InstallationTokenCache`). A burst token is
@@ -202,6 +202,15 @@ per-token fact GitHub enforces: product A's burst token is rejected on product
 B by construction (403/404, proven live). `mint_burst_token` in `bursts.py` is
 the one place the burst tier is minted; a credential request for a non-dev role
 refuses loudly.
+
+**Tester provenance (D3)**: test reports and relayed `auto` issues post under the
+tester App (`Scheduler.tester_api`), never the reviewer's — the finding's own
+identity. The tester's `REQUEST_CHANGES` (PR-caused defects) joins
+`machine_reviewers` via `tester_login`, so defect returns ride the same round
+machinery. `E2E=on` without the tester App refuses at startup and at
+registration preflight (`E2EPolicy.from_env` carries the honor-check, like the
+claude provider's) — declared-but-unhonorable is never a silent degrade. The
+tester *burst* still holds no GitHub credential at all.
 
 ### Task identity
 
