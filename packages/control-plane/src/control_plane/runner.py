@@ -7,17 +7,36 @@ points control-plane → dev-agent only).
 
 from __future__ import annotations
 
+import codecs
 import os
+import selectors
 import subprocess
 import sys
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import structlog
 from dev_agent import env as agentenv
 
 from control_plane.telemetry import agent_telemetry_env
 
+log = structlog.get_logger()
+
 DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
+
+# How often a running burst's heartbeat is asked while the container is up (E1).
+# The callback is cheap and decides for itself whether this beat renews the lease
+# in the ledger; the runner only guarantees it is asked at least this often,
+# whether or not the container has printed anything — a hung Bash call (finding
+# #6) prints nothing for 18 minutes and must not look dead.
+HEARTBEAT_POLL_S = 5.0
+
+# The runner's contract for the callback: True keeps going; False means the
+# lease is lost — a peer has taken the task — and the runner fences the burst by
+# killing its container. Work nobody holds a lease on must not keep pushing.
+Heartbeat = Callable[[], bool]
 
 # Docker's default seccomp profile blocks unprivileged user namespaces, which
 # codex's bubblewrap read-only sandbox needs (issue #3). This is moby v28.3.0's
@@ -128,26 +147,89 @@ class DockerRunner:
         cmd += [spec.image, spec.command]
         return cmd
 
-    def run(self, spec: BurstSpec, log_path: Path | None = None) -> int:
+    def run(
+        self, spec: BurstSpec, log_path: Path | None = None, heartbeat: Heartbeat | None = None
+    ) -> int:
         """Run the burst; when log_path is set, tee container output there.
 
         The transcript on the volume is the deep record, but it only exists
         once the SDK is up — the log file catches everything, including a
         container that dies before writing any result.
+
+        ``heartbeat`` (E1) is asked every ``HEARTBEAT_POLL_S`` while the
+        container runs, output or none; a False answer kills the container — the
+        lease behind this burst is gone, and so is its right to keep working.
         """
         cmd = self.build_command(spec)
-        if log_path is None:
+        if log_path is None and heartbeat is None:
             return subprocess.run(cmd, check=False).returncode
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with (
-            log_path.open("w", encoding="utf-8") as log,
-            subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            ) as proc,
-        ):
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                log.write(line)
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        sink = log_path.open("w", encoding="utf-8") if log_path is not None else None
+        try:
+            with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+                assert proc.stdout is not None
+                for line in _pump(proc.stdout, heartbeat, fence=lambda: self.kill(spec.burst_id)):
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    if sink is not None:
+                        sink.write(line)
+        finally:
+            if sink is not None:
+                sink.close()
         return proc.returncode
+
+    def kill(self, burst_id: str) -> None:
+        """Stop a burst's container by the name every burst carries."""
+        subprocess.run(
+            ["docker", "kill", f"burst-{burst_id}"], check=False, capture_output=True
+        )
+
+
+def _pump(
+    stream, heartbeat: Heartbeat | None, fence: Callable[[], None]
+) -> Iterator[str]:
+    """Lines from ``stream`` as they arrive, with the heartbeat asked on the
+    clock rather than on output.
+
+    A plain ``for line in stream`` blocks until the container prints, which is
+    exactly when a lease must *not* depend on it. So the wait is a ``select``
+    with a deadline: output or not, every ``HEARTBEAT_POLL_S`` the callback is
+    asked, and the first False fences the burst — once; the stream is then
+    drained to EOF so the exit code is the container's own. Raw ``os.read`` on
+    the fd, because a buffered reader in front of ``select`` can hold bytes the
+    selector cannot see.
+    """
+    fd = stream.fileno()
+    selector = selectors.DefaultSelector()
+    selector.register(fd, selectors.EVENT_READ)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    next_beat = time.monotonic() + HEARTBEAT_POLL_S
+    fenced = False
+    try:
+        while True:
+            timeout: float | None = None
+            if heartbeat is not None:
+                now = time.monotonic()
+                if now >= next_beat:
+                    if not fenced and not heartbeat():
+                        log.error("lease lost mid-burst — killing the container")
+                        fence()
+                        fenced = True
+                    next_beat = now + HEARTBEAT_POLL_S
+                timeout = max(0.0, next_beat - now)
+            if not selector.select(timeout):
+                continue  # the deadline, not data — loop back to the heartbeat
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                pending += decoder.decode(b"", final=True)
+                if pending:
+                    yield pending
+                return
+            pending += decoder.decode(chunk)
+            *lines, pending = pending.split("\n")
+            for line in lines:
+                yield line + "\n"
+    finally:
+        selector.close()

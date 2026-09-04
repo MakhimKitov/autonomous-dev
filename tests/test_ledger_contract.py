@@ -20,6 +20,7 @@ out why it has to be: the comparison, not the spelling, is what a caller sees.
 import os
 import sqlite3
 from dataclasses import asdict
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
@@ -183,6 +184,212 @@ def test_a_tie_in_created_at_is_broken_the_same_way(ledger):
 
     picked = ledger.tasks_by_status(TaskStatus.CLAIMED)
     assert [t.task_id for t in picked] == [tid(1), tid(2), tid(3)]
+
+
+# --- leases and compare-and-set (E1) ---
+#
+# The scheduler's writes, as STORES.md's single-statement shapes. Each one is
+# tested through its rowcount semantics rather than by racing two connections —
+# the race is E2's test; what belongs here is that both backends answer a stale
+# expectation, a foreign holder and a lapsed lease the same way.
+
+REPLICA = "host-a:100"
+PEER = "host-b:200"
+LONG_AGO = "2020-01-01T00:00:00+00:00"
+FAR_AHEAD = "2099-01-01T00:00:00+00:00"
+
+
+def _instant(iso):
+    return datetime.fromisoformat(iso)
+
+
+def test_create_task_inserts_once_and_never_overwrites(ledger):
+    assert ledger.create_task(_task(status=TaskStatus.CLAIMED, next_burst_kind="work")) is True
+    assert ledger.create_task(_task(status=TaskStatus.BLOCKED)) is False  # a peer got there first
+    kept = ledger.get_task(tid())
+    assert (kept.status, kept.next_burst_kind) == (TaskStatus.CLAIMED, "work")
+
+
+def test_transition_is_compare_and_set_on_status(ledger):
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED, created_at=LONG_AGO, updated_at=LONG_AGO))
+
+    moved = ledger.transition_task(
+        tid(), {"status": TaskStatus.WORKING, "last_burst_at": "2026-08-14T09:00:00+00:00"},
+        expected_status=TaskStatus.CLAIMED, expected_holder=None,
+    )
+    assert moved is not None
+    assert (moved.status, moved.last_burst_at) == (TaskStatus.WORKING, "2026-08-14T09:00:00+00:00")
+    assert moved.created_at == LONG_AGO and moved.updated_at > LONG_AGO  # the row as written
+
+    # the same expectation again is stale now: nothing written, None returned
+    assert ledger.transition_task(
+        tid(), {"status": TaskStatus.BLOCKED}, expected_status=TaskStatus.CLAIMED, expected_holder=None
+    ) is None
+    assert ledger.get_task(tid()).status == TaskStatus.WORKING
+
+
+def test_transition_guards_the_holder_null_safely(ledger):
+    ledger.upsert_task(_task(status=TaskStatus.WORKING, claimed_by=REPLICA, claimed_until=FAR_AHEAD))
+    # the wrong holder — and "nobody" — both miss a held row
+    for holder in (PEER, None):
+        assert ledger.transition_task(
+            tid(), {"status": TaskStatus.CLAIMED}, expected_status=TaskStatus.WORKING, expected_holder=holder
+        ) is None
+    moved = ledger.transition_task(
+        tid(), {"status": TaskStatus.CLAIMED, "claimed_by": None, "claimed_until": None},
+        expected_status=TaskStatus.WORKING, expected_holder=REPLICA,
+    )
+    assert moved is not None and moved.claimed_by is None and moved.claimed_until is None
+    # and an unheld row is matched by "nobody", never by a name
+    assert ledger.transition_task(
+        tid(), {"attempts": 1}, expected_status=TaskStatus.CLAIMED, expected_holder=REPLICA
+    ) is None
+    assert ledger.transition_task(
+        tid(), {"attempts": 1}, expected_status=TaskStatus.CLAIMED, expected_holder=None
+    ).attempts == 1
+
+
+def test_transition_writes_only_the_columns_it_names(ledger):
+    ledger.upsert_task(_task(status=TaskStatus.WORKING, pr_number=7, attempts=2, session_id="sess-1"))
+    moved = ledger.transition_task(
+        tid(), {"status": TaskStatus.AWAITING_REVIEW}, expected_status=TaskStatus.WORKING, expected_holder=None
+    )
+    assert (moved.pr_number, moved.attempts, moved.session_id) == (7, 2, "sess-1")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{}, {"task_id": "x"}, {"created_at": LONG_AGO}, {"repository": "other/one"}, {"statuss": "typo"}],
+)
+def test_transition_refuses_what_is_not_a_transition(ledger, changes):
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED))
+    with pytest.raises(ValueError):
+        ledger.transition_task(tid(), changes, expected_status=TaskStatus.CLAIMED, expected_holder=None)
+
+
+def _claim(ledger, replica=REPLICA, **overrides):
+    params = dict(ceiling=20, since=LONG_AGO, lease_s=90, cooldown_s=300) | overrides
+    return ledger.claim_next(REPOSITORY, replica, **params)
+
+
+def test_claim_leases_the_oldest_eligible_task_to_the_caller(ledger):
+    ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
+    ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
+    ledger.upsert_task(_task(3, status=TaskStatus.AWAITING_REVIEW, created_at=LONG_AGO))
+
+    first = _claim(ledger)
+    assert first.task_id == tid(2)  # oldest claimed; awaiting_review is not queued work
+    assert first.claimed_by == REPLICA
+    assert _instant(first.claimed_until) > datetime.now(UTC)
+    assert first.status == TaskStatus.CLAIMED  # the lease is not the transition
+    assert ledger.get_task(tid(2)).claimed_by == REPLICA  # written, not just returned
+
+    second = _claim(ledger, replica=PEER)
+    assert second.task_id == tid(1)  # the leased row is skipped, the next one taken
+    assert _claim(ledger, replica="host-c:300") is None  # nothing left to lease
+
+
+def test_a_live_lease_is_skipped_and_a_lapsed_one_is_reclaimed(ledger):
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED, claimed_by=PEER, claimed_until=FAR_AHEAD))
+    assert _claim(ledger) is None
+
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED, claimed_by=PEER, claimed_until=LONG_AGO))
+    reclaimed = _claim(ledger)
+    assert reclaimed.claimed_by == REPLICA  # a lapsed lease is anyone's — visible data, never a held lock
+    assert _instant(reclaimed.claimed_until) > datetime.now(UTC)
+
+
+def test_the_failure_cooldown_is_the_claims_where_clause(ledger):
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED, attempts=1, last_burst_at=utc_now()))
+    assert _claim(ledger, cooldown_s=3600) is None  # failed a moment ago
+    assert _claim(ledger, cooldown_s=0) is not None  # cooled
+
+    ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, attempts=1, last_burst_at=LONG_AGO))
+    assert _claim(ledger, replica=PEER, cooldown_s=3600).task_id == tid(2)  # failed long ago
+
+
+def test_the_daily_rail_counts_admitted_work_not_recorded_bursts(ledger):
+    ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED))
+    ledger.upsert_task(_task(3, status=TaskStatus.DONE))
+    ledger.record_burst(_burst("b-old", issue_number=3, started_at="2026-08-01T00:00:00+00:00"))
+
+    # a burst started before the window is not today's
+    assert _claim(ledger, ceiling=1, since="2026-08-02T00:00:00+00:00").task_id == tid(1)
+    # that claim is a spawn in flight — a live lease with no burst row yet — and
+    # counts: under a ceiling of 1 the second replica is refused, not doubled
+    assert _claim(ledger, replica=PEER, ceiling=1, since="2026-08-02T00:00:00+00:00") is None
+    # once the burst row exists the lease and the row are one admission, not two
+    ledger.record_burst(_burst("b-new", issue_number=1))
+    assert _claim(ledger, replica=PEER, ceiling=2, since="2026-08-02T00:00:00+00:00").task_id == tid(2)
+    assert _claim(ledger, replica="host-c:300", ceiling=3, since="2026-08-02T00:00:00+00:00") is None
+
+
+def test_renewal_is_the_holders_alone(ledger):
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED))
+    leased = _claim(ledger)
+    before = _instant(leased.claimed_until)
+
+    assert ledger.renew_lease(tid(), PEER, lease_s=3600) is False  # not the holder
+    assert _instant(ledger.get_task(tid()).claimed_until) == before
+
+    assert ledger.renew_lease(tid(), REPLICA, lease_s=3600) is True
+    assert _instant(ledger.get_task(tid()).claimed_until) > before
+
+
+def test_orphaned_means_no_live_lease(ledger):
+    """What the reconciler may touch: rows whose lease lapsed or never existed.
+    A live lease — whoever holds it — is proof of life from any host."""
+    ledger.upsert_task(_task(1, status=TaskStatus.WORKING, claimed_by=PEER, claimed_until=FAR_AHEAD))
+    ledger.upsert_task(_task(2, status=TaskStatus.WORKING, claimed_by=PEER, claimed_until=LONG_AGO))
+    ledger.upsert_task(_task(3, status=TaskStatus.WORKING))  # pre-E1 shape: never leased
+    for issue in (1, 2, 3):
+        ledger.record_burst(_burst(f"b{issue}", issue_number=issue))
+
+    working = ledger.tasks_by_status(TaskStatus.WORKING, repository=REPOSITORY)
+    assert [t.issue_number for t in working] == [1, 2, 3]
+    orphaned = ledger.tasks_by_status(TaskStatus.WORKING, repository=REPOSITORY, orphaned=True)
+    assert [t.issue_number for t in orphaned] == [2, 3]
+
+    assert [b.burst_id for b in ledger.running_bursts(repository=REPOSITORY)] == ["b1", "b2", "b3"]
+    assert [b.burst_id for b in ledger.running_bursts(repository=REPOSITORY, orphaned=True)] == ["b2", "b3"]
+    assert [b.burst_id for b in ledger.running_bursts(orphaned=True)] == ["b2", "b3"]
+
+
+def test_no_call_leaves_a_transaction_open(ledger):
+    """The E1 done-when, at the store: every write shape returns with the
+    connection idle. `in_transaction` is the seam; the tick-level assertion —
+    idle at every I/O point — is tests/test_transactions.py."""
+    def idle(result=None):
+        assert ledger.in_transaction is False
+        return result
+
+    idle(ledger.upsert_task(_task(status=TaskStatus.CLAIMED)))
+    idle(ledger.create_task(_task(2, status=TaskStatus.CLAIMED)))
+    leased = idle(_claim(ledger))
+    idle(ledger.renew_lease(leased.task_id, REPLICA, 90))
+    idle(ledger.transition_task(
+        leased.task_id, {"status": TaskStatus.WORKING}, expected_status=TaskStatus.CLAIMED, expected_holder=REPLICA
+    ))
+    idle(ledger.transition_task(  # the losing branch too
+        leased.task_id, {"status": TaskStatus.WORKING}, expected_status=TaskStatus.CLAIMED, expected_holder=REPLICA
+    ))
+    burst = _burst(issue_number=leased.issue_number)
+    idle(ledger.record_burst(burst))
+    burst.status, burst.finished_at = BurstStatus.SUCCEEDED, utc_now()
+    idle(ledger.finish_burst(burst))
+    idle(ledger.finish_burst(burst))  # the refused finalize
+    idle(ledger.record_violation(Violation(task_id=leased.task_id, burst_id="b1", tool="Bash", reason="r")))
+    idle(ledger.touch_repository_burst(REPOSITORY, utc_now()))
+    idle(ledger.update_repository(REPOSITORY, {"team": "others"}, actor="t"))
+    idle(ledger.set_repository_state(REPOSITORY, "paused", actor="t", reason="because"))
+    with pytest.raises(RegistryError):
+        ledger.set_repository_state(REPOSITORY, "paused", actor="t", reason="again")
+    idle()
+    idle(ledger.update_role("dev", {"max_turns": 7}, actor="t"))
+    idle(ledger.tasks_by_status(TaskStatus.WORKING, orphaned=True))
+    idle(ledger.running_bursts(orphaned=True))
+    idle(ledger.bursts_started_since(LONG_AGO))
 
 
 # --- bursts ---
@@ -802,6 +1009,58 @@ def test_a_dropped_connection_costs_a_reconnect_not_the_loop(pg_dsn):
     ledger.upsert_task(_task(status=TaskStatus.WORKING))
     assert ledger.get_task(tid()).status == TaskStatus.WORKING
     ledger.close()
+
+
+@needs_postgres
+def test_a_locked_row_is_skipped_not_waited_for(pg_dsn):
+    """FOR UPDATE SKIP LOCKED, measured: a peer mid-statement on task 1 (here, a
+    transaction holding its row lock) costs this replica nothing — it takes
+    task 2 and returns at once. Without SKIP LOCKED the claim would block on
+    the peer's lock, which is exactly the "think-time wait" the discipline
+    forbids."""
+    from control_plane.postgres import PostgresLedger
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+    ledger = PostgresLedger(pg_dsn)
+    ledger.register_repository(RepositoryRecord(repository=REPOSITORY, team="owners"), actor="t")
+    ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
+    ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
+    try:
+        with psycopg.connect(pg_dsn) as peer:  # a transaction, deliberately — the peer's row lock
+            peer.execute("SELECT task_id FROM tasks WHERE task_id = %s FOR UPDATE", (tid(1),))
+            claimed = _claim(ledger)
+            assert claimed.task_id == tid(2)  # the older row is locked; skipped, not waited for
+            peer.rollback()
+        assert _claim(ledger, replica=PEER).task_id == tid(1)  # free again
+    finally:
+        ledger.close()
+
+
+@needs_postgres
+def test_the_admission_fence_is_try_only(pg_dsn):
+    """A peer inside admission holds the advisory lock; this replica idles the
+    tick rather than queue behind it — and claims nothing, because the count it
+    would have compared against is the peer's to change right now."""
+    from control_plane.postgres import ADMISSION_LOCK_KEY, PostgresLedger
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+    ledger = PostgresLedger(pg_dsn)
+    ledger.register_repository(RepositoryRecord(repository=REPOSITORY, team="owners"), actor="t")
+    ledger.upsert_task(_task(status=TaskStatus.CLAIMED))
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True) as peer:
+            assert peer.execute("SELECT pg_try_advisory_lock(%s)", (ADMISSION_LOCK_KEY,)).fetchone()[0]
+            assert _claim(ledger) is None  # fenced out, instantly
+            assert ledger.get_task(tid()).claimed_by is None
+            peer.execute("SELECT pg_advisory_unlock(%s)", (ADMISSION_LOCK_KEY,))
+        assert _claim(ledger).claimed_by == REPLICA
+        # and this replica released its own hold on the way out: a peer can take it
+        with psycopg.connect(pg_dsn, autocommit=True) as peer:
+            assert peer.execute("SELECT pg_try_advisory_lock(%s)", (ADMISSION_LOCK_KEY,)).fetchone()[0]
+    finally:
+        ledger.close()
 
 
 def test_the_dsn_password_never_reaches_the_log():

@@ -23,7 +23,7 @@ from control_plane.github_auth import (
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
 from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_only
 from control_plane.roles import validate as validate_role
-from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner
+from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, Heartbeat
 from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
@@ -122,6 +122,7 @@ def execute_burst(
     mount_codex: bool = False,
     extra_env: dict[str, str] | None = None,
     runner: DockerRunner | None = None,
+    heartbeat: Heartbeat | None = None,
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
 
@@ -136,7 +137,14 @@ def execute_burst(
     reviewer bursts get no GitHub credential at all — REVIEWERS.md.
     ``mount_codex`` mounts the operator's codex auth (slice 3, reviewer only).
     ``extra_env`` injects sandbox credentials — the declared-ref intersection
-    resolved at spawn (D4), tester bursts only (TESTER.md).
+    resolved at spawn (D4), tester bursts only (TESTER.md). ``heartbeat`` (E1)
+    is the scheduler's lease renewal, asked by the runner while the container
+    runs; the hand-run verb holds no lease and passes none.
+
+    Task writes here are the E1 shapes: the row is created if the ledger has
+    never seen it (never overwritten if it has), and the dev burst's session id
+    lands by compare-and-set against the (status, holder) the task carried on
+    entry — a task a peer has since moved is left as the peer left it.
 
     May raise GitHubAuthError (before the container starts) — callers decide
     whether that aborts (CLI) or waits for the next tick (scheduler).
@@ -191,8 +199,11 @@ def execute_burst(
     # bursts.task_id foreign key is what makes the order load-bearing, but the
     # order was always the honest one: the CLI can be handed a task the ledger has
     # never seen, and a burst is evidence about a task, so the task exists first.
-    # The second upsert after the harvest is what records the burst's results.
-    stores.ledger.upsert_task(task)
+    # Insert-if-absent (E1): a task the scheduler holds is already there, leased
+    # and `working`, and a whole-row write over it would be the blind overwrite
+    # the CAS discipline retires.
+    stores.ledger.create_task(task)
+    entered = (task.status, task.claimed_by)  # what the session write compares against
     with burst_span(task.task_id, burst_id, role, kind, model=model, parent=parent) as (
         span,
         traceparent,
@@ -227,7 +238,7 @@ def execute_burst(
             extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"
-        exit_code = runner.run(spec, log_path=log_path)
+        exit_code = runner.run(spec, log_path=log_path, heartbeat=heartbeat)
         burst.exit_code = exit_code
         burst.status = BurstStatus.SUCCEEDED if exit_code == 0 else BurstStatus.FAILED
         burst.finished_at = utc_now()
@@ -244,13 +255,24 @@ def execute_burst(
         if burst.model:
             span.set_attribute("burst.model", burst.model)  # resolved beats requested
         stores.ledger.finish_burst(burst)
-        if role == "dev":
+        if role == "dev" and burst.session_id and burst.session_id != task.session_id:
             # the task's session is the *dev's* memory — a reviewer burst's
             # session must never become what the next dev round resumes.
-            # The snapshot itself is on the burst row now (A5): tasks.transcript_*
-            # stop being written here and A6 (#17) backfills and drops them.
-            task.session_id = burst.session_id or task.session_id
-        stores.ledger.upsert_task(task)
+            # The snapshot itself is on the burst row now (A5); the id lands by
+            # CAS (E1): if the task has moved since this burst was spawned — a
+            # peer reclaimed a lapsed lease — its state is the peer's to write.
+            status, holder = entered
+            written = stores.ledger.transition_task(
+                task.task_id, {"session_id": burst.session_id},
+                expected_status=status, expected_holder=holder,
+            )
+            if written is None:
+                log.warning(
+                    "task moved under this burst — session id not recorded",
+                    task=task.task_id, burst=burst_id,
+                )
+            else:
+                task.session_id = written.session_id
 
         # Inside the span on purpose: this is the line a reader starts from, and
         # outside it the trace, burst and task ids are no longer bound (B1). The

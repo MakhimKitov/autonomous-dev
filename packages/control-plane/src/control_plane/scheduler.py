@@ -4,6 +4,14 @@ Task state lives on ``TaskRecord.status``; labels are reflective only. Serial
 by design — one burst globally. Each tick re-derives every decision from
 GitHub + the ledger, so a killed or crashed scheduler resumes cleanly.
 
+Every ledger write is one statement and no transaction outlives a call (E1,
+TO-BE §5): a task is *claimed* by a lease the claim statement stamps
+(`claim_next`), *moved* by compare-and-set on the (status, holder) this
+replica read (`_move`), and *kept* by a heartbeat that renews the lease while
+the container runs. A replica that dies leaves a lapsed lease — data any peer
+reconciles — never a held lock, and a peer's live lease is proof of life from
+any host, so two replicas over one ledger cannot double a burst.
+
 A ``Scheduler`` is one product's engine — its ledger reads are scoped to its
 repository, so two products in one ledger cannot see each other's tasks. The
 ``Fleet`` (C4) multiplexes N of them through the same serial loop: every tick
@@ -14,10 +22,12 @@ recently served product goes first.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
+import time
 import uuid
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
@@ -82,6 +92,10 @@ class Rails:
     daily_burst_ceiling: int = 20
     failure_cooldown_s: int = 300
     poll_interval_s: int = 60
+    # how long a replica's claim on a task holds without a heartbeat (E1) —
+    # the longest a dead replica's work stays owned before a peer reconciles it.
+    # Renewed every third of it while the container runs.
+    lease_s: int = 90
     # per-burst budget and turns left this class at D5: they are the role row's
     # (`max_budget_usd`, `max_turns`), read by execute_burst at every spawn
 
@@ -100,7 +114,15 @@ class Rails:
             daily_burst_ceiling=_get("SCHEDULER_DAILY_BURST_CEILING", int, defaults.daily_burst_ceiling),
             failure_cooldown_s=_get("SCHEDULER_FAILURE_COOLDOWN_S", int, defaults.failure_cooldown_s),
             poll_interval_s=_get("SCHEDULER_POLL_INTERVAL_S", int, defaults.poll_interval_s),
+            lease_s=_get("SCHEDULER_LEASE_S", int, defaults.lease_s),
         )
+
+
+def default_replica() -> str:
+    """Who this process is in `tasks.claimed_by`: host and pid. Unique per live
+    process with nothing to configure, and readable in the row — a lapsed
+    lease says which host to look at."""
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 class Scheduler:
@@ -121,6 +143,7 @@ class Scheduler:
         image: str = DEFAULT_IMAGE,
         sync_clone: Callable[[], Path] | None = None,
         sync_clone_ref: Callable[[str], Path] | None = None,
+        replica: str | None = None,
     ) -> None:
         self.stores = stores
         self.api = api
@@ -146,6 +169,7 @@ class Scheduler:
         # them at spawn; the scheduler no longer carries a model at all
         self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
         self.sync_clone_ref = sync_clone_ref  # same, to a PR head sha (assess bursts)
+        self.replica = replica or default_replica()  # the name on this replica's leases (E1)
         self.current_burst_id: str | None = None  # for the kill switch mid-burst
 
     # --- stop flag ---
@@ -170,21 +194,85 @@ class Scheduler:
         if task is not None:
             self.run_task_burst(task)
 
+    # --- the ledger writes (E1) ---
+
+    def _move(self, task: TaskRecord, **changes) -> bool:
+        """The one way this class moves a task: compare-and-set against the
+        (status, holder) the record was read with, writing only `changes`. The
+        record is refreshed from the row as written. False means the row had
+        moved — a peer got there first — and nothing was written; callers stop
+        acting on a task that is no longer theirs to act on."""
+        written = self.stores.ledger.transition_task(
+            task.task_id, changes, expected_status=task.status, expected_holder=task.claimed_by
+        )
+        if written is None:
+            log.warning(
+                "task moved under us — a peer got there first, nothing written",
+                task=task.task_id, expected=task.status, wanted=changes.get("status", task.status),
+            )
+            return False
+        for name, value in asdict(written).items():
+            setattr(task, name, value)
+        return True
+
+    @staticmethod
+    def _released() -> dict:
+        """The lease columns cleared — every transition that ends a burst
+        carries them, so a task never sits `claimed` under a stale lease."""
+        return {"claimed_by": None, "claimed_until": None}
+
+    def _heartbeat(self, task: TaskRecord) -> Callable[[], bool]:
+        """The lease renewal the runner asks while the container runs (E1). Asked
+        every few seconds; renews on the first beat — the claim's stamp is as old
+        as the clone sync took — and every third of the lease after. False — the
+        lease is lost, a peer took the task — makes the runner fence the burst.
+        A ledger error is not a lost lease: the burst keeps going and the next
+        beat retries, because killing live work on a database blip is the worse
+        mistake."""
+        every = self.rails.lease_s / 3
+        last = float("-inf")
+
+        def beat() -> bool:
+            nonlocal last
+            if time.monotonic() - last < every:
+                return True
+            last = time.monotonic()
+            try:
+                renewed = self.stores.ledger.renew_lease(task.task_id, self.replica, self.rails.lease_s)
+            except Exception as exc:  # noqa: BLE001 — any store error; see the docstring
+                log.warning("lease renewal failed — keeping the burst, retrying next beat",
+                            task=task.task_id, error=str(exc))
+                return True
+            if not renewed:
+                log.error("lease lost — a peer holds the task now", task=task.task_id)
+            return renewed
+
+        return beat
+
     # --- crash recovery ---
 
     def reconcile_running(self) -> None:
-        """Ledger says running, docker says gone → the scheduler died mid-burst."""
-        for burst in self.stores.ledger.running_bursts(repository=self.api.repo):
+        """A running burst or a working task that no live lease covers is a
+        replica that died mid-burst (E1). A live lease is a peer's proof of life
+        from any host and is never touched; a container visible on *this* host
+        is proof of life too — the lease lapsed, the work did not (a heartbeat
+        that could not reach the ledger) — and its task is left alone."""
+        repo = self.api.repo
+        alive: set[str] = set()
+        for burst in self.stores.ledger.running_bursts(repository=repo, orphaned=True):
             if self._container_alive(burst.burst_id):
+                alive.add(burst.task_id)
                 continue
             burst.status = BurstStatus.KILLED
             burst.finished_at = utc_now()
             self.stores.ledger.finish_burst(burst)
             log.warning("burst died without a result — marked killed", burst=burst.burst_id)
-        # a WORKING task with no live burst is the same crash, seen from the task side
+        # a WORKING task nobody holds is the same crash, seen from the task side
         for task in self.stores.ledger.tasks_by_status(
-            TaskStatus.WORKING, repository=self.api.repo
+            TaskStatus.WORKING, repository=repo, orphaned=True
         ):
+            if task.task_id in alive:
+                continue
             self._register_failure(task, "the scheduler crashed or was killed mid-burst")
 
     def _container_alive(self, burst_id: str) -> bool:
@@ -214,17 +302,26 @@ class Scheduler:
                 TaskStatus.AWAITING_REVIEW,
             ):
                 continue  # already ours; the label is drift
-            if task is None:
-                task = self._new_task(issue.number)
-            task.status = TaskStatus.CLAIMED
-            task.attempts = 0  # a human re-`ready` is a fresh grant
-            task.review_rounds = 0
-            task.next_burst_kind = WORK
-            if task.pr_number:  # re-readied with a PR still open → resume the review path
+            kind = WORK
+            if task is not None and task.pr_number:  # re-readied with a PR still open → resume the review path
                 pr = self.api.get_pr(task.pr_number)
                 if pr.state == "open" and not pr.merged:
-                    task.next_burst_kind = REVIEW
-            self.stores.ledger.upsert_task(task)
+                    kind = REVIEW
+            if task is None:
+                task = self._new_task(issue.number)
+                task.status = TaskStatus.CLAIMED
+                task.next_burst_kind = kind
+                if not self.stores.ledger.create_task(task):
+                    continue  # a peer claimed it between our lookup and our insert
+            elif not self._move(
+                task,
+                status=TaskStatus.CLAIMED,
+                attempts=0,  # a human re-`ready` is a fresh grant
+                review_rounds=0,
+                next_burst_kind=kind,
+                **self._released(),
+            ):
+                continue
             self.api.remove_label(issue.number, "ready")
             self.api.add_labels(issue.number, ["in-progress"])
             log.info(
@@ -256,10 +353,9 @@ class Scheduler:
             TaskStatus.CLAIMED, TaskStatus.AWAITING_REVIEW, repository=self.api.repo
         ):
             issue = self.api.get_issue(task.issue_number)
-            if "blocked" in issue.labels:
-                task.status = TaskStatus.BLOCKED
-                task.next_burst_kind = None
-                self.stores.ledger.upsert_task(task)
+            if "blocked" in issue.labels and self._move(
+                task, status=TaskStatus.BLOCKED, next_burst_kind=None, **self._released()
+            ):
                 log.info("issue carries `blocked` — parked for a human", issue=task.task_id)
 
     def _advance_awaiting_review(self) -> None:
@@ -271,50 +367,41 @@ class Scheduler:
             number = task.issue_number
             pr = self.api.get_pr(task.pr_number)
             if pr.merged:
-                task.status = TaskStatus.DONE
-                task.next_burst_kind = None
-                self.stores.ledger.upsert_task(task)
-                self.api.remove_label(number, "in-progress")
-                log.info("pr merged — task done", task=task.task_id, pr=task.pr_number)
+                if self._move(task, status=TaskStatus.DONE, next_burst_kind=None):
+                    self.api.remove_label(number, "in-progress")
+                    log.info("pr merged — task done", task=task.task_id, pr=task.pr_number)
                 continue
             if pr.state == "closed":
-                task.status = TaskStatus.BLOCKED
-                task.next_burst_kind = None
-                self.stores.ledger.upsert_task(task)
-                self.api.comment(number, "⛔ control plane: PR closed without merge — parking this task for a human.")
-                self.api.remove_label(number, "in-progress")
-                log.warning("pr closed unmerged — task blocked", task=task.task_id, pr=task.pr_number)
+                if self._move(task, status=TaskStatus.BLOCKED, next_burst_kind=None):
+                    self.api.comment(number, "⛔ control plane: PR closed without merge — parking this task for a human.")
+                    self.api.remove_label(number, "in-progress")
+                    log.warning("pr closed unmerged — task blocked", task=task.task_id, pr=task.pr_number)
                 continue
             pending, owner_triggered = self._actionable_reviews(task)
             if not pending:
                 continue
             if task.review_rounds >= self.rails.max_review_rounds:
                 if owner_triggered:
-                    task.status = TaskStatus.BLOCKED
-                    task.next_burst_kind = None
-                    self.stores.ledger.upsert_task(task)
-                    self.api.comment(
-                        number,
-                        f"⛔ control plane: parking this task after {task.review_rounds} review rounds — "
-                        "a human can re-add `ready` to grant more.",
-                    )
-                    self.api.remove_label(number, "in-progress")
-                else:
-                    # machine-review rounds cap softly: stop chasing, the human gate decides
-                    task.last_review_id = max(review.id for review in pending)
-                    self.stores.ledger.upsert_task(task)
+                    if self._move(task, status=TaskStatus.BLOCKED, next_burst_kind=None):
+                        self.api.comment(
+                            number,
+                            f"⛔ control plane: parking this task after {task.review_rounds} review rounds — "
+                            "a human can re-add `ready` to grant more.",
+                        )
+                        self.api.remove_label(number, "in-progress")
+                # machine-review rounds cap softly: stop chasing, the human gate decides
+                elif self._move(task, last_review_id=max(review.id for review in pending)):
                     self.api.comment(
                         number,
                         f"ℹ️ control plane: review-round cap ({task.review_rounds}) reached — "
                         "remaining reviewer findings are left for the owner's review.",
                     )
                 continue
-            task.review_rounds += 1
-            task.status = TaskStatus.CLAIMED
-            task.next_burst_kind = REVIEW
-            self.stores.ledger.upsert_task(task)
-            trigger = "changes requested" if owner_triggered else "reviewer findings"
-            log.info("review round queued", pr=task.pr_number, trigger=trigger, round=task.review_rounds)
+            if self._move(
+                task, status=TaskStatus.CLAIMED, next_burst_kind=REVIEW, review_rounds=task.review_rounds + 1
+            ):
+                trigger = "changes requested" if owner_triggered else "reviewer findings"
+                log.info("review round queued", pr=task.pr_number, trigger=trigger, round=task.review_rounds)
 
     def _actionable_reviews(self, task: TaskRecord) -> tuple[list[Review], bool]:
         """(reviews to address, owner_triggered) above the processed cursor.
@@ -352,26 +439,21 @@ class Scheduler:
     # --- spawning ---
 
     def pick_next(self) -> TaskRecord | None:
-        claimed = self.stores.ledger.tasks_by_status(
-            TaskStatus.CLAIMED, repository=self.api.repo
-        )
-        if not claimed:
-            return None
+        """Admission (TO-BE §5): the daily rail and the claim, as one ledger
+        call — the oldest eligible `claimed` task comes back *leased to this
+        replica* by the statement that picked it, or nothing does. The rails are
+        the statement's WHERE (cooldown) and its fence (ceiling); the day
+        boundary is the one thing computed here, because it is a calendar fact,
+        not a comparison."""
         day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        started = self.stores.ledger.bursts_started_since(day_start, repository=self.api.repo)
-        if started >= self.rails.daily_burst_ceiling:
-            log.warning("daily burst ceiling reached — not spawning", ceiling=self.rails.daily_burst_ceiling)
-            return None
-        now = datetime.now(UTC)
-        for task in claimed:  # oldest first (query order)
-            if task.attempts and task.last_burst_at:
-                cooled_at = datetime.fromisoformat(task.last_burst_at) + timedelta(
-                    seconds=self.rails.failure_cooldown_s
-                )
-                if now < cooled_at:
-                    continue
-            return task
-        return None
+        return self.stores.ledger.claim_next(
+            self.api.repo,
+            self.replica,
+            ceiling=self.rails.daily_burst_ceiling,
+            since=day_start,
+            lease_s=self.rails.lease_s,
+            cooldown_s=self.rails.failure_cooldown_s,
+        )
 
     def run_task_burst(self, task: TaskRecord) -> None:
         number = task.issue_number
@@ -397,16 +479,15 @@ class Scheduler:
         else:
             pending, owner_triggered = self._actionable_reviews(task)
             if not pending:  # review dismissed/vanished between ticks
-                task.status = TaskStatus.AWAITING_REVIEW
-                self.stores.ledger.upsert_task(task)
+                self._move(task, status=TaskStatus.AWAITING_REVIEW, **self._released())
                 return
             prompt = review_prompt(task.pr_number, pending, self.api.list_review_comments(task.pr_number))
             head_before = self.api.get_pr(task.pr_number).head_sha
 
-        task.status = TaskStatus.WORKING
-        task.last_burst_at = utc_now()
-        self.stores.ledger.upsert_task(task)
-
+        # claimed → working, guarded by our lease: a peer that reclaimed the task
+        # while we synced the clone owns it now, and we spawn nothing
+        if not self._move(task, status=TaskStatus.WORKING, last_burst_at=utc_now()):
+            return
         self.current_burst_id = uuid.uuid4().hex[:12]
         try:
             outcome = execute_burst(
@@ -418,6 +499,7 @@ class Scheduler:
                 with_github=True,  # dev bursts push branches and open PRs
                 image=self.image,
                 burst_id=self.current_burst_id,
+                heartbeat=self._heartbeat(task),
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -431,19 +513,21 @@ class Scheduler:
             return
 
         queue_assess = False
+        changes: dict = {}
         if kind == WORK:
             pr = self.api.open_pr_with_branch_prefix(f"dev/{number}-")
             if pr is None:
                 # the work burst's contract is a PR; anything less is a failed attempt
                 self._register_failure(task, f"burst {outcome.burst.burst_id} succeeded but opened no PR")
                 return
-            task.pr_number = pr.number
+            task.pr_number = pr.number  # the re-review below reads it; the CAS writes it
+            changes["pr_number"] = pr.number
             log.info("pr opened", task=task.task_id, pr=pr.number)
             # fire every active provider (REVIEWERS.md); the owner sees the PR exists
             self._request_re_review(task, [*self._active_request_providers(), self.owner])
             queue_assess = self.review.claude
         else:
-            task.last_review_id = max(review.id for review in pending)
+            changes["last_review_id"] = max(review.id for review in pending)
             pushed = self.api.get_pr(task.pr_number).head_sha != head_before
             if owner_triggered:
                 self._request_re_review(task, [*self._active_request_providers(), self.owner])
@@ -453,13 +537,11 @@ class Scheduler:
             # reply-only round: threads answered, same diff — re-reviewing would loop
             queue_assess = self.review.claude and pushed
         if queue_assess:
-            task.status = TaskStatus.CLAIMED
-            task.next_burst_kind = ASSESS
+            changes.update(status=TaskStatus.CLAIMED, next_burst_kind=ASSESS)
             log.info("machine review queued", pr=task.pr_number)
         else:
-            task.status = TaskStatus.AWAITING_REVIEW
-            task.next_burst_kind = None
-        self.stores.ledger.upsert_task(task)
+            changes.update(status=TaskStatus.AWAITING_REVIEW, next_burst_kind=None)
+        self._move(task, **changes, **self._released())
 
     def _run_assess_burst(self, task: TaskRecord) -> None:
         """A reviewer-role burst judging the open PR (REVIEWERS.md): fresh
@@ -467,9 +549,8 @@ class Scheduler:
         control plane posts them as the reviewer App."""
         pr = self.api.get_pr(task.pr_number)
         if pr.merged or pr.state != "open":
-            task.status = TaskStatus.AWAITING_REVIEW  # resolved while queued — nothing to judge
-            task.next_burst_kind = None
-            self.stores.ledger.upsert_task(task)
+            # resolved while queued — nothing to judge
+            self._move(task, status=TaskStatus.AWAITING_REVIEW, next_burst_kind=None, **self._released())
             return
         repo = self.repo
         if self.sync_clone_ref is not None:
@@ -479,10 +560,8 @@ class Scheduler:
                 self._register_failure(task, f"platform clone sync failed: {exc}")
                 return
 
-        task.status = TaskStatus.WORKING
-        task.last_burst_at = utc_now()
-        self.stores.ledger.upsert_task(task)
-
+        if not self._move(task, status=TaskStatus.WORKING, last_burst_at=utc_now()):
+            return
         self.current_burst_id = uuid.uuid4().hex[:12]
         try:
             outcome = execute_burst(
@@ -495,6 +574,7 @@ class Scheduler:
                 fresh=True,  # deliberately amnesiac — no shared context with the dev
                 image=self.image,
                 burst_id=self.current_burst_id,
+                heartbeat=self._heartbeat(task),
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -516,14 +596,12 @@ class Scheduler:
         # the funnel (TESTER.md): only a clean assess queues the sandbox —
         # no boot for a diff that findings are about to change
         if not parsed.findings and self._test_queueable(task, repo):
-            task.status = TaskStatus.CLAIMED
-            task.next_burst_kind = TEST
+            changes = {"status": TaskStatus.CLAIMED, "next_burst_kind": TEST}
             log.info("machine test queued", pr=task.pr_number)
         else:
-            task.status = TaskStatus.AWAITING_REVIEW
-            task.next_burst_kind = None
-        task.attempts = 0  # machine-stage retries must not poison later dev rounds
-        self.stores.ledger.upsert_task(task)
+            changes = {"status": TaskStatus.AWAITING_REVIEW, "next_burst_kind": None}
+        # attempts=0: machine-stage retries must not poison later dev rounds
+        self._move(task, **changes, attempts=0, **self._released())
 
     def _test_queueable(self, task: TaskRecord, repo: Path) -> bool:
         """Whether the tester can plug in (TESTER.md): policy on, the product
@@ -566,9 +644,8 @@ class Scheduler:
         harvest and posts as a PR comment."""
         pr = self.api.get_pr(task.pr_number)
         if pr.merged or pr.state != "open":
-            task.status = TaskStatus.AWAITING_REVIEW  # resolved while queued — nothing to test
-            task.next_burst_kind = None
-            self.stores.ledger.upsert_task(task)
+            # resolved while queued — nothing to test
+            self._move(task, status=TaskStatus.AWAITING_REVIEW, next_burst_kind=None, **self._released())
             return
         repo = self.repo
         if self.sync_clone_ref is not None:
@@ -590,10 +667,8 @@ class Scheduler:
             self._register_failure(task, f"sandbox credentials missing: {', '.join(missing)}")
             return
 
-        task.status = TaskStatus.WORKING
-        task.last_burst_at = utc_now()
-        self.stores.ledger.upsert_task(task)
-
+        if not self._move(task, status=TaskStatus.WORKING, last_burst_at=utc_now()):
+            return
         self.current_burst_id = uuid.uuid4().hex[:12]
         try:
             outcome = execute_burst(
@@ -607,6 +682,7 @@ class Scheduler:
                 image=self.image,
                 burst_id=self.current_burst_id,
                 extra_env=sandbox_env,  # the resolved intersection — tester bursts only
+                heartbeat=self._heartbeat(task),
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -636,10 +712,10 @@ class Scheduler:
         self._post_test_report(
             task, report, head_sha=pr.head_sha, model=model, filed=filed, citations=citations
         )
-        task.status = TaskStatus.AWAITING_REVIEW
-        task.next_burst_kind = None
-        task.attempts = 0  # machine-stage retries must not poison later dev rounds
-        self.stores.ledger.upsert_task(task)
+        # attempts=0: machine-stage retries must not poison later dev rounds
+        self._move(
+            task, status=TaskStatus.AWAITING_REVIEW, next_burst_kind=None, attempts=0, **self._released()
+        )
 
     def _file_auto_issues(self, task: TaskRecord, report, head_sha: str = "") -> list[int]:
         """Relay the tester-authored issues for pre-existing defects (TESTER.md):
@@ -777,17 +853,21 @@ class Scheduler:
     # --- failure rail ---
 
     def _register_failure(self, task: TaskRecord, reason: str) -> None:
-        task.attempts += 1
-        task.last_burst_at = utc_now()
-        if task.attempts >= self.rails.max_attempts:
-            number = task.issue_number
+        """One failed attempt, by CAS: the ledger moves first, the comments and
+        labels follow only if it did — a peer that moved the task already spoke
+        for it. The lease is released in the same statement."""
+        attempts = task.attempts + 1
+        number = task.issue_number
+        if attempts >= self.rails.max_attempts:
             if task.next_burst_kind in MACHINE_STAGES:
                 # machine stages are additive (REVIEWERS.md, TESTER.md): give up
                 # on the stage, never on the task — it proceeds to the human gate
                 stage = "review" if task.next_burst_kind == ASSESS else "test"
-                task.status = TaskStatus.AWAITING_REVIEW
-                task.next_burst_kind = None
-                task.attempts = 0
+                if not self._move(
+                    task, status=TaskStatus.AWAITING_REVIEW, next_burst_kind=None, attempts=0,
+                    last_burst_at=utc_now(), **self._released(),
+                ):
+                    return
                 self.api.comment(
                     number,
                     f"ℹ️ control plane: machine {stage} could not run ({reason}) — "
@@ -795,19 +875,23 @@ class Scheduler:
                 )
                 log.warning("machine stage given up", task=task.task_id, stage=stage, reason=reason)
             else:
-                task.status = TaskStatus.BLOCKED
-                task.next_burst_kind = None
+                if not self._move(
+                    task, status=TaskStatus.BLOCKED, next_burst_kind=None, attempts=attempts,
+                    last_burst_at=utc_now(), **self._released(),
+                ):
+                    return
                 self.api.comment(
                     number,
-                    f"⛔ control plane: parking this task after {task.attempts} failed attempts — {reason}. "
+                    f"⛔ control plane: parking this task after {attempts} failed attempts — {reason}. "
                     "A human can re-add `ready` to retry.",
                 )
                 self.api.remove_label(number, "in-progress")
-                log.error("task blocked", task=task.task_id, attempts=task.attempts, reason=reason)
-        else:
-            task.status = TaskStatus.CLAIMED  # next_burst_kind unchanged — retry the same kind
-            log.warning("attempt failed — will retry", task=task.task_id, attempt=task.attempts, reason=reason)
-        self.stores.ledger.upsert_task(task)
+                log.error("task blocked", task=task.task_id, attempts=attempts, reason=reason)
+        # next_burst_kind unchanged — retry the same kind
+        elif self._move(
+            task, status=TaskStatus.CLAIMED, attempts=attempts, last_burst_at=utc_now(), **self._released()
+        ):
+            log.warning("attempt failed — will retry", task=task.task_id, attempt=attempts, reason=reason)
 
 
 # --- the fleet (C4): one serial loop, N products ---

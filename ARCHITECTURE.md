@@ -301,6 +301,19 @@ the ephemeral container.
 > the tool allowlist, the image's role preamble, the deny floor, and read-only
 > mounts for every reader — a row narrows, never widens. Tool narrowing and
 > custom-role execution reach the container together, with T4's triggers.
+>
+> **As built (E1):** the ledger discipline is enforced, not described (TO-BE
+> §5, "transactional, but not interactive"). Work is claimed as a lease — one
+> `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING` stamps `tasks.claimed_by` /
+> `claimed_until` on the oldest eligible row, with the cooldown in its WHERE
+> and the daily ceiling behind the one advisory lock the design allows —
+> every transition is a compare-and-set on the (status, holder) the replica
+> read, and the lease is renewed by a heartbeat while the container runs. A
+> replica that dies leaves a lapsed lease any peer reconciles; a live lease is
+> proof of life from any host, so `docker ps` on one machine never judges a
+> burst on another. No code path holds a transaction across I/O, and the suite
+> asserts it at every seam of a tick, on both backends. Two replicas over one
+> ledger is the shape this makes possible; the test that runs them is E2.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

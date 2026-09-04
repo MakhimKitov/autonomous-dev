@@ -20,13 +20,18 @@ schema, which is right for money and wrong for `BurstRecord.cost_usd: float | No
 
 **Nothing holds a transaction open.** The connection is `autocommit`, every write
 is one statement — including `record_violation`, which writes two rows through one
-data-modifying CTE rather than two statements in a transaction. The only
-compare-and-set is `finish_burst`'s. There is no method here that could keep a
-transaction open across application logic or I/O (STORES.md, "transactional, but
-not interactive"), and no ORM to accidentally introduce one.
+data-modifying CTE rather than two statements in a transaction. Every task write
+the scheduler makes is a compare-and-set (`transition_task`, `finish_burst`) or a
+lease statement (`claim_next`, `renew_lease` — E1). There is no method here that
+could keep a transaction open across application logic or I/O (STORES.md,
+"transactional, but not interactive"), no ORM to accidentally introduce one, and
+`in_transaction` is how the suite checks that after every call.
 
-Deliberately still absent: the lease/claim statements, which need `claimed_by` /
-`claimed_until` columns and land with E1 (#32) where contention is real.
+The one thing wider than a statement is admission's advisory lock (`claim_next`):
+a session-level `pg_try_advisory_lock` around two statements — the rail's
+aggregate and the claim — held for microseconds inside this method and released
+before it returns; a replica that dies holding it releases it with its session.
+It is what makes the daily rail exact across replicas, and it fences no I/O.
 
 Connection handling is one long-lived connection with a reconnect guard — enough
 for a single scheduler, and the seam a pool replaces when replicas arrive (E).
@@ -61,14 +66,21 @@ from control_plane.models import (
 )
 from control_plane.roles import RoleError
 from control_plane.roles import check_settable as check_role_settable
-from control_plane.store import RegistryError, _check_settable, _registry_transition
+from control_plane.store import RegistryError, _check_settable, _check_transition, _registry_transition
 
 log = structlog.get_logger()
 
 # Which columns are timestamps, per table. Declared, not detected: the store layer
 # is the only place that knows, and a silent miss would hand a caller a datetime
 # where every other backend hands it a string.
-_TASK_TIMESTAMPS = ("last_burst_at", "created_at", "updated_at")
+_TASK_TIMESTAMPS = ("last_burst_at", "claimed_until", "created_at", "updated_at")
+
+# The admission fence (TO-BE §5): one key, cluster-wide. Admission is the single
+# serialized section the design allows, and it serializes an aggregate decision
+# (today per product, later fair share across them), so one key is the honest
+# scope. Any int64 would do; this one spells what it is.
+ADMISSION_LOCK_KEY = 0x41444D49  # 'ADMI'
+
 _BURST_TIMESTAMPS = ("started_at", "finished_at")
 _VIOLATION_TIMESTAMPS = ("at",)
 _EVENT_TIMESTAMPS = ("created_at",)
@@ -330,28 +342,148 @@ class PostgresLedger:
             data,
         )
 
+    # --- transitions and leases (E1) ---
+    #
+    # The scheduler's task writes, each one statement: insert-if-absent,
+    # compare-and-set on (status, holder) with RETURNING, the lease claim with
+    # FOR UPDATE SKIP LOCKED, the heartbeat renewal. Rowcount decides everywhere;
+    # nothing here reads and then writes. Time enters a comparison only as the
+    # database's now() (STORES.md, "One clock"): lease expiry and the failure
+    # cooldown are the ledger's arithmetic, so replica clock skew cannot decide
+    # who owns what.
+
+    def create_task(self, task: TaskRecord) -> bool:
+        """Insert the row if the ledger has never seen the task; False when it
+        has — untouched, whatever state it is in. Two replicas claiming one
+        issue compute the same id (A6), and the second learns it lost here."""
+        data = _bind(task, _TASK_TIMESTAMPS)
+        columns = ", ".join(data)
+        placeholders = ", ".join(f"%({column})s" for column in data)
+        cursor = self._execute(
+            f"INSERT INTO tasks ({columns}) VALUES ({placeholders}) ON CONFLICT DO NOTHING", data
+        )
+        return cursor.rowcount == 1
+
+    def transition_task(
+        self, task_id: str, changes: dict, *, expected_status: str, expected_holder: str | None
+    ) -> TaskRecord | None:
+        """Compare-and-set (STORES.md, "Transition"): write `changes` if the row
+        still reads (`expected_status`, `expected_holder`); the row as written,
+        or None when it had moved — the caller lost the race and writes nothing.
+        `IS NOT DISTINCT FROM` is the null-safe equality: an unleased row's
+        holder is NULL."""
+        _check_transition(changes)
+        values = dict(changes)
+        for column in _TASK_TIMESTAMPS:
+            if column in values:
+                values[column] = _to_datetime(values[column])
+        # column names come from TASK_TRANSITION_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = %({column})s" for column in values)
+        row = self._execute(
+            f"UPDATE tasks SET {assignments}, updated_at = %(_updated_at)s "
+            f"WHERE task_id = %(_task_id)s AND status = %(_status)s "
+            f"  AND claimed_by IS NOT DISTINCT FROM %(_holder)s "
+            f"RETURNING *",
+            {**values, "_updated_at": _to_datetime(utc_now()), "_task_id": task_id,
+             "_status": expected_status, "_holder": expected_holder},
+        ).fetchone()
+        return None if row is None else _load(row, TaskRecord, _TASK_TIMESTAMPS)
+
+    def claim_next(
+        self, repository: str, replica: str, *, ceiling: int, since: str, lease_s: float, cooldown_s: float
+    ) -> TaskRecord | None:
+        """Admission (TO-BE §5) under the one advisory lock: the daily rail's
+        aggregate, then the claim — the oldest `claimed` task of the product
+        whose lease nobody holds and whose failure cooldown has passed, leased to
+        `replica` for `lease_s` by the statement that picks it (STORES.md,
+        "Claim — a lease is data"). `FOR UPDATE SKIP LOCKED` makes two replicas
+        inside the same microsecond take different rows rather than wait.
+
+        The rail counts *admitted* work, not recorded bursts: bursts started
+        since `since`, plus spawns in flight — a live lease with no running burst
+        row yet. Under the lock that sum is exact across replicas; without the
+        second term two of them would each see "one under the ceiling" and both
+        spawn. Its one imprecision is conservative (a burst that has just
+        finished but whose task has not yet moved counts twice for a few seconds
+        — a spawn deferred a tick, never one over the rail).
+
+        The lock is session-level and try-only: a peer holding it means a peer is
+        admitting right now, and this replica idles the tick rather than queue
+        behind it — admission is microseconds, the next tick is a minute away. A
+        replica that dies inside releases it with its session; `finally` releases
+        it on every other path.
+        """
+        fenced = self._execute(
+            "SELECT pg_try_advisory_lock(%s) AS held", (ADMISSION_LOCK_KEY,)
+        ).fetchone()["held"]
+        if not fenced:
+            log.info("admission fence held by a peer — idling this tick", repo=repository)
+            return None
+        try:
+            admitted = self._execute(
+                "SELECT (SELECT count(*) FROM bursts b JOIN tasks t ON t.task_id = b.task_id"
+                "        WHERE t.repository = %(repository)s AND b.started_at >= %(since)s)"
+                "     + (SELECT count(*) FROM tasks t"
+                "        WHERE t.repository = %(repository)s AND t.claimed_until > now()"
+                "          AND NOT EXISTS (SELECT 1 FROM bursts b"
+                "                          WHERE b.task_id = t.task_id AND b.status = 'running')) AS n",
+                {"repository": repository, "since": _to_datetime(since)},
+            ).fetchone()["n"]
+            if admitted >= ceiling:
+                log.warning("daily burst ceiling reached — not spawning", repo=repository, ceiling=ceiling)
+                return None
+            row = self._execute(
+                "UPDATE tasks SET claimed_by = %(replica)s,"
+                "                 claimed_until = now() + make_interval(secs => %(lease_s)s) "
+                "WHERE task_id = ("
+                "    SELECT task_id FROM tasks"
+                "    WHERE repository = %(repository)s AND status = 'claimed'"
+                "      AND (claimed_until IS NULL OR claimed_until < now())"
+                "      AND (attempts = 0 OR last_burst_at IS NULL"
+                "           OR last_burst_at + make_interval(secs => %(cooldown_s)s) <= now())"
+                "    ORDER BY created_at, task_id"
+                "    FOR UPDATE SKIP LOCKED"
+                "    LIMIT 1"
+                ") RETURNING *",
+                {"replica": replica, "lease_s": float(lease_s), "repository": repository,
+                 "cooldown_s": float(cooldown_s)},
+            ).fetchone()
+        finally:
+            self._execute("SELECT pg_advisory_unlock(%s)", (ADMISSION_LOCK_KEY,))
+        return None if row is None else _load(row, TaskRecord, _TASK_TIMESTAMPS)
+
+    def renew_lease(self, task_id: str, replica: str, lease_s: float) -> bool:
+        """The heartbeat: push the lease out by `lease_s`, only while `replica`
+        still holds it. False means a peer has taken the task — the caller's
+        work is no longer wanted and it fences itself off."""
+        cursor = self._execute(
+            "UPDATE tasks SET claimed_until = now() + make_interval(secs => %s) "
+            "WHERE task_id = %s AND claimed_by = %s",
+            (float(lease_s), task_id, replica),
+        )
+        return cursor.rowcount == 1
+
     def get_task(self, task_id: str) -> TaskRecord | None:
         row = self._execute("SELECT * FROM tasks WHERE task_id = %s", (task_id,)).fetchone()
         return None if row is None else _load(row, TaskRecord, _TASK_TIMESTAMPS)
 
     def tasks_by_status(
-        self, *statuses: str, repository: str | None = None
+        self, *statuses: str, repository: str | None = None, orphaned: bool = False
     ) -> list[TaskRecord]:
         # ORDER BY created_at alone is not a total order, and an unbroken tie is
         # resolved by the plan — index order under one, heap order under another.
         # `task_id` makes the answer the query's rather than the planner's (A7).
         # The repository scope is C4: a product's scheduler sees only its own.
-        if repository is None:
-            rows = self._execute(
-                "SELECT * FROM tasks WHERE status = ANY(%s) ORDER BY created_at, task_id",
-                (list(statuses),),
-            ).fetchall()
-        else:
-            rows = self._execute(
-                "SELECT * FROM tasks WHERE status = ANY(%s) AND repository = %s "
-                "ORDER BY created_at, task_id",
-                (list(statuses), repository),
-            ).fetchall()
+        # `orphaned` (E1) keeps only rows no live lease covers — what a dead
+        # replica leaves behind, and what the reconciler may touch.
+        query = "SELECT * FROM tasks WHERE status = ANY(%s)"
+        params: list[Any] = [list(statuses)]
+        if repository is not None:
+            query += " AND repository = %s"
+            params.append(repository)
+        if orphaned:
+            query += " AND (claimed_until IS NULL OR claimed_until < now())"
+        rows = self._execute(query + " ORDER BY created_at, task_id", params).fetchall()
         return [_load(row, TaskRecord, _TASK_TIMESTAMPS) for row in rows]
 
     # --- bursts ---
@@ -402,19 +534,21 @@ class PostgresLedger:
         ).fetchone()
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
 
-    def running_bursts(self, repository: str | None = None) -> list[BurstRecord]:
-        # a burst carries no repository column — the task it belongs to does (C4)
-        if repository is None:
-            rows = self._execute(
-                "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
-            ).fetchall()
-        else:
-            rows = self._execute(
-                "SELECT b.* FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
-                "WHERE b.status = 'running' AND t.repository = %s "
-                "ORDER BY b.started_at, b.burst_id",
-                (repository,),
-            ).fetchall()
+    def running_bursts(
+        self, repository: str | None = None, *, orphaned: bool = False
+    ) -> list[BurstRecord]:
+        # a burst carries no repository column and no lease — the task it belongs
+        # to does (C4, E1), so both scopes join it. `orphaned`: running bursts of
+        # tasks no live lease covers — a live lease is a peer's proof of life,
+        # from any host, and the reconciler leaves those alone.
+        query = "SELECT b.* FROM bursts b LEFT JOIN tasks t ON t.task_id = b.task_id WHERE b.status = 'running'"
+        params: list[Any] = []
+        if repository is not None:
+            query += " AND t.repository = %s"
+            params.append(repository)
+        if orphaned:
+            query += " AND (t.claimed_until IS NULL OR t.claimed_until < now())"
+        rows = self._execute(query + " ORDER BY b.started_at, b.burst_id", params).fetchall()
         return [_load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS) for row in rows]
 
     def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int:
@@ -502,6 +636,13 @@ class PostgresLedger:
             (after_id,),
         ).fetchall()
         return [_load(row, Event, _EVENT_TIMESTAMPS) for row in rows]
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether a statement left a transaction open — the E1 assertion seam.
+        Always False between calls, by construction: the connection is
+        autocommit and no method opens a block."""
+        return self._conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE
 
     def close(self) -> None:
         self._conn.close()
