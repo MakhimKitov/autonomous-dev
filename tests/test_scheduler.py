@@ -466,8 +466,10 @@ def test_sync_clone_feeds_the_burst_and_failures_hit_the_rail(rig, tmp_path):
 def test_rails_from_env_overrides():
     rails = Rails.from_env({"SCHEDULER_MAX_ATTEMPTS": "5", "SCHEDULER_BURST_BUDGET_USD": "0.5"})
     assert rails.max_attempts == 5
-    assert rails.burst_budget_usd == 0.5
     assert rails.max_review_rounds == 3  # untouched default
+    # per-burst budget and turns are the role row's since D5 — not a rail, and
+    # the retired env name is ignored here (startup refuses it, test_registry_cli)
+    assert not hasattr(rails, "burst_budget_usd") and not hasattr(rails, "burst_max_turns")
 
 
 def test_review_off_requests_owner_only_on_pr_open(rig):

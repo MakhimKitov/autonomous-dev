@@ -17,7 +17,6 @@ from control_plane.models import RepositoryRecord
 
 REVIEW_ENV = "REVIEW"
 PROVIDERS_ENV = "REVIEW_PROVIDERS"
-REVIEWER_MODEL_ENV = "REVIEWER_MODEL"
 
 RECOGNIZED = ("claude", "codex", "copilot")
 IMPLEMENTED = ("claude", "copilot")  # codex arrives with REVIEWERS.md slice 3
@@ -31,7 +30,7 @@ class ReviewPolicyError(RuntimeError):
 class ReviewPolicy:
     enabled: bool = False  # ships off: turning review on is the operator's explicit act
     providers: tuple[str, ...] = ()
-    reviewer_model: str | None = None  # the claude provider's burst model (slice 2)
+    # the reviewer's model, budget and turns are the `reviewer` role row's (D5)
 
     @classmethod
     def declared(cls, environ: dict[str, str] | None = None) -> ReviewPolicy:
@@ -64,11 +63,7 @@ class ReviewPolicy:
                     f"review provider {provider!r} is not shipped yet (REVIEWERS.md slices) — "
                     f"available today: {', '.join(IMPLEMENTED)}"
                 )
-        return cls(
-            enabled=True,
-            providers=providers,
-            reviewer_model=env.get(REVIEWER_MODEL_ENV, "").strip() or None,
-        )
+        return cls(enabled=True, providers=providers)
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> ReviewPolicy:
@@ -100,8 +95,9 @@ class ReviewPolicy:
         selector override whatever ``REVIEW``/``REVIEW_PROVIDERS`` say, so a
         machine-level `off` never silently degrades a registered product. The
         env still answers *whether this deployment can honor it*: credentials
-        and ``REVIEWER_MODEL`` are deployment facts, not product policy (the
-        row has no model column on purpose). Delegates to `from_env` on a probe
+        are deployment facts, not product policy (the row has no model column
+        on purpose — the model is the reviewer *role* row's, D5). Delegates to
+        `from_env` on a probe
         env, so both sources fire the exact same honor-checks — registration
         preflight (C2) and scheduler startup share this constructor.
         """

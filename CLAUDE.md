@@ -169,8 +169,8 @@ and e2e policies come from its row (`ReviewPolicy.from_product` /
 a machine-level `REVIEW=off` never silently degrades a registered product. The env
 keeps answering only what stays a machine question: credentials (the honor-check
 fires from the row exactly as it did from env — registration preflight and startup
-share the constructor) and the `REVIEWER_MODEL`/`TESTER_MODEL` overrides (the row
-has no model column on purpose). `from_env` remains dev mode: an unregistered repo
+share the constructor). The product row has no model column on purpose — which
+model a role runs is the *role* row's (D5). `from_env` remains dev mode: an unregistered repo
 on the SQLite ledger runs env-governed until C4 makes the scheduler
 registry-driven.
 
@@ -229,6 +229,29 @@ env-governed run keeps the `TEST_` prefix as `X ← env:TEST_X`, and
 declaration. Preflight *probes* refs (points at something, never read);
 the scheduler *resolves* at spawn; a helper failure is a skipped test with the
 ref named, never a crash. `grep -ri vault packages/` stays empty by design.
+
+**Roles as rows (D5)**: the four pipeline roles are rows in `roles` (seeded by
+0002 on Postgres, by `_SCHEMA` on SQLite — the same values), and `execute_burst`
+reads the role's row at *every* spawn: `model`, `max_budget_usd`, `max_turns`,
+`prompt_preamble` (composed ahead of the task prompt, *after* the image's own
+role preamble — the ceiling text stays code) and `mount_mode` come from it, so
+`control-plane role set dev --model … --budget … --turns … --preamble …` governs
+the next burst with no restart, audited (`role.set` + a `role_updated` event, one
+write). `role list` / `role show` read. Ceilings are code (`roles.py`): a row's
+`tools` must be `["*"]` or ⊆ `TOOL_ALLOWLIST` (checked at load; a narrowed row
+refuses to spawn until custom-role execution lands at T4 — running it wide would
+be a silent widening); reviewer/tester/monitor mounts are read-only whatever the
+row says (a row narrows the dev to `ro`, never widens a reader). The wall-bearing
+fields — `role`, `kind`, `identity`, `sink`, `tools` — are refused by name in the
+store (`RoleError: frozen`) and by the schema's trigger beneath it (Postgres
+`roles_pipeline_guard`, its SQLite twin); `role set` has no flag for them.
+Migration 0014 gives `platform_app` `UPDATE` on `roles` and nothing else. The env
+knobs the row replaced — `DEV_AGENT_MODEL`, `REVIEWER_MODEL`, `TESTER_MODEL`,
+`SCHEDULER_BURST_BUDGET_USD`, `SCHEDULER_BURST_MAX_TURNS` — are retired: still
+set, they make `run`/`burst` refuse at startup naming the `role set` that
+replaces each (one source, or "editing the row changes the next burst" is false).
+The hand-run `burst` verb's `--model/--budget/--max-turns` remain as explicit
+per-burst overrides; `run --model` is gone.
 
 ### Task identity
 

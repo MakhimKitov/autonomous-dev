@@ -156,7 +156,7 @@ Defaults, `.env`-overridable:
 | daily burst ceiling | 20 — per product: a registered row's `daily_bursts` (C4) |
 | failure cooldown / task | 5 min |
 | poll interval | 60 s |
-| per-burst | `max_budget_usd` 2.0 (a **hard cap** on estimated cost — the SDK kills the burst mid-run; falsified "advisory" on task 17) · `max_turns` 100 |
+| per-burst | the **role row's** `max_budget_usd` / `max_turns` (D5; seeded 2.0 / 100, `role set <role> --budget --turns`). The budget is a **hard cap** on estimated cost — the SDK kills the burst mid-run; falsified "advisory" on task 17 |
 
 ## Kill switch & crash recovery
 

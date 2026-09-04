@@ -75,6 +75,13 @@ def ledger(request, tmp_path):
             # refuses to leave a referencing table out (CASCADE would take
             # whatever else appeared later, which is not the same promise).
             conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+            # roles cannot be truncated (frozen pipeline rows, D5) — reset the
+            # open fields to their seed so a `role set` never outlives its test
+            conn.execute(
+                "UPDATE roles SET prompt_preamble = '', model = 'claude-sonnet-5', max_budget_usd = 2.00, "
+                "max_turns = 100, mount_mode = CASE WHEN role = 'dev' THEN 'rw' ELSE 'ro' END "
+                "WHERE kind = 'pipeline'"
+            )
         backend = PostgresLedger(dsn)
     # The registry wall (C1): a task names a registered product, so the suite's
     # product exists before any test inserts one — registered through the verb,
@@ -652,6 +659,69 @@ def test_set_changes_the_row_and_bumps_updated_at(ledger):
     assert after.updated_at > before.updated_at
     assert after.registered_at == before.registered_at
     assert after.state == before.state  # set never touches it
+
+
+# --- roles (D5) ---
+#
+# The same rows on both backends: seeded by 0002 on Postgres, by _SCHEMA on
+# SQLite, edited by one verb whose refusals read identically.
+
+
+def test_the_pipeline_roles_are_seeded_identically(ledger):
+    rows = {row.role: row for row in ledger.list_roles()}
+    assert set(rows) == {"dev", "reviewer", "tester", "monitor"}
+    assert {row.kind for row in rows.values()} == {"pipeline"}
+    assert {row.identity for row in rows.values()} == {"none"}
+    assert all(row.tools == ["*"] for row in rows.values())
+    assert rows["dev"].mount_mode == "rw" and rows["reviewer"].mount_mode == "ro"
+    assert rows["monitor"].sink == "event" and rows["dev"].sink == "issue_comment"
+    assert (rows["dev"].model, rows["dev"].max_budget_usd, rows["dev"].max_turns) == ("claude-sonnet-5", 2.0, 100)
+    assert isinstance(rows["dev"].max_budget_usd, float)  # numeric → float at the edge
+    assert rows["dev"].trigger is None
+    assert ledger.get_role("ghost") is None
+
+
+def test_role_set_changes_the_open_fields_and_leaves_a_trail(ledger):
+    before = ledger.get_role("reviewer")
+    changes = {
+        "prompt_preamble": "Be terse.",
+        "model": "claude-opus-5",
+        "max_budget_usd": 0.5,
+        "max_turns": 30,
+        "mount_mode": "rw",
+    }
+    ledger.update_role("reviewer", changes, "op", "cheaper reviews")
+
+    after = ledger.get_role("reviewer")
+    for column, value in changes.items():
+        assert getattr(after, column) == value
+    assert after.updated_at > before.updated_at
+    assert after.created_at == before.created_at
+    assert (after.kind, after.identity, after.sink, after.tools) == ("pipeline", "none", "issue_comment", ["*"])
+
+    (entry,) = ledger.audit_trail("reviewer")
+    assert (entry.actor, entry.action, entry.reason) == ("op", "role.set", "cheaper reviews")
+    (event,) = [e for e in ledger.events() if e.kind == "role_updated"]
+    assert event.payload == {
+        "audit_id": entry.id,
+        "role": "reviewer",
+        "actor": "op",
+        "changed": sorted(changes),
+    }
+
+
+def test_role_set_refuses_walls_unknowns_and_ghosts(ledger):
+    from control_plane.roles import RoleError
+
+    with pytest.raises(RoleError, match="frozen: tools"):
+        ledger.update_role("dev", {"tools": ["Bash"], "model": "x"}, "op")
+    with pytest.raises(RoleError, match="not settable: trigger"):
+        ledger.update_role("dev", {"trigger": {"schedule": "daily"}}, "op")
+    with pytest.raises(RoleError, match="no role named 'ghost'"):
+        ledger.update_role("ghost", {"model": "x"}, "op")
+    # nothing was written on any refusal — no row change, no trail
+    assert ledger.get_role("dev").model == "claude-sonnet-5"
+    assert ledger.audit_trail("dev") == [] and ledger.audit_trail("ghost") == []
 
 
 # --- the adapter edge ---

@@ -48,15 +48,19 @@ from control_plane.models import (
     EVENT_CHANNEL,
     EVENT_PRODUCT_REGISTERED,
     EVENT_PRODUCT_UPDATED,
+    EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
     AuditRecord,
     BurstRecord,
     Event,
     RepositoryRecord,
+    RoleRecord,
     TaskRecord,
     Violation,
     utc_now,
 )
+from control_plane.roles import RoleError
+from control_plane.roles import check_settable as check_role_settable
 from control_plane.store import RegistryError, _check_settable, _registry_transition
 
 log = structlog.get_logger()
@@ -70,10 +74,12 @@ _VIOLATION_TIMESTAMPS = ("at",)
 _EVENT_TIMESTAMPS = ("created_at",)
 _REPOSITORY_TIMESTAMPS = ("last_burst_at", "claimed_until", "registered_at", "updated_at")
 _AUDIT_TIMESTAMPS = ("at",)
+_ROLE_TIMESTAMPS = ("created_at", "updated_at")
 
 # numeric → float on load; see the module docstring.
 _BURST_NUMERICS = ("cost_usd",)
 _REPOSITORY_NUMERICS = ("usage_share",)
+_ROLE_NUMERICS = ("max_budget_usd",)
 
 # What finish_burst writes: BURST_FINALIZE_COLUMNS in models.py, shared with the
 # SQLite backend so the two CAS statements cannot drift apart.
@@ -260,6 +266,51 @@ class PostgresLedger:
         else:
             rows = self._execute(f"{select} WHERE target = %s ORDER BY id", (target,)).fetchall()
         return [_load(row, AuditRecord, _AUDIT_TIMESTAMPS) for row in rows]
+
+    # --- roles (D5) ---
+    #
+    # `role set` is the registry CTE shape again — the change, its audit row,
+    # its event, pg_notify — under the UPDATE grant 0014 gives platform_app.
+    # The open fields are checked by name before any SQL; a wall field that got
+    # past that meets roles_pipeline_guard (0002) as a RestrictViolation.
+
+    def list_roles(self) -> list[RoleRecord]:
+        rows = self._execute("SELECT * FROM roles ORDER BY kind DESC, role").fetchall()
+        return [_load(row, RoleRecord, _ROLE_TIMESTAMPS, _ROLE_NUMERICS) for row in rows]
+
+    def get_role(self, role: str) -> RoleRecord | None:
+        row = self._execute("SELECT * FROM roles WHERE role = %s", (role,)).fetchone()
+        return None if row is None else _load(row, RoleRecord, _ROLE_TIMESTAMPS, _ROLE_NUMERICS)
+
+    def update_role(self, role: str, changes: dict, actor: str, reason: str = "") -> None:
+        check_role_settable(changes)
+        # column names come from ROLE_SET_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = %({column})s" for column in changes)
+        try:
+            cursor = self._execute(
+                f"WITH changed AS ("
+                f"    UPDATE roles SET {assignments}, updated_at = %(_updated_at)s"
+                f"    WHERE role = %(_role)s"
+                f"    RETURNING role"
+                f"), recorded AS ("
+                f"    INSERT INTO audit (actor, action, target, reason)"
+                f"    SELECT %(_actor)s, 'role.set', role, %(_reason)s FROM changed"
+                f"    RETURNING id, target"
+                f"), announced AS ("
+                f"    INSERT INTO events (kind, payload)"
+                f"    SELECT %(_kind)s, jsonb_build_object("
+                f"        'audit_id', id, 'role', target, 'actor', %(_actor)s,"
+                f"        'changed', %(_changed)s)"
+                f"    FROM recorded RETURNING id"
+                f") SELECT pg_notify(%(_channel)s, id::text) FROM announced",
+                {**changes, "_role": role, "_actor": actor, "_reason": reason,
+                 "_kind": EVENT_ROLE_UPDATED, "_changed": Json(sorted(changes)),
+                 "_channel": EVENT_CHANNEL, "_updated_at": _to_datetime(utc_now())},
+            )
+        except psycopg.errors.RestrictViolation as exc:  # the trigger — a wall field got through
+            raise RoleError(f"{role}: {exc.diag.message_primary}") from exc
+        if not cursor.fetchall():
+            raise RoleError(f"no role named {role!r}")
 
     # --- tasks ---
 

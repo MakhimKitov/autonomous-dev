@@ -157,15 +157,16 @@ provenance.)
 
 ## Config
 
-Two knobs, matching everything else — a toggle and an optional model override:
+One knob, matching everything else — a toggle:
 
 ```
-E2E=on|off            # ships off; off ignores everything below
-TESTER_MODEL=         # optional; empty = the scheduler's model
+E2E=on|off            # ships off; a registered product reads its row instead (C3)
 ```
 
-Plus the `TEST_`-prefixed sandbox credentials described above. No tiers, no per-product
-platform config — everything product-specific rides in the product's `TESTING.md`.
+The tester's model, budget and turns are the `tester` role row's (D5): `control-plane
+role set tester --model … --budget … --turns …`, audited, governing the next burst.
+Plus the sandbox credential refs described above. No tiers, no per-product platform
+config — everything product-specific rides in the product's `TESTING.md`.
 
 ## Slices
 

@@ -23,7 +23,6 @@ from control_plane.models import RepositoryRecord
 from control_plane.secrets import SecretError, SecretResolver
 
 E2E_ENV = "E2E"
-TESTER_MODEL_ENV = "TESTER_MODEL"
 TEST_ENV_PREFIX = "TEST_"  # the allowlist boundary and the radioactivity marker
 MANIFEST_FILENAME = "TESTING.md"
 
@@ -38,13 +37,13 @@ class E2EPolicyError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class E2EPolicy:
-    """The operator's declaration: a toggle, an optional model override, and
-    the sandbox credential refs. ``env_refs`` None is the env-governed default
-    (every manifest name ``X`` reads ``env:TEST_X``); a dict is a registered
-    product's declaration — the only refs its tester can reach."""
+    """The operator's declaration: a toggle and the sandbox credential refs.
+    ``env_refs`` None is the env-governed default (every manifest name ``X``
+    reads ``env:TEST_X``); a dict is a registered product's declaration — the
+    only refs its tester can reach. The tester's model, budget and turns are
+    the `tester` role row's (D5)."""
 
     enabled: bool = False
-    tester_model: str | None = None
     env_refs: dict[str, str] | None = None
 
     @classmethod
@@ -67,22 +66,20 @@ class E2EPolicy:
                 "TESTER_GITHUB_APP_PRIVATE_KEY_PATH (test reports post under the tester's "
                 "own identity, not the reviewer's)"
             )
-        return cls(enabled=True, tester_model=(env.get(TESTER_MODEL_ENV) or "").strip() or None)
+        return cls(enabled=True)
 
     @classmethod
     def from_product(
         cls, row: RepositoryRecord, environ: dict[str, str] | None = None
     ) -> E2EPolicy:
-        """The registered product's toggle (C3): the row overrides ``E2E``;
-        ``TESTER_MODEL`` stays env-sourced — which model tests is a deployment
-        fact, not product policy. Delegates to `from_env` on a probe env so
-        both sources behave identically."""
+        """The registered product's toggle (C3): the row overrides ``E2E``.
+        Delegates to `from_env` on a probe env so both sources fire the same
+        honor-check."""
         probe = dict(os.environ) if environ is None else dict(environ)
         probe[E2E_ENV] = "on" if row.e2e_enabled else "off"
         policy = cls.from_env(probe)
         return cls(
             enabled=policy.enabled,
-            tester_model=policy.tester_model,
             env_refs=dict(row.test_env_refs),  # the row's declaration, refs only (D4)
         )
 
