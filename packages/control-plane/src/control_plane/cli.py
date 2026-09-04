@@ -44,8 +44,15 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.migrate import MigrationError, migrate, status
-from control_plane.models import ProductState, RepositoryRecord, TaskRecord, task_id_for
+from control_plane.models import ProductState, RepositoryRecord, RoleRecord, TaskRecord, task_id_for
 from control_plane.preflight import PreflightError, run_preflight
+from control_plane.roles import (
+    PIPELINE_ROLES,
+    ROLE_SET_COLUMNS,
+    RoleError,
+    retired_settings,
+)
+from control_plane.roles import validate as validate_role
 from control_plane.review import (
     PROVIDERS_ENV,
     REVIEW_ENV,
@@ -87,13 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     burst.add_argument("--image", default=DEFAULT_IMAGE)
     burst.add_argument("--data-dir", type=Path, default=Path("data"), help="platform store root")
     burst.add_argument("--fresh", action="store_true", help="ignore any stored session (no resume)")
-    burst.add_argument("--budget", type=float, default=None, help="max_budget_usd for the burst")
-    burst.add_argument("--max-turns", type=int, default=None)
-    burst.add_argument(
-        "--model",
-        default=None,
-        help="model for this burst (default: $DEV_AGENT_MODEL, else the pinned platform default)",
-    )
+    # the dev role row governs these (D5); a flag overrides for this one burst
+    burst.add_argument("--budget", type=float, default=None, help="max_budget_usd (default: the dev role row)")
+    burst.add_argument("--max-turns", type=int, default=None, help="default: the dev role row")
+    burst.add_argument("--model", default=None, help="default: the dev role row")
 
     run = sub.add_parser(
         "run",
@@ -115,7 +119,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--owner", default=None, help="the human owner's login (default: the repo owner)")
     run.add_argument("--data-dir", type=Path, default=Path("data"))
     run.add_argument("--image", default=DEFAULT_IMAGE)
-    run.add_argument("--model", default=None)
     run.add_argument("--interval", type=int, default=None, help="seconds between ticks (default: rails)")
     run.add_argument("--once", action="store_true", help="one tick, then exit")
 
@@ -235,6 +238,30 @@ def build_parser() -> argparse.ArgumentParser:
     set_verb.add_argument("--usage-share", type=float, default=None)
     set_verb.add_argument("--reason", default="", help="lands in the audit row")
     _operator_flags(set_verb)
+
+    role = sub.add_parser(
+        "role",
+        help="roles as rows (TO-BE §4, D5): list/show/set — the open fields of a role, audited",
+    )
+    role_verbs = role.add_subparsers(dest="verb", required=True)
+    role_list = role_verbs.add_parser("list", help="every role row: the four pipeline slots first")
+    _operator_flags(role_list)
+    role_show = role_verbs.add_parser("show", help="one role row and its audit trail")
+    role_show.add_argument("role")
+    _operator_flags(role_show)
+    role_set = role_verbs.add_parser(
+        "set",
+        help=f"edit the open fields — {', '.join(ROLE_SET_COLUMNS)}; the wall-bearing ones refuse",
+    )
+    role_set.add_argument("role")
+    role_set.add_argument("--preamble", default=None, help="prompt preamble, composed after the image's role preamble ('' clears)")
+    role_set.add_argument("--preamble-file", type=Path, default=None, help="read the preamble from a file")
+    role_set.add_argument("--model", default=None, help="the model this role's bursts run on")
+    role_set.add_argument("--budget", type=float, default=None, help="max_budget_usd — the SDK's hard stop per burst")
+    role_set.add_argument("--turns", type=int, default=None, help="max_turns per burst")
+    role_set.add_argument("--mount", choices=["rw", "ro"], default=None, help="repo mount; readers stay ro whatever the row says")
+    role_set.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(role_set)
 
     return parser
 
@@ -568,6 +595,91 @@ def _product(args: argparse.Namespace, api_factory=_preflight_api) -> int:
         ledger.close()
 
 
+def _print_role(row: RoleRecord) -> None:
+    tools = "all (no narrowing)" if row.tools == ["*"] else ", ".join(row.tools)
+    preamble = repr(row.prompt_preamble) if row.prompt_preamble else "—"
+    print(f"  kind:      {row.kind}   identity: {row.identity}   sink: {row.sink}   (frozen)")
+    print(f"  tools:     {tools}   (frozen)")
+    print(f"  model:     {row.model}")
+    print(f"  budget:    ${row.max_budget_usd:.2f}   turns: {row.max_turns}   mount: {row.mount_mode}")
+    print(f"  preamble:  {preamble}")
+    print(f"  created:   {row.created_at}   updated: {row.updated_at}")
+
+
+def _role_set(args: argparse.Namespace, ledger, actor: str) -> int:
+    changes: dict = {}
+    if args.preamble is not None and args.preamble_file is not None:
+        raise RoleError("--preamble and --preamble-file are one setting — pass one")
+    if args.preamble is not None:
+        changes["prompt_preamble"] = args.preamble
+    if args.preamble_file is not None:
+        changes["prompt_preamble"] = args.preamble_file.read_text(encoding="utf-8")
+    for column, value in (
+        ("model", args.model),
+        ("max_budget_usd", args.budget),
+        ("max_turns", args.turns),
+        ("mount_mode", args.mount),
+    ):
+        if value is not None:
+            changes[column] = value
+    ledger.update_role(args.role, changes, actor, args.reason)  # checks the fields by name
+    print(f"{args.role} set: {', '.join(sorted(changes))} — governs the next burst")
+    _print_role(ledger.get_role(args.role))
+    return 0
+
+
+def _role(args: argparse.Namespace) -> int:
+    """The role verbs (D5). No GitHub is involved: a role is engine data."""
+    actor = args.actor or getpass.getuser()
+    ledger = open_ledger(args.data_dir.expanduser().resolve())
+    try:
+        if args.verb == "list":
+            for row in ledger.list_roles():
+                print(
+                    f"{row.role}  {row.kind}  model={row.model}  budget=${row.max_budget_usd:.2f}  "
+                    f"turns={row.max_turns}  mount={row.mount_mode}  "
+                    f"preamble={'yes' if row.prompt_preamble.strip() else 'no'}"
+                )
+            return 0
+        if args.verb == "show":
+            row = ledger.get_role(args.role)
+            if row is None:
+                raise RoleError(f"no role named {args.role!r}")
+            print(row.role)
+            _print_role(row)
+            print("audit:")
+            for entry in ledger.audit_trail(args.role):
+                reason = f" — {entry.reason}" if entry.reason else ""
+                print(f"  #{entry.id} {entry.at} {entry.actor} {entry.action}{reason}")
+            return 0
+        if args.verb == "set":
+            return _role_set(args, ledger, actor)
+        return 2
+    except (RoleError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        ledger.close()
+
+
+def _roles_executable(stores: PlatformStores) -> str | None:
+    """Startup's role check (D5): the retired env knobs are gone from this
+    machine, and every pipeline row the engine will spawn is one it can run.
+    Returns the refusal, or None."""
+    stale = retired_settings(os.environ)
+    if stale:
+        return "retired settings still set — unset them, the role row governs:\n  " + "\n  ".join(stale)
+    for role in PIPELINE_ROLES:
+        row = stores.ledger.get_role(role)
+        if row is None:
+            return f"the ledger has no {role!r} role row — the pipeline roles are seeded (0002)"
+        try:
+            validate_role(row)
+        except RoleError as exc:
+            return str(exc)
+    return None
+
+
 def _github_check() -> int:
     """Preflight every configured pipeline role (D1, TO-BE §4): mint a real
     installation token per role-prefixed App and show what it can do. A role
@@ -632,6 +744,10 @@ def _run_burst(args: argparse.Namespace) -> int:
 
     init_telemetry()
     stores = PlatformStores.open(args.data_dir)
+    refusal = _roles_executable(stores)
+    if refusal:
+        print(f"error: {refusal}", file=sys.stderr)
+        return 2
     # Derived, not typed: the same id the scheduler would compute for this issue,
     # so a hand-run burst joins the same task rather than making a second one.
     task_id = task_id_for(slug, args.issue)
@@ -646,13 +762,13 @@ def _run_burst(args: argparse.Namespace) -> int:
             prompt,
             mode=args.mode,
             image=args.image,
-            model=args.model,
+            model=args.model,  # each None → the dev role row (D5)
             max_budget_usd=args.budget,
             max_turns=args.max_turns,
             fresh=args.fresh,
             with_github=True,  # the manual burst mirrors a dev burst
         )
-    except GitHubAuthError as exc:
+    except (GitHubAuthError, RoleError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
@@ -824,7 +940,6 @@ def _run_fleet(
             tester_api=tester_api,
             tester_login=tester_login,
             image=args.image,
-            model=args.model,
             sync_clone=sync_clone,
             sync_clone_ref=sync_clone_ref,
         )
@@ -865,6 +980,10 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     stores = PlatformStores.open(args.data_dir)
     if (stores.data_dir / STOP_FILENAME).exists():
         print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
+        return 2
+    refusal = _roles_executable(stores)  # D5: the rows the engine spawns from
+    if refusal:
+        print(f"error: {refusal}", file=sys.stderr)
         return 2
     token_cache = InstallationTokenCache(creds)
     copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
@@ -949,7 +1068,6 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         tester_api=tester_api,
         tester_login=tester_login,
         image=args.image,
-        model=args.model,
         sync_clone=sync_clone,
         sync_clone_ref=sync_clone_ref,
     )
@@ -1025,6 +1143,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "burst":
         return _run_burst(args)
+    if args.command == "role":
+        return _role(args)
     if args.command == "run":
         return _run_scheduler(args)
     if args.command == "stop":

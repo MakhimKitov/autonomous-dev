@@ -26,16 +26,11 @@ DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
 # review run inside the container.
 SECCOMP_PROFILE = Path(__file__).parent / "resources" / "seccomp-userns.json"
 
-# The platform pins the burst model explicitly — "unset" must mean *our* pinned
-# default, never whatever `claude` the image happens to ship with (that default
-# drifts across CLI releases, silently changing the experiment's key variable).
-DEFAULT_MODEL = "claude-sonnet-5"
-MODEL_ENV = "DEV_AGENT_MODEL"  # control-plane-side override (.env), not a container var
-
-
-def resolve_model(explicit: str | None = None) -> str:
-    """Burst model policy: explicit (--model) > DEV_AGENT_MODEL > pinned default."""
-    return explicit or os.environ.get(MODEL_ENV) or DEFAULT_MODEL
+# The burst model is always pinned explicitly — "unset" must never mean whatever
+# `claude` the image happens to ship with (that default drifts across CLI
+# releases, silently changing the experiment's key variable). Since D5 the pin
+# is the role row's `model` (seeded 'claude-sonnet-5'; `role set … --model`),
+# read at every spawn — the env override this module used to carry is retired.
 
 
 @dataclass(slots=True)

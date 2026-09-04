@@ -82,8 +82,8 @@ class Rails:
     daily_burst_ceiling: int = 20
     failure_cooldown_s: int = 300
     poll_interval_s: int = 60
-    burst_budget_usd: float = 2.0
-    burst_max_turns: int = 100
+    # per-burst budget and turns left this class at D5: they are the role row's
+    # (`max_budget_usd`, `max_turns`), read by execute_burst at every spawn
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> Rails:
@@ -100,8 +100,6 @@ class Rails:
             daily_burst_ceiling=_get("SCHEDULER_DAILY_BURST_CEILING", int, defaults.daily_burst_ceiling),
             failure_cooldown_s=_get("SCHEDULER_FAILURE_COOLDOWN_S", int, defaults.failure_cooldown_s),
             poll_interval_s=_get("SCHEDULER_POLL_INTERVAL_S", int, defaults.poll_interval_s),
-            burst_budget_usd=_get("SCHEDULER_BURST_BUDGET_USD", float, defaults.burst_budget_usd),
-            burst_max_turns=_get("SCHEDULER_BURST_MAX_TURNS", int, defaults.burst_max_turns),
         )
 
 
@@ -121,7 +119,6 @@ class Scheduler:
         tester_login: str | None = None,
         secrets: SecretResolver | None = None,
         image: str = DEFAULT_IMAGE,
-        model: str | None = None,
         sync_clone: Callable[[], Path] | None = None,
         sync_clone_ref: Callable[[str], Path] | None = None,
     ) -> None:
@@ -145,7 +142,8 @@ class Scheduler:
             # task to the developer through the same round machinery
             self.machine_reviewers.add(tester_login)
         self.image = image
-        self.model = model
+        # model, budget and turns are the role row's (D5) — execute_burst reads
+        # them at spawn; the scheduler no longer carries a model at all
         self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
         self.sync_clone_ref = sync_clone_ref  # same, to a PR head sha (assess bursts)
         self.current_burst_id: str | None = None  # for the kill switch mid-burst
@@ -419,9 +417,6 @@ class Scheduler:
                 kind=kind,
                 with_github=True,  # dev bursts push branches and open PRs
                 image=self.image,
-                model=self.model,
-                max_budget_usd=self.rails.burst_budget_usd,
-                max_turns=self.rails.burst_max_turns,
                 burst_id=self.current_burst_id,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
@@ -499,9 +494,6 @@ class Scheduler:
                 role="reviewer",
                 fresh=True,  # deliberately amnesiac — no shared context with the dev
                 image=self.image,
-                model=self.review.reviewer_model or self.model,
-                max_budget_usd=self.rails.burst_budget_usd,
-                max_turns=self.rails.burst_max_turns,
                 burst_id=self.current_burst_id,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
@@ -613,9 +605,6 @@ class Scheduler:
                 role="tester",
                 fresh=True,  # no shared context with the dev or the reviewer
                 image=self.image,
-                model=self.testing.tester_model or self.model,
-                max_budget_usd=self.rails.burst_budget_usd,
-                max_turns=self.rails.burst_max_turns,
                 burst_id=self.current_burst_id,
                 extra_env=sandbox_env,  # the resolved intersection — tester bursts only
             )

@@ -109,13 +109,39 @@ class RepositoryRecord:
 
 
 @dataclass(slots=True)
+class RoleRecord:
+    """One role row — a declarative execution contract (TO-BE §4, D5).
+
+    Ceilings in code, composition in data: the wall-bearing fields (`role`,
+    `kind`, `identity`, `sink`, `tools`) of a pipeline row are frozen by the
+    store; the open ones (`prompt_preamble`, `model`, `max_budget_usd`,
+    `max_turns`, `mount_mode`) are `role set`'s, audited. `execute_burst`
+    reads the row at every spawn, so an edit governs the next burst.
+    """
+
+    role: str  # the primary key; pipeline identity is code keyed on this name
+    kind: str  # 'pipeline' | 'custom'
+    prompt_preamble: str = ""  # composed *after* the image's role preamble, never instead
+    tools: list = field(default_factory=lambda: ["*"])  # ['*'] or ⊆ roles.TOOL_ALLOWLIST
+    model: str = "claude-sonnet-5"
+    max_budget_usd: float = 2.0
+    max_turns: int = 100
+    mount_mode: str = "rw"  # 'rw' | 'ro' — a row can narrow the mount, never widen it
+    identity: str = "none"  # 'none' | 'automation' — the pipeline Apps are not values
+    sink: str = "issue_comment"  # 'issue_comment' | 'ledger_artifact' | 'event'
+    trigger: dict | None = None  # schedule/event — machinery lands at T4
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class AuditRecord:
     """One operator mutation, as the ledger recorded it — the read shape of the
     `audit` table (append-only by grant; TO-BE §2, "The audit log starts here")."""
 
     id: int
     actor: str
-    action: str  # 'product.register' | 'product.pause' | 'product.resume' | 'product.set'
+    action: str  # 'product.register' | 'product.pause' | 'product.resume' | 'product.set' | 'role.set'
     target: str
     reason: str
     at: str
@@ -236,6 +262,7 @@ EVENT_PRODUCT_REGISTERED = "product_registered"
 EVENT_PRODUCT_PAUSED = "product_paused"
 EVENT_PRODUCT_RESUMED = "product_resumed"
 EVENT_PRODUCT_UPDATED = "product_updated"
+EVENT_ROLE_UPDATED = "role_updated"  # `role set` (D5): payload names the role and the changed columns
 
 # The optional wake channel. A consumer may LISTEN on it to poll sooner; nothing
 # is allowed to depend on a notification arriving.

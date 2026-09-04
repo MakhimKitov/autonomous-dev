@@ -40,6 +40,9 @@ def hermetic_platform_env(monkeypatch):
         "TESTER_GITHUB_APP_PRIVATE_KEY_PATH",
         "TEST_DISCORD_TOKEN",
         "TEST_GUILD_ID",
+        "DEV_AGENT_MODEL",
+        "SCHEDULER_BURST_BUDGET_USD",
+        "SCHEDULER_BURST_MAX_TURNS",
     ):
         monkeypatch.delenv(name, raising=False)
 

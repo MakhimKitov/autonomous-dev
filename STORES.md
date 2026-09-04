@@ -311,7 +311,7 @@ INSERT INTO org_state DEFAULT VALUES;
 | One task per issue | `UNIQUE (repository, issue_number)`; the derived `task_id` makes collisions unrepresentable |
 | A task names a registered product | `tasks_repository_fk` (C1): the scheduler cannot invent tenants, and neither can a bug — `product register` is the only way a repository enters the ledger |
 | `violations` / `audit` / `events` are append-only | grants: `platform_app` gets `SELECT, INSERT` only — append-only is a grant, not a promise |
-| Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to the wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows, plus renames of `role` itself and deletion — a row that can be dropped and re-inserted is not frozen. CHECKs pin the `identity`/`sink` enumerations for every row, and `platform_app` holds no write grant on `roles` at all, so the runtime cannot open a trust slot |
+| Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to the wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows, plus renames of `role` itself and deletion — a row that can be dropped and re-inserted is not frozen. CHECKs pin the `identity`/`sink` enumerations for every row, and `platform_app` holds `UPDATE` on `roles` and nothing else (D5's `role set`, 0014) — it can move the open fields and can neither open a trust slot (no `INSERT`) nor drop one (no `DELETE`) |
 | No secret values at rest | nothing to enforce — no column exists for a value; refs only |
 
 Every one of these is provoked in `tests/test_schema_walls.py` and required to

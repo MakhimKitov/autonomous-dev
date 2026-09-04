@@ -64,9 +64,11 @@ REVIEW=off                       # the toggle — on: machine review; off: tests
                                  # the human gate stand alone
 REVIEW_PROVIDERS=                # the selector — comma-list of claude,codex,copilot;
                                  # must name at least one provider when REVIEW=on
-REVIEWER_MODEL=                  # claude provider's burst model; empty = model policy
-                                 # (a different model than the dev offsets same-family bias)
 ```
+
+The reviewer's model, budget and turns are the `reviewer` role row's (D5):
+`control-plane role set reviewer --model … --budget … --turns …`, audited, governing
+the next burst. A different model than the dev's offsets same-family bias.
 
 - **The toggle owns *whether*, the selector owns *who*.** `REVIEW=off` ignores the
   selector entirely — a curated provider list survives being switched off.
@@ -95,7 +97,7 @@ since M0 for exactly this split):
 | GitHub credential | App installation token | **none** |
 | Engine | Claude | Claude (`claude`) or codex CLI (`codex`) per provider |
 | System framing | the product's operating contract | a reviewer contract: adversarial, verdict + line-anchored findings |
-| Model | model policy | `REVIEWER_MODEL` (claude provider) |
+| Model | the `dev` role row | the `reviewer` role row (`role set reviewer --model`, D5) |
 
 - **No GitHub credential in the container.** The burst reads the mounted clone (synced
   to the PR head) and returns **structured findings** through the harvest:

@@ -21,7 +21,9 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
-from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, resolve_model
+from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_only
+from control_plane.roles import validate as validate_role
+from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner
 from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
@@ -123,6 +125,12 @@ def execute_burst(
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
 
+    The role's row (D5) is read here, at spawn, and is the source of the
+    burst's model, budget, turns, preamble and mount: ``model`` /
+    ``max_budget_usd`` / ``max_turns`` given explicitly (the hand-run ``burst``
+    verb) win for this one burst; None means the row. An edit to an open field
+    therefore governs the *next* burst, with no restart.
+
     ``with_github`` mints the dev App token into the box, downscoped to the
     task's repository + the role's permission subset (`mint_burst_token`, D2);
     reviewer bursts get no GitHub credential at all — REVIEWERS.md.
@@ -134,7 +142,22 @@ def execute_burst(
     whether that aborts (CLI) or waits for the next tick (scheduler).
     """
     runner = runner or DockerRunner()
-    model = resolve_model(model)
+    profile = stores.ledger.get_role(role)
+    if profile is None:
+        raise RoleError(f"role {role!r} has no row in the ledger — the pipeline roles are seeded (TO-BE §4)")
+    validate_role(profile)
+    if profile.tools != [ALL_TOOLS]:
+        # a narrowed row is a real declaration; running it wide would be a silent
+        # widening. The container-side narrowing lands with custom-role
+        # execution (T4) — until then a narrowed row cannot run at all.
+        raise RoleError(
+            f"role {role!r} narrows tools to {profile.tools} — tool narrowing reaches the "
+            "container with custom-role execution (T4); no row that runs today may narrow"
+        )
+    model = model or profile.model
+    max_budget_usd = profile.max_budget_usd if max_budget_usd is None else max_budget_usd
+    max_turns = profile.max_turns if max_turns is None else max_turns
+    prompt = compose_prompt(profile, prompt)
     codex_auth = codex_auth_dir() if mount_codex else None
     if mode == "run":
         log.info("burst starting", task=task.task_id, kind=kind, role=role, model=model)
@@ -200,7 +223,7 @@ def execute_burst(
             git_user_name=git_name,
             git_user_email=git_email,
             codex_auth_dir=codex_auth,
-            repo_read_only=(role in ("reviewer", "tester")),  # a wall, not an instruction
+            repo_read_only=repo_read_only(profile),  # code floor ∨ the row; never widened
             extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"

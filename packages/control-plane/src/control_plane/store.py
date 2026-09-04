@@ -35,17 +35,21 @@ from control_plane.models import (
     EVENT_PRODUCT_REGISTERED,
     EVENT_PRODUCT_RESUMED,
     EVENT_PRODUCT_UPDATED,
+    EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
     AuditRecord,
     BurstRecord,
     Event,
     ProductState,
     RepositoryRecord,
+    RoleRecord,
     TaskRecord,
     Violation,
     utc_iso,
     utc_now,
 )
+from control_plane.roles import RoleError
+from control_plane.roles import check_settable as check_role_settable
 
 log = structlog.get_logger()
 
@@ -242,6 +246,9 @@ class Ledger(Protocol):
     def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def touch_repository_burst(self, repository: str, at: str) -> None: ...
     def audit_trail(self, target: str | None = None) -> list[AuditRecord]: ...
+    def list_roles(self) -> list[RoleRecord]: ...
+    def get_role(self, role: str) -> RoleRecord | None: ...
+    def update_role(self, role: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def upsert_task(self, task: TaskRecord) -> None: ...
     def get_task(self, task_id: str) -> TaskRecord | None: ...
     def tasks_by_status(
@@ -320,6 +327,47 @@ CREATE TABLE IF NOT EXISTS repositories (
     registered_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS roles (
+    role TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('pipeline', 'custom')),
+    prompt_preamble TEXT NOT NULL,
+    tools TEXT NOT NULL,
+    model TEXT NOT NULL,
+    max_budget_usd REAL NOT NULL,
+    max_turns INTEGER NOT NULL,
+    mount_mode TEXT NOT NULL,
+    identity TEXT NOT NULL CHECK (identity IN ('none', 'automation')),
+    sink TEXT NOT NULL CHECK (sink IN ('issue_comment', 'ledger_artifact', 'event')),
+    trigger TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+-- the four trust slots, seeded exactly as migration 0002 seeds them (D5 reads
+-- them; an existing file gains them on open — OR IGNORE keeps operator edits)
+INSERT OR IGNORE INTO roles (role, kind, prompt_preamble, tools, model, max_budget_usd, max_turns,
+                             mount_mode, identity, sink, created_at, updated_at)
+VALUES
+    ('dev',      'pipeline', '', '["*"]', 'claude-sonnet-5', 2.0, 100, 'rw', 'none', 'issue_comment', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+    ('reviewer', 'pipeline', '', '["*"]', 'claude-sonnet-5', 2.0, 100, 'ro', 'none', 'issue_comment', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+    ('tester',   'pipeline', '', '["*"]', 'claude-sonnet-5', 2.0, 100, 'ro', 'none', 'issue_comment', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'),
+    ('monitor',  'pipeline', '', '["*"]', 'claude-sonnet-5', 2.0, 100, 'ro', 'none', 'event', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+-- WALL: pipeline rows are frozen — the SQLite twin of roles_pipeline_guard
+-- (0002). RAISE(ABORT) surfaces as sqlite3.IntegrityError, the same class a
+-- constraint gives, so callers see one kind of refusal on both backends.
+CREATE TRIGGER IF NOT EXISTS roles_pipeline_guard_update
+    BEFORE UPDATE ON roles FOR EACH ROW
+    WHEN OLD.kind = 'pipeline' AND (
+        NEW.role IS NOT OLD.role OR NEW.kind IS NOT OLD.kind OR NEW.identity IS NOT OLD.identity
+        OR NEW.sink IS NOT OLD.sink OR NEW.tools IS NOT OLD.tools)
+BEGIN
+    SELECT RAISE(ABORT, 'seeded pipeline role: role, kind, identity, sink and tools are frozen');
+END;
+CREATE TRIGGER IF NOT EXISTS roles_pipeline_guard_delete
+    BEFORE DELETE ON roles FOR EACH ROW
+    WHEN OLD.kind = 'pipeline'
+BEGIN
+    SELECT RAISE(ABORT, 'seeded pipeline role cannot be deleted');
+END;
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     actor TEXT NOT NULL,
@@ -459,13 +507,15 @@ class SqliteLedger:
     # without its audit row, no audit row without its announcement.
 
     def _audit_and_announce(self, actor: str, action: str, target: str, reason: str,
-                            kind: str, extra: dict | None = None) -> None:
-        """The two rows every registry mutation trails. Caller commits."""
+                            kind: str, extra: dict | None = None, subject: str = "repository") -> None:
+        """The two rows every registry mutation trails. Caller commits.
+        ``subject`` is the payload key the target rides under — a product's
+        events say ``repository``, a role's say ``role`` (D5)."""
         cursor = self._conn.execute(
             "INSERT INTO audit (actor, action, target, reason, at) VALUES (?, ?, ?, ?, ?)",
             (actor, action, target, reason, utc_now()),
         )
-        payload = {"audit_id": cursor.lastrowid, "repository": target, "actor": actor, **(extra or {})}
+        payload = {"audit_id": cursor.lastrowid, subject: target, "actor": actor, **(extra or {})}
         self._conn.execute(
             "INSERT INTO events (kind, payload, created_at) VALUES (?, ?, ?)",
             (kind, json.dumps(payload), utc_now()),
@@ -544,6 +594,47 @@ class SqliteLedger:
         else:
             rows = self._conn.execute(f"{select} WHERE target = ? ORDER BY id", (target,)).fetchall()
         return [AuditRecord(**dict(row)) for row in rows]
+
+    # --- roles (D5) ---
+    #
+    # Read at every spawn, written by `role set` alone. The open fields are
+    # checked by name in roles.check_settable before any SQL; the wall fields
+    # are refused there and, beneath, by the schema's trigger — a bypass of the
+    # first meets the second as an IntegrityError.
+
+    @staticmethod
+    def _load_role(row: sqlite3.Row) -> RoleRecord:
+        data = dict(row)
+        data["tools"] = json.loads(data["tools"])
+        data["trigger"] = json.loads(data["trigger"]) if data["trigger"] else None
+        return RoleRecord(**data)
+
+    def list_roles(self) -> list[RoleRecord]:
+        rows = self._conn.execute("SELECT * FROM roles ORDER BY kind DESC, role").fetchall()
+        return [self._load_role(row) for row in rows]
+
+    def get_role(self, role: str) -> RoleRecord | None:
+        row = self._conn.execute("SELECT * FROM roles WHERE role = ?", (role,)).fetchone()
+        return self._load_role(row) if row else None
+
+    def update_role(self, role: str, changes: dict, actor: str, reason: str = "") -> None:
+        check_role_settable(changes)
+        # column names come from ROLE_SET_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = :{column}" for column in changes)
+        try:
+            cursor = self._conn.execute(
+                f"UPDATE roles SET {assignments}, updated_at = :updated_at WHERE role = :role",
+                {**changes, "updated_at": utc_now(), "role": role},
+            )
+        except sqlite3.IntegrityError as exc:  # the trigger — a wall field got through
+            self._conn.rollback()
+            raise RoleError(f"{role}: {exc}") from exc
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise RoleError(f"no role named {role!r}")
+        self._audit_and_announce(actor, "role.set", role, reason, EVENT_ROLE_UPDATED,
+                                 extra={"changed": sorted(changes)}, subject="role")
+        self._conn.commit()
 
     # --- tasks ---
 

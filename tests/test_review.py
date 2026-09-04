@@ -136,12 +136,13 @@ def test_row_copilot_without_the_token_refuses():
         ReviewPolicy.from_product(_row(review_enabled=True, review_provider="copilot"), {})
 
 
-def test_reviewer_model_stays_a_machine_answer():
-    # the row has no model column on purpose: which model reviews is a
-    # deployment fact, not product policy
+def test_the_policy_carries_no_model():
+    # the product row has no model column on purpose, and since D5 neither does
+    # the policy: which model reviews is the reviewer *role* row's (roles.py)
     row = _row(review_enabled=True, review_provider="claude")
     policy = ReviewPolicy.from_product(row, dict(REVIEWER_CREDS, REVIEWER_MODEL="claude-opus-5"))
-    assert policy.reviewer_model == "claude-opus-5"
+    assert not hasattr(policy, "reviewer_model")
+    assert ReviewPolicy.__slots__ == ("enabled", "providers")
 
 
 def test_from_product_never_mutates_the_environ():

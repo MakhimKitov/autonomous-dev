@@ -77,6 +77,11 @@ def db(walls_dsn):
     with psycopg.connect(walls_dsn, autocommit=True) as conn:
         conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
         conn.execute("DELETE FROM roles WHERE kind = 'custom'")  # a previous test's leftovers
+        conn.execute(  # …and a previous test's `role set` — the open fields back to seed (D5)
+            "UPDATE roles SET prompt_preamble = '', model = 'claude-sonnet-5', max_budget_usd = 2.00, "
+            "max_turns = 100, mount_mode = CASE WHEN role = 'dev' THEN 'rw' ELSE 'ro' END "
+            "WHERE kind = 'pipeline'"
+        )
         conn.execute(
             "INSERT INTO repositories (repository, team, state, review_enabled, review_provider, "
             "e2e_enabled, test_env_refs, concurrency, daily_bursts, usage_share) VALUES "
@@ -472,10 +477,11 @@ def test_the_evidence_tables_are_append_only(db, table, verb):
         attempt(db, statement, role="platform_app")
 
 
-@pytest.mark.parametrize("table", ["tasks", "bursts", "repositories"])
+@pytest.mark.parametrize("table", ["tasks", "bursts", "repositories", "roles"])
 def test_the_runtime_cannot_delete_its_own_state(db, table):
     """No DELETE grant anywhere: retention is platform_admin's, on a horizon —
-    and unregistering a product is not a verb (C1 granted INSERT/UPDATE only)."""
+    unregistering a product is not a verb (C1 granted INSERT/UPDATE only), and
+    neither is dropping a role (D5 granted UPDATE only)."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, f"DELETE FROM {table}", role="platform_app")
 
@@ -498,10 +504,11 @@ def test_the_runtime_cannot_delete_its_own_state(db, table):
 )
 def test_the_runtime_cannot_register_what_operators_register(db, what, statement):
     """Role composition and the subscription pool are operator verbs. Each grows
-    the app role a grant in the stage that ships it (D5, F1) — until then the
-    runtime reads them and nothing more. Products left this list at C1: the
-    registry verbs run through the service, so `repositories` is now written
-    under the runtime grants (see test_the_registry_verbs_run_under_them)."""
+    the app role a grant in the stage that ships it — until then the runtime
+    reads them and nothing more. Products left this list at C1 (registry verbs);
+    roles gained UPDATE at D5 (`role set`, see test_the_role_verb_runs_under_the
+    _runtime_grants) and *only* UPDATE: a new row is a trust slot or a custom
+    role, and neither is the runtime's to create until T4 can run one."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, statement, role="platform_app")
 
@@ -528,6 +535,30 @@ def test_the_registry_verbs_run_under_the_runtime_grants(db, walls_dsn):
             "product.register", "product.pause", "product.set",
         ]
         assert ledger.get_repository("newly/registered").concurrency == 2
+    finally:
+        ledger.close()
+
+
+def test_the_role_verb_runs_under_the_runtime_grants(db, walls_dsn):
+    """The D5 grant (0014), exercised by the real method as the real role: one
+    CTE writing roles + audit + events through pg_notify. And the wall beneath
+    the grant: a wall field through the same connection meets the trigger, not
+    a privilege error — UPDATE is granted, *becoming* something else is not."""
+    from control_plane.postgres import PostgresLedger
+    from control_plane.roles import RoleError
+
+    ledger = PostgresLedger(walls_dsn)
+    try:
+        ledger._conn.execute("SET ROLE platform_app")  # for the rest of the session
+        ledger.update_role("reviewer", {"model": "claude-opus-5", "max_turns": 30}, "op", "cheaper")
+        assert [a.action for a in ledger.audit_trail("reviewer")] == ["role.set"]
+        assert ledger.get_role("reviewer").model == "claude-opus-5"
+        # the store refuses by name first…
+        with pytest.raises(RoleError, match="frozen"):
+            ledger.update_role("reviewer", {"identity": "automation"}, "op")
+        # …and the trigger stands behind it for a statement that skips the store
+        with pytest.raises(psycopg.errors.RestrictViolation, match="frozen"):
+            ledger._conn.execute("UPDATE roles SET identity = 'automation' WHERE role = 'reviewer'")
     finally:
         ledger.close()
 
@@ -567,6 +598,8 @@ def test_the_runtime_can_do_its_job(db):
         role="platform_app",
     )
     attempt(db, "UPDATE repositories SET team = 'platform' WHERE repository = 'owner/second'", role="platform_app")
+    # D5: `role set` writes the open fields of roles under the runtime grants
+    attempt(db, "UPDATE roles SET max_budget_usd = 1.50 WHERE role = 'dev'", role="platform_app")
     for readable in ("roles", "repositories", "subscriptions", "memory_entries", "events"):
         attempt(db, f"SELECT count(*) FROM {readable}", role="platform_app")
 

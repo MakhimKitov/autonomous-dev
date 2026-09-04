@@ -35,6 +35,9 @@ def hermetic_platform_env(monkeypatch):
         "TESTER_GITHUB_APP_PRIVATE_KEY_PATH",
         "GITHUB_COPILOT_REVIEW_TOKEN",
         "SCHEDULER_POLL_INTERVAL_S",
+        "DEV_AGENT_MODEL",
+        "SCHEDULER_BURST_BUDGET_USD",
+        "SCHEDULER_BURST_MAX_TURNS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -269,3 +272,19 @@ def test_fleet_startup_refuses_e2e_without_the_tester_app(tmp_path, monkeypatch,
     assert cli._run_scheduler(_run_args(tmp_path)) == 2
     err = capsys.readouterr().err
     assert A in err and "tester App is not configured" in err
+
+
+def test_startup_refuses_retired_role_knobs(tmp_path, monkeypatch, capsys):
+    """D5: model, budget and turns are the role row's. A machine still setting
+    the env knobs they replaced would run with them silently ignored — so
+    startup names each one and where it went, and refuses."""
+    _declare_app(monkeypatch, tmp_path)
+    stores = PlatformStores.open(tmp_path / "data")
+    register(stores, A)
+    monkeypatch.setenv("SCHEDULER_BURST_BUDGET_USD", "0.5")
+    monkeypatch.setenv("REVIEWER_MODEL", "claude-opus-5")
+    assert cli._run_scheduler(_run_args(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert "retired settings" in err
+    assert "SCHEDULER_BURST_BUDGET_USD" in err and "`role set <role> --budget`" in err
+    assert "REVIEWER_MODEL" in err and "`role set reviewer --model`" in err
