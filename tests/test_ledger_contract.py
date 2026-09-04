@@ -268,7 +268,9 @@ def test_transition_refuses_what_is_not_a_transition(ledger, changes):
 
 
 def _claim(ledger, replica=REPLICA, **overrides):
-    params = dict(ceiling=20, since=LONG_AGO, lease_s=90, cooldown_s=300) | overrides
+    # concurrency wide open by default: the tests below race two replicas onto
+    # two rows on purpose; the one about the cap sets it to 1 itself
+    params = dict(ceiling=20, since=LONG_AGO, lease_s=90, cooldown_s=300, concurrency=20) | overrides
     return ledger.claim_next(REPOSITORY, replica, **params)
 
 
@@ -323,6 +325,32 @@ def test_the_daily_rail_counts_admitted_work_not_recorded_bursts(ledger):
     ledger.record_burst(_burst("b-new", issue_number=1))
     assert _claim(ledger, replica=PEER, ceiling=2, since="2026-08-02T00:00:00+00:00").task_id == tid(2)
     assert _claim(ledger, replica="host-c:300", ceiling=3, since="2026-08-02T00:00:00+00:00") is None
+
+
+def test_the_concurrency_rail_counts_the_products_work_in_flight(ledger):
+    """E2: the row's `concurrency` is the number of the product's bursts in
+    flight at once, fleet-wide — a live lease or a running burst, whichever
+    stage a spawn is at — so with the default of 1, a second replica stands by
+    rather than opening a second lane."""
+    ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED))
+
+    assert _claim(ledger, concurrency=1).task_id == tid(1)
+    assert _claim(ledger, replica=PEER, concurrency=1) is None  # the lease is in flight
+    assert _claim(ledger, replica=PEER, concurrency=2).task_id == tid(2)  # a wider row, a second lane
+
+    # a running burst counts even once its lease has lapsed — the reconciler,
+    # not admission, decides whether that work is dead
+    ledger.upsert_task(_task(1, status=TaskStatus.WORKING, claimed_by=REPLICA, claimed_until=LONG_AGO))
+    ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED))
+    ledger.record_burst(_burst("b1", issue_number=1))
+    assert _claim(ledger, replica="host-c:300", concurrency=1) is None
+    # released and finished: nothing in flight, the lane is open again
+    ledger.upsert_task(_task(1, status=TaskStatus.AWAITING_REVIEW))
+    burst = ledger.get_burst("b1")
+    burst.status, burst.finished_at = BurstStatus.SUCCEEDED, utc_now()
+    ledger.finish_burst(burst)
+    assert _claim(ledger, replica="host-c:300", concurrency=1).task_id == tid(2)
 
 
 def test_renewal_is_the_holders_alone(ledger):
@@ -381,6 +409,8 @@ def test_no_call_leaves_a_transaction_open(ledger):
     idle(ledger.finish_burst(burst))  # the refused finalize
     idle(ledger.record_violation(Violation(task_id=leased.task_id, burst_id="b1", tool="Bash", reason="r")))
     idle(ledger.touch_repository_burst(REPOSITORY, utc_now()))
+    idle(ledger.claim_observation(REPOSITORY, REPLICA, 60))
+    idle(ledger.claim_observation(REPOSITORY, PEER, 60))  # the refused claim too
     idle(ledger.update_repository(REPOSITORY, {"team": "others"}, actor="t"))
     idle(ledger.set_repository_state(REPOSITORY, "paused", actor="t", reason="because"))
     with pytest.raises(RegistryError):
@@ -1167,3 +1197,29 @@ def test_touch_stamps_the_lrs_cursor_and_nothing_else(ledger):
 def test_touch_of_the_unregistered_is_a_quiet_no_op(ledger):
     ledger.touch_repository_burst("ghost/none", utc_now())  # logs a warning, raises nothing
     assert ledger.get_repository("ghost/none") is None
+
+
+def test_the_observation_lease_is_the_task_lease_on_the_registry_row(ledger):
+    """E2: whoever's claim lands observes the product for the interval; a
+    peer's live lease refuses, a lapsed one is anyone's. Operational state like
+    the LRS stamp — no audit row, no event, `updated_at` untouched."""
+    before = ledger.get_repository(REPOSITORY)
+    audit_before, events_before = len(ledger.audit_trail()), len(ledger.events())
+
+    assert ledger.claim_observation(REPOSITORY, REPLICA, 60) is True
+    row = ledger.get_repository(REPOSITORY)
+    assert row.claimed_by == REPLICA and _instant(row.claimed_until) > datetime.now(UTC)
+    assert row.updated_at == before.updated_at
+    assert (len(ledger.audit_trail()), len(ledger.events())) == (audit_before, events_before)
+
+    assert ledger.claim_observation(REPOSITORY, PEER, 60) is False  # live: the peer waits its turn
+    assert ledger.get_repository(REPOSITORY).claimed_by == REPLICA
+    assert ledger.claim_observation(REPOSITORY, REPLICA, 60) is False  # the holder too — a rate, not a lock
+
+    assert ledger.claim_observation("ghost/none", REPLICA, 60) is False  # nothing to observe
+
+    # lapsed: the next replica through takes it — a zero-length lease lapses at once
+    ledger.register_repository(RepositoryRecord(repository=NEIGHBOR, team="others"), actor="t")
+    assert ledger.claim_observation(NEIGHBOR, REPLICA, 0) is True
+    assert ledger.claim_observation(NEIGHBOR, PEER, 60) is True
+    assert ledger.get_repository(NEIGHBOR).claimed_by == PEER

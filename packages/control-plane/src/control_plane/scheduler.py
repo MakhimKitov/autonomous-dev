@@ -10,13 +10,19 @@ TO-BE §5): a task is *claimed* by a lease the claim statement stamps
 replica read (`_move`), and *kept* by a heartbeat that renews the lease while
 the container runs. A replica that dies leaves a lapsed lease — data any peer
 reconciles — never a held lock, and a peer's live lease is proof of life from
-any host, so two replicas over one ledger cannot double a burst.
+any host, so two replicas over one ledger cannot double a burst. Observation is
+leased the same way (E2): the fleet's tick takes each product's observation
+turn through its registry row, so N replicas poll a product once per interval,
+and the product's declared concurrency is counted at admission, so N replicas
+run as many bursts of it as its row allows — one, by default, the rest standing
+by. `tests/test_replicas.py` runs two processes over one Postgres and kills one
+mid-burst; the survivor absorbs the work after the lease lapses, exactly once.
 
 A ``Scheduler`` is one product's engine — its ledger reads are scoped to its
 repository, so two products in one ledger cannot see each other's tasks. The
 ``Fleet`` (C4) multiplexes N of them through the same serial loop: every tick
-observes every active product, then at most one burst runs — the least
-recently served product goes first.
+observes every active product whose observation lease this replica lands, then
+at most one burst runs — the least recently served product goes first.
 """
 
 from __future__ import annotations
@@ -96,6 +102,11 @@ class Rails:
     # the longest a dead replica's work stays owned before a peer reconciles it.
     # Renewed every third of it while the container runs.
     lease_s: int = 90
+    # bursts of the product in flight at once, fleet-wide (E2) — the registry
+    # row's `concurrency`, which the fleet copies in here per product the way it
+    # does `daily_bursts`. No env knob: `--github` runs one product from one
+    # process, and 1 is that loop.
+    concurrency: int = 1
     # per-burst budget and turns left this class at D5: they are the role row's
     # (`max_budget_usd`, `max_turns`), read by execute_burst at every spawn
 
@@ -184,6 +195,10 @@ class Scheduler:
     # --- the tick ---
 
     def tick(self) -> None:
+        """The single-product loop (`run --github`): one process, one product,
+        possibly no registry row (dev mode) — so it observes every tick and
+        leases nothing but its tasks. The fleet's tick is the multi-replica one:
+        it takes `observation_turn` per product instead."""
         if self.stop_requested():
             return
         self.reconcile_running()
@@ -193,6 +208,24 @@ class Scheduler:
         task = self.pick_next()
         if task is not None:
             self.run_task_burst(task)
+
+    def observation_turn(self) -> bool:
+        """Reconcile and observe the product, if this replica's claim on its
+        observation lease lands (E2). The lease runs one poll interval, so a
+        fleet of N observes a product once per interval — one set of GitHub
+        calls, one reconcile — and a peer's live lease means this replica skips
+        the product this tick. A replica that dies holding it is waited out, at
+        most one interval; the observe itself is idempotent by construction
+        (every state change it makes is a CAS), so the lease is a rate, not a
+        correctness wall. False: a peer has this turn — the normal state of every
+        replica but one, so nothing is logged; the row's `claimed_by` says whose."""
+        if not self.stores.ledger.claim_observation(
+            self.api.repo, self.replica, self.rails.poll_interval_s
+        ):
+            return False
+        self.reconcile_running()
+        self.observe()
+        return True
 
     # --- the ledger writes (E1) ---
 
@@ -226,24 +259,39 @@ class Scheduler:
         every few seconds; renews on the first beat — the claim's stamp is as old
         as the clone sync took — and every third of the lease after. False — the
         lease is lost, a peer took the task — makes the runner fence the burst.
+
         A ledger error is not a lost lease: the burst keeps going and the next
         beat retries, because killing live work on a database blip is the worse
-        mistake."""
+        mistake — up to a point (E2). The lease is this replica's only proof of
+        life to its peers, and once it lapses a peer may absorb the task; so a
+        renewal that has not landed for two thirds of the lease fences the burst
+        while a third still runs, and the container is dead before anyone may
+        legally start its successor. Waiting for the full span would fence
+        *after* a peer could have spawned — the doubled burst the lease exists
+        to prevent."""
         every = self.rails.lease_s / 3
         last = float("-inf")
+        renewed_at = time.monotonic()  # the claim's own stamp, as of this replica's clock
 
         def beat() -> bool:
-            nonlocal last
-            if time.monotonic() - last < every:
+            nonlocal last, renewed_at
+            now = time.monotonic()
+            if now - last < every:
                 return True
-            last = time.monotonic()
+            last = now
             try:
                 renewed = self.stores.ledger.renew_lease(task.task_id, self.replica, self.rails.lease_s)
             except Exception as exc:  # noqa: BLE001 — any store error; see the docstring
+                if now - renewed_at >= self.rails.lease_s - every:
+                    log.error("lease unrenewable for most of its span — fencing before a peer can absorb",
+                              task=task.task_id, error=str(exc))
+                    return False
                 log.warning("lease renewal failed — keeping the burst, retrying next beat",
                             task=task.task_id, error=str(exc))
                 return True
-            if not renewed:
+            if renewed:
+                renewed_at = now
+            else:
                 log.error("lease lost — a peer holds the task now", task=task.task_id)
             return renewed
 
@@ -439,12 +487,12 @@ class Scheduler:
     # --- spawning ---
 
     def pick_next(self) -> TaskRecord | None:
-        """Admission (TO-BE §5): the daily rail and the claim, as one ledger
-        call — the oldest eligible `claimed` task comes back *leased to this
-        replica* by the statement that picked it, or nothing does. The rails are
-        the statement's WHERE (cooldown) and its fence (ceiling); the day
-        boundary is the one thing computed here, because it is a calendar fact,
-        not a comparison."""
+        """Admission (TO-BE §5): the rails and the claim, as one ledger call —
+        the oldest eligible `claimed` task comes back *leased to this replica*
+        by the statement that picked it, or nothing does. The rails are the
+        statement's WHERE (cooldown) and its fence (the daily ceiling, the
+        product's concurrency); the day boundary is the one thing computed
+        here, because it is a calendar fact, not a comparison."""
         day_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         return self.stores.ledger.claim_next(
             self.api.repo,
@@ -453,6 +501,7 @@ class Scheduler:
             since=day_start,
             lease_s=self.rails.lease_s,
             cooldown_s=self.rails.failure_cooldown_s,
+            concurrency=self.rails.concurrency,
         )
 
     def run_task_burst(self, task: TaskRecord) -> None:
@@ -908,11 +957,14 @@ class Fleet:
 
     Reads the active products fresh every tick and builds each one's
     ``Scheduler`` anew — registration, ``pause``/``resume`` and ``product set``
-    take effect on the next tick with no cache to invalidate. Every tick
-    observes every product (state advances everywhere), then spawns at most
-    one burst: the least recently served product with a claimable task under
-    its own daily quota. With one active product this degenerates to exactly
-    the single-product loop — observe, then at most one burst.
+    take effect on the next tick with no cache to invalidate. Every tick takes
+    every product's observation turn (E2: the turn is a lease on the registry
+    row, one per poll interval fleet-wide, so state advances everywhere and N
+    replicas poll GitHub once), then spawns at most one burst: the least
+    recently served product with a claimable task under its own quotas — the
+    row's daily ceiling and its concurrency, both counted at admission across
+    the fleet. With one active product and one replica this degenerates to
+    exactly the single-product loop — observe, then at most one burst.
 
     A product's trouble stays its own: a build or observe failure is logged
     and skips that product for the tick, never the fleet.
@@ -960,8 +1012,7 @@ class Fleet:
             if self.stop_requested():  # `stop` may land during observation
                 return
             try:
-                sched.reconcile_running()
-                sched.observe()
+                sched.observation_turn()
             except (GitHubApiError, GitHubAuthError) as exc:
                 log.warning("observe failed — product skipped this tick", repo=row.repository, error=str(exc))
         for row, sched in sorted(pairs, key=lambda pair: _least_recently_served(pair[0])):

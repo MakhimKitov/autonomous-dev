@@ -932,7 +932,9 @@ def _run_fleet(
             api,
             clones_root / slug.replace("/", "__"),  # synced before every burst
             args.owner or api.repo_owner(),
-            rails=replace(rails, daily_burst_ceiling=row.daily_bursts),  # the row's quota
+            # the row's quotas: its daily ceiling and, E2, its concurrency —
+            # counted at admission across every replica of the fleet
+            rails=replace(rails, daily_burst_ceiling=row.daily_bursts, concurrency=row.concurrency),
             review=review,
             testing=testing,
             reviewer_api=reviewer_api,
@@ -989,6 +991,9 @@ def _run_scheduler(args: argparse.Namespace) -> int:
     copilot_token = os.environ.get(COPILOT_TOKEN_ENV, "").strip() or None
     rails = Rails.from_env()
     interval = args.interval if args.interval is not None else rails.poll_interval_s
+    # the observation lease (E2) runs one interval, so the rails carry the
+    # interval the loop actually sleeps — `--interval` included
+    rails = replace(rails, poll_interval_s=interval)
     clones_root = stores.data_dir / "clones"
     if slug is None:
         # C4: no --github names no product — the registry does

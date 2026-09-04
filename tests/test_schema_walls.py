@@ -567,7 +567,8 @@ def test_the_lease_statements_run_under_the_runtime_grants(db, walls_dsn):
     """E1's statements as the role replicas connect as: FOR UPDATE SKIP LOCKED
     needs UPDATE on the table (0002 grants it), the advisory functions need
     nothing, RETURNING * needs SELECT on every column — including the two 0015
-    added. The real methods, not copies of their SQL."""
+    added. E2's observation lease is an UPDATE on repositories (0012 grants it).
+    The real methods, not copies of their SQL."""
     from control_plane.models import TaskRecord
     from control_plane.postgres import PostgresLedger
 
@@ -578,8 +579,9 @@ def test_the_lease_statements_run_under_the_runtime_grants(db, walls_dsn):
                           status=TaskStatus.CLAIMED)
         assert ledger.create_task(task) is True
         leased = ledger.claim_next(REPOSITORY, "replica-a", ceiling=20, since="2020-01-01T00:00:00+00:00",
-                                   lease_s=90, cooldown_s=0)
+                                   lease_s=90, cooldown_s=0, concurrency=1)
         assert leased.claimed_by == "replica-a"
+        assert ledger.claim_observation(REPOSITORY, "replica-a", 60) is True
         assert ledger.renew_lease(leased.task_id, "replica-a", 90) is True
         moved = ledger.transition_task(
             leased.task_id, {"status": TaskStatus.WORKING}, expected_status=TaskStatus.CLAIMED,

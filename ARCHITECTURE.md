@@ -314,6 +314,18 @@ the ephemeral container.
 > burst on another. No code path holds a transaction across I/O, and the suite
 > asserts it at every seam of a tick, on both backends. Two replicas over one
 > ledger is the shape this makes possible; the test that runs them is E2.
+>
+> **As built (E2):** two replicas over one ledger, proven in CI — two real
+> control-plane processes on one Postgres, one SIGKILLed mid-burst, the
+> survivor absorbing the orphan after its lease lapsed, with one `succeeded`
+> burst per task and nothing doubled (`tests/test_replicas.py`). Observation
+> fans out as a lease too: the fleet takes each product's turn through its
+> registry row, one poll interval long, so N replicas poll GitHub once. The
+> product's registered `concurrency` (default 1) is counted at admission across
+> the fleet, so a second replica is a hot standby until the row says otherwise.
+> And a holder that cannot renew its lease for two thirds of its span fences
+> its own burst — the row is its only proof of life, and it stops before a peer
+> may lawfully start the successor.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

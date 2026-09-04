@@ -118,7 +118,8 @@ tick():
 ```
 
 `control-plane run` loops the tick (`--interval`, default 60 s); `--once` runs a single
-tick — the unit CI and humans debug with.
+tick — the unit CI and humans debug with. In the fleet (below) the first two lines are
+one product's **observation turn**, taken through a lease on its registry row (E2).
 
 ## Leases and compare-and-set (E1)
 
@@ -143,12 +144,40 @@ rows (`STORES.md`, "The discipline"). Three mechanics, all single statements:
   (finding #6) does not look dead — and every third of the lease it renews
   `claimed_until`, guarded by `claimed_by`. A renewal that finds another holder
   means a peer absorbed the task; the runner kills the container. A ledger error
-  is not a lost lease: the burst keeps going and the next beat retries.
+  is not a lost lease: the burst keeps going and the next beat retries — for two
+  thirds of the lease (E2). Past that the holder can no longer vouch for its own
+  lease and fences the burst itself, a third of the span before any peer may
+  absorb the task: the container is dead before its successor can lawfully spawn.
 
 The replica's name is `host:pid` (`default_replica`), so a lapsed lease says
 where to look. `SCHEDULER_LEASE_S` (default 90) is the longest a dead replica's
 work stays owned. Nothing here is a mode: one replica on a laptop runs the same
 statements as N on a cluster, and with one the fence is never contended.
+
+**Two replicas over one ledger (E2)** is the shape all of this exists for, and
+`tests/test_replicas.py` runs it in CI: two real control-plane processes on one
+Postgres (GitHub and docker in fakes, everything from the loop down real), one
+SIGKILLed mid-burst. The survivor finishes every task, the dead replica's included
+— after its lease lapsed, never on sight — and the ledger shows one `succeeded`
+burst per task, one `killed` row (the orphan, reconciled by the survivor), and the
+crash as one failed attempt on its task. Two things fan out with the second
+replica:
+
+- **The observation turn.** The fleet observes a product through a lease on its
+  registry row (`repositories.claimed_by` / `claimed_until`, the same statement as
+  the task claim: `claim_observation`), one poll interval long. Whoever's claim
+  lands reconciles and observes; everyone else skips the product this tick. N
+  replicas therefore poll GitHub once per interval, not N times, and a dead
+  observer is waited out for at most one interval. It is a rate, not a wall — the
+  observe is idempotent by construction (every state change it makes is a CAS),
+  and the single-product loop (`run --github`, which may serve an unregistered
+  product) observes every tick without it.
+- **The product's concurrency.** The registry row's `concurrency` (default 1) is
+  counted at admission, fleet-wide: `claim_next` refuses when the product already
+  has that many tasks in flight — a live lease or a running burst, whichever
+  stage a spawn is at. With the default, a second replica is a hot standby that
+  takes over the moment the lane is free or the lease lapses; a row set wider
+  runs that many bursts of the product at once, one per replica.
 
 ## The fleet (C4)
 
@@ -156,10 +185,12 @@ statements as N on a cluster, and with one the fence is never contended.
 serial loop. Each tick the fleet re-reads the registry — `register`, `pause`/`resume`
 and `product set` take effect on the next tick, no restart — and builds each product's
 scheduler from its row: policies via `from_product` (C3), the row's `daily_bursts` as
-its ceiling. Every product is observed every tick; then at most **one burst** runs —
-the **least recently served** product (`repositories.last_burst_at`, never-served
-first, slug breaks ties) with a claimable task under its own quota. One burst per tick
-keeps the loop serial; per-product concurrency arrives with real runners (TO-BE §6).
+its ceiling and, E2, its `concurrency`. Every product's observation turn is taken every
+tick (the turn is a lease, one per interval fleet-wide — above); then at most **one
+burst** runs — the **least recently served** product (`repositories.last_burst_at`,
+never-served first, slug breaks ties) with a claimable task under its own quotas. One
+burst per tick keeps each replica's loop serial; the product's concurrency, counted at
+admission, is what bounds the fleet.
 
 Isolation is structural: a product's scheduler reads only its own tasks and bursts
 (the ledger queries are repository-scoped), and one product's trouble — an
@@ -191,7 +222,9 @@ Defaults, `.env`-overridable:
 | daily burst ceiling | 20 — per product: a registered row's `daily_bursts` (C4) |
 | failure cooldown / task | 5 min |
 | poll interval | 60 s |
-| lease / claimed task | 90 s (`SCHEDULER_LEASE_S`) — renewed every third while the burst runs; lapsed = a peer may reconcile |
+| lease / claimed task | 90 s (`SCHEDULER_LEASE_S`) — renewed every third while the burst runs; unrenewable for two thirds = the holder fences itself; lapsed = a peer may reconcile |
+| observation lease / product | one poll interval (E2) — the fleet polls a product once per interval, whoever's turn it is |
+| concurrency / product | 1 — the registered row's `concurrency` (E2), counted at admission fleet-wide; no env knob, `--github` is one lane by construction |
 | per-burst | the **role row's** `max_budget_usd` / `max_turns` (D5; seeded 2.0 / 100, `role set <role> --budget --turns`). The budget is a **hard cap** on estimated cost — the SDK kills the burst mid-run; falsified "advisory" on task 17 |
 
 ## Kill switch & crash recovery
@@ -201,7 +234,8 @@ Defaults, `.env`-overridable:
   the burst is marked `killed`, the task rolls back to its pre-burst state, the loop exits
   before the next spawn. SIGTERM does the same in-process. Removing `STOP` and re-running
   resumes cleanly — every decision re-derives from GitHub + ledger.
-- **Reconciliation, every tick** — a `running` burst or a `working` task that **no live
+- **Reconciliation, every tick** (in the fleet: every observation turn, E2) — a `running`
+  burst or a `working` task that **no live
   lease covers** (E1: `claimed_until` lapsed or never set) is a replica that died
   mid-burst → burst `killed`, task rolled back, attempts+1 (a crash loop must eventually
   trip the rail, not spin forever). A live lease — whoever holds it — is proof of life
@@ -227,7 +261,9 @@ Additive columns on `tasks` (phase-0 migration style): `status` (values above),
 E1 added the lease pair `claimed_by` / `claimed_until` (migration 0015) and the statements
 that read it: `create_task`, `transition_task`, `claim_next`, `renew_lease`, and the
 `orphaned` filter on `tasks_by_status` / `running_bursts`. `upsert_task` — the whole-row
-write — is no longer something the scheduler calls.
+write — is no longer something the scheduler calls. E2 added `claim_observation` on the
+registry row's lease pair (columns since 0002) and the `concurrency` count to `claim_next`
+— no new columns.
 
 ## The clone
 
@@ -247,7 +283,7 @@ written into config that gets mounted into the box.
 
 ```
 control_plane/
-  scheduler.py    # tick, state machine, rails; leases + CAS (E1)
+  scheduler.py    # tick, state machine, rails; leases + CAS (E1); observation turn + concurrency (E2)
   github_api.py   # the REST surface above
   prompts.py      # work/review prompt construction (provenance framing)
   bursts.py       # execute_burst() — extracted from cli._run_burst, shared by CLI + scheduler
