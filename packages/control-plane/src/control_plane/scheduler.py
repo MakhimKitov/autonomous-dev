@@ -45,6 +45,7 @@ from control_plane.review import (
     parse_findings,
 )
 from control_plane.runner import DEFAULT_IMAGE
+from control_plane.secrets import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
     ManifestError,
@@ -118,6 +119,7 @@ class Scheduler:
         reviewer_login: str | None = None,
         tester_api: GitHubApi | None = None,
         tester_login: str | None = None,
+        secrets: SecretResolver | None = None,
         image: str = DEFAULT_IMAGE,
         model: str | None = None,
         sync_clone: Callable[[], Path] | None = None,
@@ -134,6 +136,7 @@ class Scheduler:
         self.reviewer_login = reviewer_login  # that App's bot login, learned at startup
         self.tester_api = tester_api  # posts test reports + auto issues (the tester App, D3)
         self.tester_login = tester_login
+        self.secrets = secrets or SecretResolver()  # resolves sandbox refs at spawn (D4)
         self.machine_reviewers = set(self.review.machine_reviewers())
         if self.review.claude and reviewer_login:
             self.machine_reviewers.add(reviewer_login)
@@ -546,7 +549,7 @@ class Scheduler:
         except ManifestError as exc:
             self._skip_test(task, str(exc))
             return False
-        _, missing = resolve_test_env(manifest)
+        _, missing = resolve_test_env(manifest, self.testing.refs_for(manifest), self.secrets)
         if missing:
             self._skip_test(
                 task, f"sandbox credentials not provisioned platform-side: {', '.join(missing)}"
@@ -566,8 +569,9 @@ class Scheduler:
 
     def _run_test_burst(self, task: TaskRecord) -> None:
         """A tester-role burst (TESTER.md): boots the product per its own
-        TESTING.md, sandbox credentials injected as the TEST_ intersection;
-        the report returns via the harvest and posts as a PR comment."""
+        TESTING.md, sandbox credentials injected as the declared-ref
+        intersection (resolved at spawn, D4); the report returns via the
+        harvest and posts as a PR comment."""
         pr = self.api.get_pr(task.pr_number)
         if pr.merged or pr.state != "open":
             task.status = TaskStatus.AWAITING_REVIEW  # resolved while queued — nothing to test
@@ -587,7 +591,9 @@ class Scheduler:
         except (OSError, ManifestError) as exc:
             self._register_failure(task, f"test manifest unusable: {exc}")
             return
-        sandbox_env, missing = resolve_test_env(manifest)
+        sandbox_env, missing = resolve_test_env(
+            manifest, self.testing.refs_for(manifest), self.secrets
+        )
         if missing:
             self._register_failure(task, f"sandbox credentials missing: {', '.join(missing)}")
             return
@@ -611,7 +617,7 @@ class Scheduler:
                 max_budget_usd=self.rails.burst_budget_usd,
                 max_turns=self.rails.burst_max_turns,
                 burst_id=self.current_burst_id,
-                extra_env=sandbox_env,  # the TEST_ intersection — tester bursts only
+                extra_env=sandbox_env,  # the resolved intersection — tester bursts only
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))

@@ -13,11 +13,12 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable
 
 import jwt
 import requests
+
+from control_plane.secrets import SecretError, SecretResolver
 
 GITHUB_API = "https://api.github.com"
 
@@ -71,20 +72,25 @@ class AppCredentials:
 
         ``prefix`` selects a second App identity from the same env — the
         reviewer App reads ``REVIEWER_GITHUB_APP_ID`` etc. (REVIEWERS.md).
+        ``*_GITHUB_APP_PRIVATE_KEY_PATH`` holds a secret ref — a path, or any
+        ``env:``/``file:``/``helper:`` ref the SecretResolver takes (D4).
         """
         env = dict(os.environ) if environ is None else environ
         app_id = env.get(prefix + APP_ID, "").strip()
-        key_path = env.get(prefix + PRIVATE_KEY_PATH, "").strip()
-        if not app_id and not key_path:
+        key_ref = env.get(prefix + PRIVATE_KEY_PATH, "").strip()
+        if not app_id and not key_ref:
             return None
-        if not app_id or not key_path:
+        if not app_id or not key_ref:
             raise GitHubAuthError(f"set both {prefix + APP_ID} and {prefix + PRIVATE_KEY_PATH} (or neither)")
-        path = Path(key_path).expanduser()
-        if not path.is_file():
-            raise GitHubAuthError(f"{prefix + PRIVATE_KEY_PATH} does not exist: {path}")
+        # the key is a secret ref (D4): a plain path keeps its pre-D4 meaning
+        # (file:), and env:/helper: reach wherever the adopter materialized it
+        try:
+            private_key = SecretResolver(env).resolve(key_ref, bare_as="file")
+        except SecretError as exc:
+            raise GitHubAuthError(f"{prefix + PRIVATE_KEY_PATH}: {exc}") from exc
         return cls(
             app_id=app_id,
-            private_key=path.read_text(encoding="utf-8"),
+            private_key=private_key,
             installation_id=env.get(prefix + INSTALLATION_ID, "").strip() or None,
         )
 

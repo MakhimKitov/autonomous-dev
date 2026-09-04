@@ -19,13 +19,13 @@ checks that can disagree.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Protocol
 
 from control_plane.github_api import GitHubApiError
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import RepositoryRecord
 from control_plane.review import ReviewPolicy, ReviewPolicyError
+from control_plane.secrets import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
     E2EPolicy,
@@ -73,6 +73,7 @@ def run_preflight(
     ``product check`` prints them.
     """
     env = dict(os.environ) if environ is None else environ
+    resolver = SecretResolver(env)
 
     # 1. The org App reads the repo — every check below rides this access.
     try:
@@ -95,7 +96,8 @@ def run_preflight(
     # 3. `e2e on` must be executable end to end: the tester App exists (its
     #    identity posts the reports — D3), the funnel has a trigger, the
     #    manifest parses, and every env name it declares maps to a ref that
-    #    points at something. Values are never read here — D4 resolves them.
+    #    points at something (`SecretResolver.probe` — values are never read
+    #    here; the scheduler resolves them at spawn, D4).
     manifest, problem = _manifest_state(repo)
     if row.e2e_enabled:
         try:
@@ -114,12 +116,12 @@ def run_preflight(
         if uncovered:
             raise PreflightError(
                 f"e2e on, but {MANIFEST_FILENAME} declares env the product has no "
-                f"ref for: {', '.join(uncovered)} — declare with --test-env NAME=env:REF"
+                f"ref for: {', '.join(uncovered)} — declare with --test-env NAME=env:VAR (or file:PATH / helper:NAME)"
             )
         unresolved = [
             f"{name}={ref}"
             for name, ref in sorted(row.test_env_refs.items())
-            if name in manifest.env and not _ref_resolves(ref, env)
+            if name in manifest.env and not resolver.probe(ref)
         ]
         if unresolved:
             raise PreflightError(
@@ -167,12 +169,3 @@ def _manifest_state(repo: ProductRepo) -> tuple[TestManifest | None, str]:
         return parse_manifest(text), ""
     except ManifestError as exc:
         return None, f"has an unusable {MANIFEST_FILENAME}: {exc}"
-
-
-def _ref_resolves(ref: str, env: dict[str, str]) -> bool:
-    """Whether a declared secret ref points at something, without reading it —
-    preflight proves executability; values stay where they live (D4 resolves)."""
-    scheme, _, name = ref.partition(":")
-    if scheme == "env":
-        return bool(env.get(name, "").strip())
-    return Path(name).expanduser().is_file()

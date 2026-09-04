@@ -146,15 +146,17 @@ a CTE on Postgres, a transaction on SQLite. **A task names a registered product*
 `run` and `backfill` need the product registered first — migration 0012 seeded
 rows for repositories that already had tasks, with placeholder policies the audit
 row tells you to `product set`. Test-env values never enter the ledger: `--test-env`
-takes `NAME=env:REF` / `NAME=file:PATH` references, resolved at D4.
+takes `NAME=env:VAR` / `NAME=file:PATH` / `NAME=helper:NAME` references, resolved
+at spawn by the `SecretResolver` (D4).
 
 **Registration preflights (C2)**: `register` — and `set`, when it touches a policy
 column — runs `preflight.run_preflight` before the write. The *gate* refuses a
 declaration the platform cannot execute: the org App unable to read the repo, a
 review provider without its credentials on this machine (the old scheduler-startup
 error, relocated), `e2e on` without the claude provider or without a parseable
-`TESTING.md` whose declared env every ref covers *and resolves* (env var set /
-file present — values are never read). Everything else is *socket lint* —
+`TESTING.md` whose declared env every ref covers *and resolves* (`SecretResolver.probe`:
+env var set / file present / helper configured — values are never read). Everything
+else is *socket lint* —
 `CLAUDE.md`, issue forms, PR template, commitlint config — warned and recorded in
 the registration's audit row, never a refusal. `product check` re-runs the same
 preflight against the live repo (exit 1 = drift: the row is no longer executable);
@@ -211,6 +213,22 @@ machinery. `E2E=on` without the tester App refuses at startup and at
 registration preflight (`E2EPolicy.from_env` carries the honor-check, like the
 claude provider's) — declared-but-unhonorable is never a silent degrade. The
 tester *burst* still holds no GitHub credential at all.
+
+**SecretResolver (D4)**: the platform never speaks to a secret manager (TO-BE §4).
+Everywhere it needs a secret it holds a *ref* — a name, never a value, never a
+command — and `secrets.SecretResolver` reads it at the moment of use. Three
+schemes: `env:VAR`, `file:PATH`, `helper:NAME` — the last invokes one helper
+binary configured out-of-band (`SECRET_HELPER`, the git-credential-helper shape:
+`<helper> get NAME` → value on stdout), which is how anything vault-shaped plugs
+in without the platform learning its name. Two things resolve through it: the
+App keys (`*_GITHUB_APP_PRIVATE_KEY_PATH` takes a plain path as before, or any
+ref) and the tester's sandbox credentials — a registered product's row
+declares them (`test_env_refs`, `E2EPolicy.env_refs`), an unregistered
+env-governed run keeps the `TEST_` prefix as `X ← env:TEST_X`, and
+`resolve_test_env` injects the intersection of the manifest's ask and that
+declaration. Preflight *probes* refs (points at something, never read);
+the scheduler *resolves* at spawn; a helper failure is a skipped test with the
+ref named, never a crash. `grep -ri vault packages/` stays empty by design.
 
 ### Task identity
 

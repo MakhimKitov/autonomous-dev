@@ -127,8 +127,8 @@ def execute_burst(
     task's repository + the role's permission subset (`mint_burst_token`, D2);
     reviewer bursts get no GitHub credential at all — REVIEWERS.md.
     ``mount_codex`` mounts the operator's codex auth (slice 3, reviewer only).
-    ``extra_env`` injects sandbox credentials — the resolved TEST_ intersection,
-    tester bursts only (TESTER.md).
+    ``extra_env`` injects sandbox credentials — the declared-ref intersection
+    resolved at spawn (D4), tester bursts only (TESTER.md).
 
     May raise GitHubAuthError (before the container starts) — callers decide
     whether that aborts (CLI) or waits for the next tick (scheduler).

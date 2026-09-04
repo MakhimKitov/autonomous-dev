@@ -172,18 +172,21 @@ def test_test_env_takes_refs_never_values(tmp_path, capsys):
         tmp_path, "register", "owner/product", "--team", "bots",
         "--test-env", "DISCORD_TOKEN=env:TEST_DISCORD_TOKEN",
         "--test-env", "GUILD_ID=file:/run/secrets/guild",
+        "--test-env", "CHANNEL_ID=helper:discord/test-channel",  # D4's third scheme
     ) == 0
     assert stored(tmp_path, "owner/product").test_env_refs == {
         "DISCORD_TOKEN": "env:TEST_DISCORD_TOKEN",
         "GUILD_ID": "file:/run/secrets/guild",
+        "CHANNEL_ID": "helper:discord/test-channel",
     }
 
-    assert run(
-        tmp_path, "register", "owner/other", "--team", "bots",
-        "--test-env", "TOKEN=hunter2-an-actual-secret",
-    ) == 2
-    assert stored(tmp_path, "owner/other") is None
-    assert "never a value" in capsys.readouterr().err
+    # a value, and the scheme the platform must never grow a special case for
+    for value in ("TOKEN=hunter2-an-actual-secret", "TOKEN=vault:secret/discord"):
+        assert run(
+            tmp_path, "register", "owner/other", "--team", "bots", "--test-env", value
+        ) == 2
+        assert stored(tmp_path, "owner/other") is None
+        assert "never a value" in capsys.readouterr().err
 
 
 def test_registering_twice_is_a_refusal_not_a_crash(tmp_path, capsys):

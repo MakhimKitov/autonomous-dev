@@ -48,19 +48,27 @@ is a failed test burst (soft, like everything else here).
 The manifest is **untrusted** — it lives in a repo the dev agent writes to. So neither
 side alone decides what enters the container:
 
-- The operator provisions sandbox credentials in the platform `.env` under the `TEST_`
-  prefix: `TEST_DISCORD_TOKEN`, `TEST_GUILD_ID`, … The prefix is the allowlist
-  boundary and the radioactivity marker.
+- The operator declares each sandbox credential as a **secret ref** on the product's
+  registry row: `product set owner/name --test-env DISCORD_TOKEN=env:TEST_DISCORD_TOKEN
+  --test-env GUILD_ID=file:/run/secrets/guild`. A ref is a name — `env:VAR`,
+  `file:PATH` or `helper:NAME` (the `SECRET_HELPER` binary, D4) — never a value; the
+  ledger stores refs only. An unregistered, env-governed run has no row: there the
+  `TEST_` prefix is the declaration, `X ← env:TEST_X`, the MVP's allowlist boundary
+  spelled as a default ref.
 - The manifest names what it needs: `DISCORD_TOKEN`, `GUILD_ID`.
-- The control plane injects exactly the **intersection**: `TEST_X` exists ∧ manifest
-  asks for `X` → injected as `X`. A hostile manifest requesting
-  `CLAUDE_CODE_OAUTH_TOKEN` gets nothing — it isn't under `TEST_`.
+- The control plane injects exactly the **intersection**: the manifest asks for `X` ∧
+  the declaration has a ref for `X` → resolved at spawn, injected as `X`. A hostile
+  manifest requesting `CLAUDE_CODE_OAUTH_TOKEN` gets nothing — no row declares it, and
+  `TEST_CLAUDE_CODE_OAUTH_TOKEN` does not exist.
 
-Declared by the manifest but missing platform-side → the test stage is skipped with an
-issue comment naming the missing variable (the operator's move, not a blocked task).
-`TEST_*` values enter **tester bursts only** — never dev, never reviewer. Sandbox
-credentials must be disposable by construction: the blast radius of a rogue test run is
-one empty Discord guild, by the operator's own provisioning choice.
+Declared by the manifest but undeclared or unresolvable platform-side → the test stage
+is skipped with an issue comment naming the gap and its ref (the operator's move, not
+a blocked task); registration preflight (C2) already probes every declared ref, so the
+skip is the drift case — a manifest that grew a name after registration. Sandbox
+values enter **tester bursts only** — never dev, never reviewer — and exist only
+between resolve and the container env. Sandbox credentials must be disposable by
+construction: the blast radius of a rogue test run is one empty Discord guild, by the
+operator's own provisioning choice.
 
 ## Tools: a curated registry (slice 2)
 
