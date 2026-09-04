@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from control_plane.models import RepositoryRecord
+from control_plane.secrets import SecretResolver
 from control_plane.testing import (
     CitationError,
     ManifestError,
@@ -75,6 +76,18 @@ def test_policy_from_product_row_governs():
     assert E2EPolicy.from_product(off, {"E2E": "on"}).enabled is False
 
 
+def test_policy_from_product_carries_the_rows_refs():
+    # D4: the row's test_env_refs are the declaration the tester can reach;
+    # an env-governed policy carries None — the TEST_ prefix default
+    refs = {"DISCORD_TOKEN": "env:TEST_DISCORD_TOKEN", "GUILD_ID": "file:/run/secrets/guild"}
+    row = RepositoryRecord(
+        repository="fermata/discord-bot", team="platform", e2e_enabled=True, test_env_refs=refs
+    )
+    policy = E2EPolicy.from_product(row, dict(TESTER_CREDS))
+    assert policy.env_refs == refs and policy.env_refs is not row.test_env_refs
+    assert E2EPolicy.from_env(dict(TESTER_CREDS, E2E="on")).env_refs is None
+
+
 def test_policy_from_product_model_stays_a_machine_answer():
     row = RepositoryRecord(repository="fermata/discord-bot", team="platform", e2e_enabled=True)
     policy = E2EPolicy.from_product(row, dict(TESTER_CREDS, TESTER_MODEL="claude-haiku-4-5"))
@@ -122,29 +135,78 @@ def test_manifest_rejects_unshipped_tools():
 # --- the intersection ---
 
 
-def test_resolve_injects_only_the_test_prefixed_intersection():
+def test_env_governed_refs_are_the_test_prefix():
+    # the unregistered default: every manifest name X reads env:TEST_X — the
+    # MVP's allowlist boundary, spelled as refs (D4)
     manifest = parse_manifest(MANIFEST)
+    assert E2EPolicy(enabled=True).refs_for(manifest) == {
+        "DISCORD_TOKEN": "env:TEST_DISCORD_TOKEN",
+        "GUILD_ID": "env:TEST_GUILD_ID",
+    }
+
+
+def test_registered_refs_intersect_with_the_ask():
+    # a registered product's declaration, intersected: a name the row lacks is
+    # absent (not defaulted), a ref the manifest never asks for is not offered
+    manifest = parse_manifest(MANIFEST)
+    policy = E2EPolicy(
+        enabled=True,
+        env_refs={"DISCORD_TOKEN": "helper:discord/test-token", "STALE": "env:TEST_STALE"},
+    )
+    assert policy.refs_for(manifest) == {"DISCORD_TOKEN": "helper:discord/test-token"}
+
+
+def test_resolve_injects_only_the_declared_intersection():
+    manifest = parse_manifest(MANIFEST)
+    resolver = SecretResolver(
+        {"TEST_DISCORD_TOKEN": "tok", "TEST_GUILD_ID": "1", "DISCORD_TOKEN": "prod!"}
+    )
     resolved, missing = resolve_test_env(
-        manifest, {"TEST_DISCORD_TOKEN": "tok", "TEST_GUILD_ID": "1", "DISCORD_TOKEN": "prod!"}
+        manifest, E2EPolicy(enabled=True).refs_for(manifest), resolver
     )
     assert resolved == {"DISCORD_TOKEN": "tok", "GUILD_ID": "1"}  # unprefixed on the way in
     assert missing == []
 
 
-def test_resolve_reports_missing_by_platform_name():
+def test_resolve_reports_missing_with_the_ref_and_why():
     manifest = parse_manifest(MANIFEST)
-    resolved, missing = resolve_test_env(manifest, {"TEST_DISCORD_TOKEN": "tok"})
-    assert resolved == {"DISCORD_TOKEN": "tok"}
-    assert missing == ["TEST_GUILD_ID"]  # named as the operator must provision it
-
-
-def test_manifest_cannot_name_its_way_past_the_prefix():
-    # a hostile manifest asking for the platform's own secrets gets nothing:
-    # lookup is TEST_<name>, so only deliberately provisioned values exist
-    manifest = parse_manifest("---\nenv: [CLAUDE_CODE_OAUTH_TOKEN]\n---\nprose")
-    resolved, missing = resolve_test_env(manifest, {"CLAUDE_CODE_OAUTH_TOKEN": "the-real-one"})
+    refs = {"DISCORD_TOKEN": "env:TEST_DISCORD_TOKEN"}  # GUILD_ID never declared
+    resolver = SecretResolver({})
+    resolved, missing = resolve_test_env(manifest, refs, resolver)
     assert resolved == {}
-    assert missing == ["TEST_CLAUDE_CODE_OAUTH_TOKEN"]
+    assert missing == [
+        "DISCORD_TOKEN ← env:TEST_DISCORD_TOKEN (env var TEST_DISCORD_TOKEN is unset)",
+        "GUILD_ID ← no ref declared",
+    ]
+
+
+def test_resolve_reads_file_refs_at_spawn(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("from-a-file\n", encoding="utf-8")
+    manifest = parse_manifest("---\nenv: [DISCORD_TOKEN]\n---\nprose")
+    resolved, missing = resolve_test_env(
+        manifest, {"DISCORD_TOKEN": f"file:{token_file}"}, SecretResolver({})
+    )
+    assert (resolved, missing) == ({"DISCORD_TOKEN": "from-a-file"}, [])
+
+
+def test_manifest_cannot_name_its_way_past_the_declaration():
+    # a hostile manifest asking for the platform's own secrets gets nothing,
+    # in both modes: env-governed looks up TEST_<name>; registered offers only
+    # what the row declares
+    manifest = parse_manifest("---\nenv: [CLAUDE_CODE_OAUTH_TOKEN]\n---\nprose")
+    resolver = SecretResolver({"CLAUDE_CODE_OAUTH_TOKEN": "the-real-one"})
+    resolved, missing = resolve_test_env(
+        manifest, E2EPolicy(enabled=True).refs_for(manifest), resolver
+    )
+    assert resolved == {}
+    assert missing == [
+        "CLAUDE_CODE_OAUTH_TOKEN ← env:TEST_CLAUDE_CODE_OAUTH_TOKEN "
+        "(env var TEST_CLAUDE_CODE_OAUTH_TOKEN is unset)"
+    ]
+    registered = E2EPolicy(enabled=True, env_refs={"DISCORD_TOKEN": "env:TEST_DISCORD_TOKEN"})
+    resolved, missing = resolve_test_env(manifest, registered.refs_for(manifest), resolver)
+    assert resolved == {} and missing == ["CLAUDE_CODE_OAUTH_TOKEN ← no ref declared"]
 
 
 # --- the report contract ---

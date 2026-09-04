@@ -143,6 +143,20 @@ def test_a_file_ref_resolves_against_the_filesystem(tmp_path):
     assert run_preflight(row, FakeRepo(FULL_SOCKET), environ=dict(CREDS)) == []
 
 
+def test_a_helper_ref_probes_the_helper_not_the_value(tmp_path):
+    """D4: preflight proves a helper: ref by the helper being configured and
+    executable — never by asking it (a helper may audit or prompt per call;
+    the value is read at spawn)."""
+    row = _e2e_row(test_env_refs={"DISCORD_TOKEN": "helper:discord/test-token"})
+    with pytest.raises(PreflightError, match="resolve to nothing"):
+        run_preflight(row, FakeRepo(FULL_SOCKET), environ=dict(CREDS))
+    helper = tmp_path / "helper"
+    helper.write_text("#!/bin/sh\necho never-called >&2; exit 1\n")
+    helper.chmod(0o700)
+    environ = dict(CREDS, SECRET_HELPER=str(helper))
+    assert run_preflight(row, FakeRepo(FULL_SOCKET), environ=environ) == []
+
+
 def test_e2e_without_the_tester_app_refuses():
     # D3: the report's identity is part of the declaration's executability —
     # the same honor-check the scheduler fires, asked at the gate

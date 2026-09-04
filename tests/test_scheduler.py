@@ -843,6 +843,38 @@ def test_test_burst_boots_sandbox_and_posts_report(rig, monkeypatch):
     assert scheduler.reviewer_api.commented == [] and scheduler.reviewer_api.filed == []
 
 
+def test_registered_refs_govern_the_sandbox_injection(rig, monkeypatch, tmp_path):
+    """D4: a registered product's row declares the refs its tester can reach;
+    the resolver reads them at spawn. TEST_DISCORD_TOKEN sits in the process
+    env, but this row points elsewhere — the prefix default is not consulted."""
+    scheduler, api, stores, spawned, fake_execute = _tester_rig(rig, monkeypatch)
+    token_file = tmp_path / "discord-token"
+    token_file.write_text("from-the-row's-file\n", encoding="utf-8")
+    scheduler.testing = E2EPolicy(enabled=True, env_refs={"DISCORD_TOKEN": f"file:{token_file}"})
+    stores.ledger.upsert_task(
+        _task(1, status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="test")
+    )
+    api.prs[2] = _pr()
+    fake_execute.next_outcome = _assess_outcome(
+        '{"verdict": "Clean.", "scenarios": [], "defects": [], "issues": []}'
+    )
+    scheduler.tick()
+    assert spawned[0]["extra_env"] == {"DISCORD_TOKEN": "from-the-row's-file"}
+
+    # the manifest drifts to a name the row never declared → a skip naming the
+    # gap, not a reach for env:TEST_GUILD_ID
+    (scheduler.repo / "TESTING.md").write_text(
+        "---\nenv: [DISCORD_TOKEN, GUILD_ID]\n---\nprose", encoding="utf-8"
+    )
+    monkeypatch.setenv("TEST_GUILD_ID", "would-be-reachable-under-the-prefix")
+    _queued_assess(stores)
+    fake_execute.next_outcome = _assess_outcome('{"verdict": "Clean.", "findings": []}')
+    scheduler.tick()
+    task = stores.ledger.get_task(tid(1))
+    assert task.status == TaskStatus.AWAITING_REVIEW and task.next_burst_kind is None
+    assert any("GUILD_ID ← no ref declared" in body for _, body in api.comments)
+
+
 def test_pr_caused_defects_return_to_the_developer(rig, monkeypatch):
     scheduler, api, stores, _, fake_execute = _tester_rig(rig, monkeypatch)
     stores.ledger.upsert_task(

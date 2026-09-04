@@ -280,6 +280,15 @@ the ephemeral container.
 > preflight (the honor-check lives in `E2EPolicy`, mirroring the claude
 > provider's). The MVP's deferral — the tester riding the reviewer App — ends
 > here; the tester burst itself still holds no GitHub credential.
+>
+> **As built (D4):** secrets are materialized by the adopter and resolved by
+> ref (TO-BE §4): `SecretResolver` takes `env:`, `file:` and `helper:` refs —
+> the helper is one binary named out-of-band by `SECRET_HELPER`, the
+> git-credential-helper pattern, so a vault is the adopter's instrument and
+> never a platform dependency. App private keys and the tester's sandbox
+> credentials resolve through it at the moment of use; the ledger keeps refs
+> (`repositories.test_env_refs`), preflight probes that a ref points at
+> something, and the value exists only between resolve and the container env.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,
@@ -490,8 +499,9 @@ conventions** where applicable (still experimental) and Claude Code's built-in
   container at all. Declaring that host per burst and enforcing it is G6/#47; until
   then the note is the wall. Two consequences worth stating: the collector sees tool
   arguments, which for a tester burst can include a command that names a credential;
-  and an *authenticated* endpoint waits for D4's SecretResolver, since
-  `OTEL_EXPORTER_OTLP_HEADERS` would carry a token as a value.
+  and an *authenticated* endpoint would want its header token behind a
+  `SecretResolver` ref (D4 shipped the resolver; wiring
+  `OTEL_EXPORTER_OTLP_HEADERS` through it rides with G6).
 - **One instrumentation point, two consumers.** `tool_decision` / hook events feed
   both the trace stream (debugging) and the **violations ledger** (the §9 dataset).
   Ledger derivation is control-plane-owned — tripwire-relevant events are also

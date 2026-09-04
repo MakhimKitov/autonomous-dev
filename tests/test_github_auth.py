@@ -60,6 +60,31 @@ def test_credentials_from_env(tmp_path):
         )
 
 
+def test_the_app_key_is_a_secret_ref(tmp_path):
+    # D4: *_GITHUB_APP_PRIVATE_KEY_PATH resolves through the SecretResolver —
+    # a plain path keeps its pre-D4 meaning; env:/file:/helper: reach wherever
+    # the adopter materialized the key. Same PEM out of every form.
+    key_file = tmp_path / "app.pem"
+    key_file.write_text(PRIVATE_PEM, encoding="utf-8")
+    helper = tmp_path / "helper"
+    helper.write_text(f'#!/bin/sh\ntest "$1" = get && test "$2" = gh/dev && cat {key_file}\n')
+    helper.chmod(0o700)
+    forms = {
+        "bare path": {"GITHUB_APP_PRIVATE_KEY_PATH": str(key_file)},
+        "file:": {"GITHUB_APP_PRIVATE_KEY_PATH": f"file:{key_file}"},
+        "env:": {"GITHUB_APP_PRIVATE_KEY_PATH": "env:DEV_APP_PEM", "DEV_APP_PEM": PRIVATE_PEM},
+        "helper:": {"GITHUB_APP_PRIVATE_KEY_PATH": "helper:gh/dev", "SECRET_HELPER": str(helper)},
+    }
+    for label, env in forms.items():
+        creds = AppCredentials.from_env(dict(env, GITHUB_APP_ID="7"))
+        assert creds is not None and creds.private_key == PRIVATE_PEM.rstrip("\n"), label
+    with pytest.raises(GitHubAuthError, match="REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH: env var NOPE"):
+        AppCredentials.from_env(
+            {"REVIEWER_GITHUB_APP_ID": "7", "REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH": "env:NOPE"},
+            prefix="REVIEWER_",
+        )
+
+
 def test_the_role_prefix_scheme_is_the_contract():
     # TO-BE §4 (D1): App names are the adopter's choice — the platform knows
     # roles only through these prefixes. The dev App reads the bare names.

@@ -217,7 +217,9 @@ App credentials reach the platform through the role-prefix env scheme (D1): the
 dev App reads `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH`, the other roles the
 same names behind `REVIEWER_`, `TESTER_`, `MONITOR_`. App names are the adopter's
 choice — the prefixes are the contract, and `control-plane github-check` preflights
-every configured role. Test reports and relayed `auto` issues post under the tester
+every configured role. The key variable holds a secret ref (D4): a plain path, or
+`env:`/`file:`/`helper:` for a key the adopter materialized elsewhere — the
+platform reads it at mint and never stores it. Test reports and relayed `auto` issues post under the tester
 App (D3); `MONITOR_` is reserved until the monitor exists (T4). Tokens come in two tiers (D2): the
 control plane's cached tokens carry the App's full grant, while a burst token is
 minted fresh per spawn, pinned to the task's repository and the role's permission

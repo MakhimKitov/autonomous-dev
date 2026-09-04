@@ -5,7 +5,10 @@ The platform owns the envelope; the product owns the knowledge. Its
 inject) and prose for the tester agent (how to test). The manifest is
 UNTRUSTED — it lives in a repo the dev agent writes to — so credentials are
 resolved by intersection: only names the manifest asks for AND the operator
-provisioned under the ``TEST_`` prefix ever enter the container.
+declared a secret ref for ever enter the container. A registered product's
+refs are its row's ``test_env_refs`` (C1/D4); an unregistered, env-governed
+run reads the ``TEST_`` prefix — ``X`` ← ``env:TEST_X`` — the same wall spelled
+as a default. Values are resolved at spawn by the SecretResolver, never stored.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from control_plane.models import RepositoryRecord
+from control_plane.secrets import SecretError, SecretResolver
 
 E2E_ENV = "E2E"
 TESTER_MODEL_ENV = "TESTER_MODEL"
@@ -34,10 +38,14 @@ class E2EPolicyError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class E2EPolicy:
-    """The operator's declaration: a toggle and an optional model override."""
+    """The operator's declaration: a toggle, an optional model override, and
+    the sandbox credential refs. ``env_refs`` None is the env-governed default
+    (every manifest name ``X`` reads ``env:TEST_X``); a dict is a registered
+    product's declaration — the only refs its tester can reach."""
 
     enabled: bool = False
     tester_model: str | None = None
+    env_refs: dict[str, str] | None = None
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> E2EPolicy:
@@ -71,10 +79,23 @@ class E2EPolicy:
         both sources behave identically."""
         probe = dict(os.environ) if environ is None else dict(environ)
         probe[E2E_ENV] = "on" if row.e2e_enabled else "off"
-        return cls.from_env(probe)
+        policy = cls.from_env(probe)
+        return cls(
+            enabled=policy.enabled,
+            tester_model=policy.tester_model,
+            env_refs=dict(row.test_env_refs),  # the row's declaration, refs only (D4)
+        )
 
     def describe(self) -> str:
         return "on" if self.enabled else "off"
+
+    def refs_for(self, manifest: TestManifest) -> dict[str, str]:
+        """The ref behind each manifest name — the declaration intersected with
+        the ask. A name the declaration lacks is simply absent: the manifest
+        cannot name its way to anything the operator did not put in reach."""
+        if self.env_refs is None:
+            return {name: f"env:{TEST_ENV_PREFIX}{name}" for name in manifest.env}
+        return {name: self.env_refs[name] for name in manifest.env if name in self.env_refs}
 
 
 class ManifestError(ValueError):
@@ -132,22 +153,26 @@ def parse_manifest(text: str) -> TestManifest:
 
 
 def resolve_test_env(
-    manifest: TestManifest, environ: dict[str, str] | None = None
+    manifest: TestManifest, refs: dict[str, str], resolver: SecretResolver
 ) -> tuple[dict[str, str], list[str]]:
-    """The intersection: manifest name ``X`` ← platform ``TEST_X``.
+    """The intersection, resolved: manifest name ``X`` ← the value behind its
+    declared ref (``E2EPolicy.refs_for``), through the SecretResolver (D4).
 
-    Returns (injectable, missing). The manifest can only name its way to
-    ``TEST_``-prefixed values — nothing else is reachable, by construction.
+    Returns (injectable, missing). ``missing`` names each manifest name the
+    operator must act on and why — undeclared, or a ref that resolves to
+    nothing here. Nothing outside ``refs`` is reachable, by construction.
     """
-    env = dict(os.environ) if environ is None else environ
     resolved: dict[str, str] = {}
     missing: list[str] = []
     for name in manifest.env:
-        value = (env.get(TEST_ENV_PREFIX + name) or "").strip()
-        if value:
-            resolved[name] = value
-        else:
-            missing.append(TEST_ENV_PREFIX + name)
+        ref = refs.get(name)
+        if ref is None:
+            missing.append(f"{name} ← no ref declared")
+            continue
+        try:
+            resolved[name] = resolver.resolve(ref)
+        except SecretError as exc:
+            missing.append(f"{name} ← {ref} ({exc})")
     return resolved, missing
 
 

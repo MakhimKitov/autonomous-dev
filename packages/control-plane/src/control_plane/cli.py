@@ -54,6 +54,7 @@ from control_plane.review import (
 )
 from control_plane.runner import DEFAULT_IMAGE
 from control_plane.scheduler import STOP_FILENAME, Fleet, Rails, Scheduler
+from control_plane.secrets import SecretError, parse_ref
 from control_plane.store import (
     LEDGER_DSN_ENV,
     LEDGER_FILENAME,
@@ -170,8 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-env",
         action="append",
         default=[],
-        metavar="NAME=env:REF",
-        help="sandbox credential ref for the tester (repeatable) — a name, never a value",
+        metavar="NAME=REF",
+        help="sandbox credential ref for the tester (repeatable): env:NAME, file:PATH or helper:NAME — never a value",
     )
     register.add_argument("--concurrency", type=int, default=1)
     register.add_argument("--daily-bursts", type=int, default=None, help="default: $SCHEDULER_DAILY_BURST_CEILING")
@@ -226,7 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-env",
         action="append",
         default=[],
-        metavar="NAME=env:REF",
+        metavar="NAME=REF",
         help="replaces the whole test-env map (repeatable within one call)",
     )
     set_verb.add_argument("--concurrency", type=int, default=None)
@@ -286,7 +287,6 @@ def _backfill(args: argparse.Namespace) -> int:
 
 _REPOSITORY_SHAPE = re.compile(r"^[^/\s]+/[^/\s]+$")  # 'owner/name' — the spelling tasks use
 _TEST_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")  # boring env names only — no smuggling
-_SECRET_REF = re.compile(r"^(env|file):.+")  # a name, never a value (D4 resolves them)
 
 
 def _parse_test_env(pairs: list[str]) -> dict[str, str]:
@@ -295,10 +295,10 @@ def _parse_test_env(pairs: list[str]) -> dict[str, str]:
         name, sep, ref = pair.partition("=")
         if not sep or not _TEST_ENV_NAME.match(name):
             raise RegistryError(f"--test-env wants NAME=ref with an env-shaped NAME, got {pair!r}")
-        if not _SECRET_REF.match(ref):
-            raise RegistryError(
-                f"a secret ref is env:NAME or file:PATH — a reference, never a value (got {ref!r})"
-            )
+        try:
+            parse_ref(ref)  # a name, never a value — the resolver's own grammar (D4)
+        except SecretError as exc:
+            raise RegistryError(str(exc)) from exc
         refs[name] = ref
     return refs
 
