@@ -49,15 +49,27 @@ RETURNING *;
 
 Anyone may reclaim a lapsed lease; renewal is the same statement guarded by
 `claimed_by = $replica`. The `claimed_by`/`claimed_until` pair is the one lease
-pattern; `tasks` carries it now, `repositories` carries it for observation ticks
-(fanned out at E2).
+pattern; `tasks` carries it since E1 (`claim_next` is this statement, with the
+product scope and the failure cooldown in its WHERE; `renew_lease` is the
+heartbeat's renewal), `repositories` carries it for observation ticks (fanned
+out at E2). The reconciler's view of the pattern is the `orphaned` filter on
+`tasks_by_status` / `running_bursts`: rows whose lease lapsed or never existed —
+a live lease is a peer's proof of life, from any host.
 
 **Transition — compare-and-set.** Rowcount decides, never a read-then-write:
 
 ```sql
 UPDATE tasks SET status = 'working', updated_at = now()
-WHERE task_id = $1 AND status = 'claimed';
+WHERE task_id = $1 AND status = 'claimed' AND claimed_by IS NOT DISTINCT FROM $2
+RETURNING *;
 ```
+
+`transition_task` (E1) is this statement for every move the scheduler makes: it
+writes only the columns named, only if the row still reads the (status, holder)
+the replica saw, and hands back the row as written or nothing. `create_task` is
+its insert-shaped twin (`ON CONFLICT DO NOTHING`); `upsert_task`, the whole-row
+write, stays for the paths nobody contends for — the hand-run verb, the
+backfill, test seeding.
 
 **Mutation + outbox — one data-modifying CTE.** A state change and its event
 commit atomically or not at all:
@@ -85,11 +97,21 @@ query, never a maintained counter: subscription usage is a rolling-window
 aggregate over `bursts`, product daily counts likewise (§12's
 ledger-as-metrics rule). The only aggregate *decision* — admission — runs under
 a short advisory lock fencing in-memory math and single-statement writes,
-never held across I/O.
+never held across I/O. As built (E1, `PostgresLedger.claim_next`): one
+session-level `pg_try_advisory_lock` around two statements — the rail's
+aggregate and the claim above — released before the method returns; a peer
+holding it means "idle this tick", never "wait". The aggregate counts
+*admitted* work — bursts started today plus live leases with no burst row yet —
+because the burst row is written after the fence is released, and counting
+rows alone would let two replicas each see "one under the ceiling". SQLite has
+one process and needs no fence; its `claim_next` is the same two statements
+bare.
 
 **One clock.** Time enters comparisons only as the database's `now()` — lease
 expiry, backoff, windows all use the ledger's clock, so replica clock skew
-cannot corrupt a decision. Application code stamps nothing it compares.
+cannot corrupt a decision. Application code stamps nothing it compares. (The
+SQLite backend computes its lease stamps in Python: one process, so its clock
+*is* the ledger's.)
 
 ## Timestamps — timestamptz at the edge
 
@@ -114,10 +136,11 @@ agree — a migrated database diffed against that file must come back empty
 and `schema.sql` as what exists: Stage A closed most of the gap (org tables and
 walls at A4, per-burst snapshots at A5, derived task identity at A6), C1 added
 `tasks.repository`'s foreign key along with the registry verbs that can create a
-`repositories` row, and what remains arrives with the stage that needs it — the
-claim columns at E1/E2, `org_state` at E3, `bursts.subscription_id` with the pool
-at F, `bursts.pinned` with the harness that pins fixtures at G4. `schema.sql`'s
-header carries that list, and it is the shorter document to keep honest.
+`repositories` row, E1 the task claim columns with the statements that use them
+(0015), and what remains arrives with the stage that needs it — `org_state` at
+E3, `bursts.subscription_id` with the pool at F, `bursts.pinned` with the harness
+that pins fixtures at G4. `schema.sql`'s header carries that list, and it is the
+shorter document to keep honest.
 
 Four things here are outside what a schema diff can see, all measured rather than
 assumed: the `roles_pipeline_guard` trigger, every grant, the seeded role rows,
@@ -324,8 +347,10 @@ exists, so a wall placed in its bootstrap DDL would hold in ledgers created afte
 the change and be silently missing from every older file — worse than absent,
 because nothing can tell you which one you're holding. Grants and `SKIP LOCKED`
 don't exist there at all. The single-node variant runs one process, so claims are
-uncontended CAS updates with the same semantics, append-only is code discipline,
-and A6 retires that ledger as an origin. The walls that guard concurrency are
+uncontended lease UPDATEs and transitions uncontended CAS updates with the same
+semantics (E1 — the contract suite holds both backends to one answer per
+statement), append-only is code discipline, and A6 retires that ledger as an
+origin. The walls that guard concurrency are
 real exactly where concurrency is real.
 
 ## Reporting — the metrics are queries, not a pipeline

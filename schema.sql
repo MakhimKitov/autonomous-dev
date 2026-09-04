@@ -37,13 +37,13 @@
 --
 -- Shape note: still converging on STORES.md's target. Landed: org tables and
 -- walls (A4), the session tree (A5), composite task identity (A6), the
--- tasks→repositories foreign key with the registry that can create a row (C1).
--- Outstanding: the task/repository claim columns at E1/E2 (#32, #33), the
--- `org_state` STOP row at E3 (#34), `bursts.pinned` with the golden-replay
--- harness that needs it at G4 (#45), and `bursts.subscription_id` with the pool
--- at F (#38–41). All but `org_state` are additions to a *live* table, which is
--- why they wait for the stage that needs them rather than landing speculatively
--- here.
+-- tasks→repositories foreign key with the registry that can create a row (C1),
+-- the task lease columns with the claim statements that use them (E1).
+-- Outstanding: the `org_state` STOP row at E3 (#34), `bursts.pinned` with the
+-- golden-replay harness that needs it at G4 (#45), and `bursts.subscription_id`
+-- with the pool at F (#38–41). All but `org_state` are additions to a *live*
+-- table, which is why they wait for the stage that needs them rather than
+-- landing speculatively here.
 
 -- repositories — one row per registered product; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
@@ -126,6 +126,8 @@ CREATE TABLE tasks (
     next_burst_kind text,
     last_review_id  bigint,
     last_burst_at   timestamptz,
+    claimed_by      text,                      -- the lease pattern (E1): who holds the next burst, until when
+    claimed_until   timestamptz,
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now()
 );

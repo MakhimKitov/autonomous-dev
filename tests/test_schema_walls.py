@@ -563,6 +563,35 @@ def test_the_role_verb_runs_under_the_runtime_grants(db, walls_dsn):
         ledger.close()
 
 
+def test_the_lease_statements_run_under_the_runtime_grants(db, walls_dsn):
+    """E1's statements as the role replicas connect as: FOR UPDATE SKIP LOCKED
+    needs UPDATE on the table (0002 grants it), the advisory functions need
+    nothing, RETURNING * needs SELECT on every column — including the two 0015
+    added. The real methods, not copies of their SQL."""
+    from control_plane.models import TaskRecord
+    from control_plane.postgres import PostgresLedger
+
+    ledger = PostgresLedger(walls_dsn)
+    try:
+        ledger._conn.execute("SET ROLE platform_app")  # for the rest of the session
+        task = TaskRecord(task_id=task_id_for(REPOSITORY, 1), repository=REPOSITORY, issue_number=1,
+                          status=TaskStatus.CLAIMED)
+        assert ledger.create_task(task) is True
+        leased = ledger.claim_next(REPOSITORY, "replica-a", ceiling=20, since="2020-01-01T00:00:00+00:00",
+                                   lease_s=90, cooldown_s=0)
+        assert leased.claimed_by == "replica-a"
+        assert ledger.renew_lease(leased.task_id, "replica-a", 90) is True
+        moved = ledger.transition_task(
+            leased.task_id, {"status": TaskStatus.WORKING}, expected_status=TaskStatus.CLAIMED,
+            expected_holder="replica-a",
+        )
+        assert moved.status == TaskStatus.WORKING
+        assert ledger.tasks_by_status(TaskStatus.WORKING, repository=REPOSITORY, orphaned=True) == []
+        assert ledger.running_bursts(repository=REPOSITORY, orphaned=True) == []
+    finally:
+        ledger.close()
+
+
 def test_the_runtime_can_do_its_job(db):
     """The other direction, and the one a too-tight grant would break: everything
     the scheduler actually does, done as the role replicas connect as."""

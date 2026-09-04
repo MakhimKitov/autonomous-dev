@@ -93,6 +93,55 @@ def test_run_propagates_exit_code(tmp_path, monkeypatch):
     assert "dying" in log_path.read_text(encoding="utf-8")
 
 
+def test_the_heartbeat_is_asked_on_the_clock_not_on_output(tmp_path, monkeypatch):
+    """A container that prints nothing must not look dead (finding #6: an
+    18-minute silent Bash call). The pump waits with a deadline, so the
+    callback is asked every poll interval whether or not a line arrived."""
+    from control_plane import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "HEARTBEAT_POLL_S", 0.05)
+    runner = DockerRunner()
+    monkeypatch.setattr(runner, "build_command", lambda spec: ["sh", "-c", "sleep 0.4; echo finally"])
+    beats = []
+    log_path = tmp_path / "b1.log"
+    code = runner.run(_spec(), log_path=log_path, heartbeat=lambda: beats.append(1) or True)
+    assert code == 0
+    assert len(beats) >= 3  # asked repeatedly during the silence
+    assert log_path.read_text(encoding="utf-8") == "finally\n"  # and the output still lands
+
+
+def test_a_lost_lease_fences_the_burst_once(tmp_path, monkeypatch):
+    """False from the heartbeat means a peer holds the task: the container is
+    killed — by the runner, once — and the stream is drained so the exit code is
+    the container's own, not a guess."""
+    from control_plane import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "HEARTBEAT_POLL_S", 0.05)
+    flag = tmp_path / "killed"
+    runner = DockerRunner()
+    monkeypatch.setattr(
+        runner, "build_command",
+        lambda spec: ["sh", "-c", f"echo started; while [ ! -f {flag} ]; do sleep 0.02; done; echo drained; exit 137"],
+    )
+    kills = []
+
+    def fake_kill(burst_id):  # stands in for `docker kill burst-<id>`
+        kills.append(burst_id)
+        flag.touch()
+
+    monkeypatch.setattr(runner, "kill", fake_kill)
+    answers = iter([True, False, False, False, False, False, False, False, False, False])
+    code = runner.run(_spec(burst_id="b9"), heartbeat=lambda: next(answers, False))
+    assert kills == ["b9"]  # fenced exactly once, by name
+    assert code == 137  # the container's exit, after the drain
+
+
+def test_no_heartbeat_and_no_log_is_the_plain_path(monkeypatch):
+    runner = DockerRunner()
+    monkeypatch.setattr(runner, "build_command", lambda spec: ["sh", "-c", "exit 4"])
+    assert runner.run(_spec()) == 4
+
+
 def test_codex_auth_mounted_only_for_run_bursts(monkeypatch):
     monkeypatch.delenv(agentenv.ANTHROPIC_API_KEY, raising=False)
     spec_run = _spec(codex_auth_dir=Path("/host/.codex"))

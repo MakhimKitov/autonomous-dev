@@ -11,6 +11,13 @@ stores, two protocols:
   backends behind one protocol: ``SqliteLedger`` here, ``PostgresLedger`` in
   ``postgres.py``; ``open_ledger`` picks by the presence of ``LEDGER_DSN``.
 
+Every ledger write is one of STORES.md's four single-statement shapes — a lease
+claim, a compare-and-set transition, a mutation with its outbox row, an
+aggregate read — and no method leaves a transaction open when it returns
+("transactional, but not interactive", E1). ``in_transaction`` on each backend is
+the seam the test suite asserts that with, after every call and at every I/O
+point of a tick.
+
 Each pair is the same design with and without contention, never a mode flag, and
 the two ``open_*`` functions are the only places a backend is chosen.
 """
@@ -24,6 +31,7 @@ import re
 import sqlite3
 import tarfile
 from dataclasses import asdict, fields
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -37,6 +45,7 @@ from control_plane.models import (
     EVENT_PRODUCT_UPDATED,
     EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
+    TASK_TRANSITION_COLUMNS,
     AuditRecord,
     BurstRecord,
     Event,
@@ -180,6 +189,26 @@ def _check_settable(changes: dict) -> None:
         )
 
 
+def _check_transition(changes: dict) -> None:
+    """A transition names the columns it changes and nothing else — the key and
+    `created_at` are not the scheduler's to move, and an unknown name is a typo
+    that would otherwise bind nothing and report success."""
+    if not changes:
+        raise ValueError("a transition changes at least one column")
+    unknown = sorted(set(changes) - set(TASK_TRANSITION_COLUMNS))
+    if unknown:
+        raise ValueError(
+            f"not a transition column: {', '.join(unknown)} — transitions write only "
+            f"{', '.join(TASK_TRANSITION_COLUMNS)}"
+        )
+
+
+def _after(now_iso: str, seconds: float) -> str:
+    """`now_iso` + `seconds`, in the spelling every stored stamp has. The SQLite
+    backend's lease arithmetic: one process, so its clock is the ledger's."""
+    return (datetime.fromisoformat(now_iso) + timedelta(seconds=seconds)).isoformat()
+
+
 def tar_without_credentials(session_dir: Path, destination: Path) -> str:
     """Tar session_dir to destination, minus credential files. Returns sha256."""
 
@@ -250,15 +279,25 @@ class Ledger(Protocol):
     def get_role(self, role: str) -> RoleRecord | None: ...
     def update_role(self, role: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def upsert_task(self, task: TaskRecord) -> None: ...
+    def create_task(self, task: TaskRecord) -> bool: ...
+    def transition_task(
+        self, task_id: str, changes: dict, *, expected_status: str, expected_holder: str | None
+    ) -> TaskRecord | None: ...
+    def claim_next(
+        self, repository: str, replica: str, *, ceiling: int, since: str, lease_s: float, cooldown_s: float
+    ) -> TaskRecord | None: ...
+    def renew_lease(self, task_id: str, replica: str, lease_s: float) -> bool: ...
     def get_task(self, task_id: str) -> TaskRecord | None: ...
     def tasks_by_status(
-        self, *statuses: str, repository: str | None = None
+        self, *statuses: str, repository: str | None = None, orphaned: bool = False
     ) -> list[TaskRecord]: ...
     def record_burst(self, burst: BurstRecord) -> None: ...
     def finish_burst(self, burst: BurstRecord) -> None: ...
     def get_burst(self, burst_id: str) -> BurstRecord | None: ...
     def latest_archived_burst(self, task_id: str) -> BurstRecord | None: ...
-    def running_bursts(self, repository: str | None = None) -> list[BurstRecord]: ...
+    def running_bursts(
+        self, repository: str | None = None, *, orphaned: bool = False
+    ) -> list[BurstRecord]: ...
     def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int: ...
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
@@ -388,6 +427,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     next_burst_kind TEXT,
     last_review_id INTEGER,
     last_burst_at TEXT,
+    claimed_by TEXT,
+    claimed_until TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -449,6 +490,8 @@ class LedgerShapeError(RuntimeError):
 # half of a numbered migration, never a schema change of its own.
 _ADDITIVE_COLUMNS = (
     ("bursts", "span_id", "TEXT NOT NULL DEFAULT ''"),  # 0009, B1 (#19)
+    ("tasks", "claimed_by", "TEXT"),  # 0015, E1 (#32) — NULL: nobody holds the task
+    ("tasks", "claimed_until", "TEXT"),
 )
 
 
@@ -637,6 +680,16 @@ class SqliteLedger:
         self._conn.commit()
 
     # --- tasks ---
+    #
+    # Two kinds of write (E1). `upsert_task` is the whole-row write for a row
+    # nobody contends for — the seed path, the backfill, tests. Everything the
+    # scheduler does is a compare-and-set: `create_task` inserts only if absent,
+    # `transition_task` writes only the named columns and only if the row still
+    # reads the (status, holder) the caller saw, `claim_next` and `renew_lease`
+    # write the lease. One process cannot race itself, so on this backend the
+    # guards are never what refuses — they are here because the two backends have
+    # to answer identically (A7), settled in the cheap place before Postgres makes
+    # them load-bearing (E2).
 
     def upsert_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()
@@ -651,23 +704,116 @@ class SqliteLedger:
         )
         self._conn.commit()
 
+    def create_task(self, task: TaskRecord) -> bool:
+        """Insert the row if the ledger has never seen the task; False when it
+        has — untouched, whatever state it is in. Two replicas claiming one
+        issue compute the same id, and the second learns it lost here."""
+        data = asdict(task)
+        cols = ", ".join(data)
+        placeholders = ", ".join(f":{k}" for k in data)
+        cursor = self._conn.execute(
+            f"INSERT OR IGNORE INTO tasks ({cols}) VALUES ({placeholders})", data
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def transition_task(
+        self, task_id: str, changes: dict, *, expected_status: str, expected_holder: str | None
+    ) -> TaskRecord | None:
+        """Compare-and-set (STORES.md, "Transition"): write `changes` if the row
+        still reads (`expected_status`, `expected_holder`); the row as written,
+        or None when it had moved — the caller lost the race and writes nothing.
+        `IS` is SQLite's null-safe equality: an unleased row's holder is NULL."""
+        _check_transition(changes)
+        # column names come from TASK_TRANSITION_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = :{column}" for column in changes)
+        row = self._conn.execute(
+            f"UPDATE tasks SET {assignments}, updated_at = :_updated_at "
+            f"WHERE task_id = :_task_id AND status = :_status AND claimed_by IS :_holder "
+            f"RETURNING *",
+            {**changes, "_updated_at": utc_now(), "_task_id": task_id,
+             "_status": expected_status, "_holder": expected_holder},
+        ).fetchone()
+        self._conn.commit()
+        return TaskRecord(**dict(row)) if row else None
+
+    def claim_next(
+        self, repository: str, replica: str, *, ceiling: int, since: str, lease_s: float, cooldown_s: float
+    ) -> TaskRecord | None:
+        """Admission (TO-BE §5): the daily rail, then the claim — the oldest
+        `claimed` task of the product whose lease nobody holds and whose failure
+        cooldown has passed, leased to `replica` for `lease_s` in the statement
+        that picks it (STORES.md, "Claim — a lease is data"). Postgres fences the
+        two under an advisory lock; one process needs no fence.
+
+        What the rail counts is *admitted* work, not recorded bursts: bursts
+        started since `since`, plus spawns in flight — a live lease with no
+        running burst row yet. The second term is what keeps two replicas from
+        each seeing "one under the ceiling" and both spawning; its one imprecision
+        is conservative (a burst that has just finished but whose task has not yet
+        moved counts twice for a few seconds — a spawn deferred a tick, never one
+        over the rail)."""
+        now = utc_now()
+        admitted = self._conn.execute(
+            "SELECT (SELECT COUNT(*) FROM bursts b JOIN tasks t ON t.task_id = b.task_id"
+            "        WHERE t.repository = :repository AND b.started_at >= :since)"
+            "     + (SELECT COUNT(*) FROM tasks t"
+            "        WHERE t.repository = :repository AND t.claimed_until > :now"
+            "          AND NOT EXISTS (SELECT 1 FROM bursts b"
+            "                          WHERE b.task_id = t.task_id AND b.status = 'running')) AS n",
+            {"repository": repository, "since": utc_iso(since), "now": now},
+        ).fetchone()["n"]
+        if admitted >= ceiling:
+            log.warning("daily burst ceiling reached — not spawning", repo=repository, ceiling=ceiling)
+            return None
+        row = self._conn.execute(
+            "UPDATE tasks SET claimed_by = :replica, claimed_until = :until "
+            "WHERE task_id = ("
+            "    SELECT task_id FROM tasks"
+            "    WHERE repository = :repository AND status = 'claimed'"
+            "      AND (claimed_until IS NULL OR claimed_until < :now)"
+            "      AND (attempts = 0 OR last_burst_at IS NULL OR last_burst_at <= :cooled)"
+            "    ORDER BY created_at, task_id LIMIT 1"
+            ") RETURNING *",
+            {"replica": replica, "until": _after(now, lease_s), "repository": repository,
+             "now": now, "cooled": _after(now, -cooldown_s)},
+        ).fetchone()
+        self._conn.commit()
+        return TaskRecord(**dict(row)) if row else None
+
+    def renew_lease(self, task_id: str, replica: str, lease_s: float) -> bool:
+        """The heartbeat: push the lease out by `lease_s`, only while `replica`
+        still holds it. False means a peer has taken the task — the caller's
+        work is no longer wanted and it fences itself off."""
+        cursor = self._conn.execute(
+            "UPDATE tasks SET claimed_until = :until WHERE task_id = :task_id AND claimed_by = :replica",
+            {"until": _after(utc_now(), lease_s), "task_id": task_id, "replica": replica},
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def get_task(self, task_id: str) -> TaskRecord | None:
         row = self._conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         return TaskRecord(**dict(row)) if row else None
 
     def tasks_by_status(
-        self, *statuses: str, repository: str | None = None
+        self, *statuses: str, repository: str | None = None, orphaned: bool = False
     ) -> list[TaskRecord]:
         # `task_id` breaks the tie: the scheduler takes the first row as "oldest
         # first", and two tasks created in the same microsecond would otherwise be
         # ordered by whatever the storage happened to return (gate A7). The
         # repository scope is C4: a product's scheduler sees only its own tasks.
+        # `orphaned` (E1) keeps only rows no live lease covers — what a dead
+        # replica leaves behind, and what the reconciler may touch.
         marks = ", ".join("?" for _ in statuses)
         query = f"SELECT * FROM tasks WHERE status IN ({marks})"
         params: list = list(statuses)
         if repository is not None:
             query += " AND repository = ?"
             params.append(repository)
+        if orphaned:
+            query += " AND (claimed_until IS NULL OR claimed_until < ?)"
+            params.append(utc_now())
         rows = self._conn.execute(query + " ORDER BY created_at, task_id", params).fetchall()
         return [TaskRecord(**dict(row)) for row in rows]
 
@@ -719,19 +865,22 @@ class SqliteLedger:
         ).fetchone()
         return BurstRecord(**dict(row)) if row else None
 
-    def running_bursts(self, repository: str | None = None) -> list[BurstRecord]:
-        # a burst carries no repository column — the task it belongs to does (C4)
-        if repository is None:
-            rows = self._conn.execute(
-                "SELECT * FROM bursts WHERE status = 'running' ORDER BY started_at, burst_id"
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT b.* FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
-                "WHERE b.status = 'running' AND t.repository = ? "
-                "ORDER BY b.started_at, b.burst_id",
-                (repository,),
-            ).fetchall()
+    def running_bursts(
+        self, repository: str | None = None, *, orphaned: bool = False
+    ) -> list[BurstRecord]:
+        # a burst carries no repository column and no lease — the task it belongs
+        # to does (C4, E1), so both scopes join it. `orphaned`: running bursts of
+        # tasks no live lease covers — a live lease is a peer's proof of life,
+        # from any host, and the reconciler leaves those alone.
+        query = "SELECT b.* FROM bursts b LEFT JOIN tasks t ON t.task_id = b.task_id WHERE b.status = 'running'"
+        params: list = []
+        if repository is not None:
+            query += " AND t.repository = ?"
+            params.append(repository)
+        if orphaned:
+            query += " AND (t.claimed_until IS NULL OR t.claimed_until < ?)"
+            params.append(utc_now())
+        rows = self._conn.execute(query + " ORDER BY b.started_at, b.burst_id", params).fetchall()
         return [BurstRecord(**dict(row)) for row in rows]
 
     def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int:
@@ -830,6 +979,13 @@ class SqliteLedger:
             )
             for row in rows
         ]
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether a statement left a transaction open — the E1 assertion seam.
+        Always False between calls, by construction: every method commits or
+        rolls back before it returns."""
+        return self._conn.in_transaction
 
     def close(self) -> None:
         self._conn.close()

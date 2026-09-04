@@ -48,10 +48,16 @@ issue `human`+`ready` ──claim──► claimed ──spawn──► working 
       └────────── human re-adds `ready` (attempts reset) ──────► claimed              done
 ```
 
+Every row of this table is written as a **compare-and-set** (E1): the ledger
+moves only if the task still reads the (status, holder) the replica saw, and the
+side effects run only if it moved — a replica that loses the race writes nothing
+and posts nothing. `claimed → working` additionally names the replica's own
+**lease**, taken by the claim statement that picked the task (below).
+
 | From | Event (observed) | Side effects | To |
 |---|---|---|---|
-| — | issue `human`+`ready`, unclaimed | task row; labels `ready`→`in-progress` | `claimed` (work) |
-| `claimed` | slot free, cooldown passed, ceilings ok | spawn burst (resume when a session exists) | `working` |
+| — | issue `human`+`ready`, unclaimed | task row (insert-if-absent); labels `ready`→`in-progress` | `claimed` (work) |
+| `claimed` | leased by the claim statement: cooldown passed, ceiling ok | spawn burst (resume when a session exists); heartbeat renews the lease | `working` |
 | `working` | burst ok ∧ linked PR open | record `pr_number`; review round → re-request Copilot + owner | `awaiting_review` |
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
@@ -104,16 +110,45 @@ Notes:
 ```
 tick():
     if stop_requested(): shutdown_clean()     # STOP flag or SIGTERM
-    reconcile_running()                       # ledger "running" vs docker ps → killed + rollback
+    reconcile_running()                       # orphaned "running"/"working" (no live lease) → killed + rollback
     observe_github()                          # ready issues → claims; reviews/merges → events
-    advance()                                 # apply the transition table
-    if slot_free():                           # serial: one burst globally (trust first)
-        task = pick_next()                    # oldest eligible `claimed`
-        if task: execute_burst(task)          # the proven M0/M1 choreography, extracted from cli
+    advance()                                 # apply the transition table (every write a CAS)
+    task = pick_next()                        # admission: ceiling + claim, one ledger call — the task comes back leased
+    if task: execute_burst(task)              # the proven M0/M1 choreography; the runner heartbeats the lease
 ```
 
 `control-plane run` loops the tick (`--interval`, default 60 s); `--once` runs a single
 tick — the unit CI and humans debug with.
+
+## Leases and compare-and-set (E1)
+
+The scheduler holds no lock the ledger can see; it holds **leases**, which are
+rows (`STORES.md`, "The discipline"). Three mechanics, all single statements:
+
+- **Claim.** `pick_next` is one ledger call, `claim_next`: the oldest `claimed`
+  task of the product whose lease nobody holds and whose failure cooldown has
+  passed, stamped `claimed_by = this replica, claimed_until = now + lease` by the
+  `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING` that picks it. The daily
+  ceiling is checked in the same call, behind Postgres's one advisory lock (the
+  admission fence, TO-BE §5) — the count is *admitted* work, bursts today plus
+  live leases with no burst row yet, so two replicas cannot both see "one under".
+  A peer holding the fence means "idle this tick", never "wait".
+- **Move.** Every transition is `Scheduler._move`: write the named columns only if
+  the row still reads the (status, holder) this replica read; rowcount decides.
+  The transitions that end a burst release the lease in the same statement. A
+  lost race is logged and otherwise ignored — the ledger moved first, and the
+  comment or label belongs to whoever moved it.
+- **Keep.** While the container runs the runner asks the burst's heartbeat every
+  `HEARTBEAT_POLL_S` (5 s) on the clock — output or none, so a silent hung call
+  (finding #6) does not look dead — and every third of the lease it renews
+  `claimed_until`, guarded by `claimed_by`. A renewal that finds another holder
+  means a peer absorbed the task; the runner kills the container. A ledger error
+  is not a lost lease: the burst keeps going and the next beat retries.
+
+The replica's name is `host:pid` (`default_replica`), so a lapsed lease says
+where to look. `SCHEDULER_LEASE_S` (default 90) is the longest a dead replica's
+work stays owned. Nothing here is a mode: one replica on a laptop runs the same
+statements as N on a cluster, and with one the fence is never contended.
 
 ## The fleet (C4)
 
@@ -156,6 +191,7 @@ Defaults, `.env`-overridable:
 | daily burst ceiling | 20 — per product: a registered row's `daily_bursts` (C4) |
 | failure cooldown / task | 5 min |
 | poll interval | 60 s |
+| lease / claimed task | 90 s (`SCHEDULER_LEASE_S`) — renewed every third while the burst runs; lapsed = a peer may reconcile |
 | per-burst | the **role row's** `max_budget_usd` / `max_turns` (D5; seeded 2.0 / 100, `role set <role> --budget --turns`). The budget is a **hard cap** on estimated cost — the SDK kills the burst mid-run; falsified "advisory" on task 17 |
 
 ## Kill switch & crash recovery
@@ -165,9 +201,14 @@ Defaults, `.env`-overridable:
   the burst is marked `killed`, the task rolls back to its pre-burst state, the loop exits
   before the next spawn. SIGTERM does the same in-process. Removing `STOP` and re-running
   resumes cleanly — every decision re-derives from GitHub + ledger.
-- **Startup reconciliation** — any ledger burst still `running` with no matching container
-  (scheduler died mid-burst) → `killed`, task rolled back, attempts+1 (a crash loop must
-  eventually trip the rail, not spin forever).
+- **Reconciliation, every tick** — a `running` burst or a `working` task that **no live
+  lease covers** (E1: `claimed_until` lapsed or never set) is a replica that died
+  mid-burst → burst `killed`, task rolled back, attempts+1 (a crash loop must eventually
+  trip the rail, not spin forever). A live lease — whoever holds it — is proof of life
+  from any host and is never touched, so a peer's burst elsewhere is not judged by this
+  host's `docker ps`; a container visible *here* is proof of life too, whatever the
+  lease says (the heartbeat failed, the work did not). A restarted single replica
+  therefore absorbs its own crash within one lease rather than instantly.
 
 ## GitHub surface
 
@@ -183,6 +224,10 @@ to just-under its 1 h expiry; each burst still gets its own fresh token.
 Additive columns on `tasks` (phase-0 migration style): `status` (values above),
 `pr_number`, `attempts`, `review_rounds`, `next_burst_kind`, `last_review_id`,
 `last_burst_at`, plus a `bursts_today` derivation for the ceiling (count query, no column).
+E1 added the lease pair `claimed_by` / `claimed_until` (migration 0015) and the statements
+that read it: `create_task`, `transition_task`, `claim_next`, `renew_lease`, and the
+`orphaned` filter on `tasks_by_status` / `running_bursts`. `upsert_task` — the whole-row
+write — is no longer something the scheduler calls.
 
 ## The clone
 
@@ -202,7 +247,7 @@ written into config that gets mounted into the box.
 
 ```
 control_plane/
-  scheduler.py    # tick, state machine, rails
+  scheduler.py    # tick, state machine, rails; leases + CAS (E1)
   github_api.py   # the REST surface above
   prompts.py      # work/review prompt construction (provenance framing)
   bursts.py       # execute_burst() — extracted from cli._run_burst, shared by CLI + scheduler

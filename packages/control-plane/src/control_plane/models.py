@@ -162,8 +162,32 @@ class TaskRecord:
     next_burst_kind: str | None = None  # work | review, while claimed/working
     last_review_id: int | None = None  # advanced only after a review burst succeeds
     last_burst_at: str | None = None
+    # The lease (STORES.md, "Claim — a lease is data", E1): which replica holds
+    # the task's next burst and until when. Stamped by `claim_next`, renewed by
+    # the heartbeat while the container runs, cleared by the transition that
+    # ends the burst. A lapsed lease is what a dead replica leaves behind —
+    # visible data any peer may reclaim, never a held lock.
+    claimed_by: str | None = None
+    claimed_until: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+
+
+# What a state transition may write (E1). `task_id` is the key, `created_at` is
+# history, and both backends check a transition's columns against this one tuple
+# so a typo in the scheduler fails loudly instead of binding nothing.
+TASK_TRANSITION_COLUMNS = (
+    "status",
+    "session_id",
+    "pr_number",
+    "attempts",
+    "review_rounds",
+    "next_burst_kind",
+    "last_review_id",
+    "last_burst_at",
+    "claimed_by",
+    "claimed_until",
+)
 
 
 @dataclass(slots=True)

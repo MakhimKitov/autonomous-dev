@@ -107,6 +107,7 @@ def rig(tmp_path, monkeypatch):
                 "kind": kwargs.get("kind"),
                 "role": kwargs.get("role"),
                 "extra_env": kwargs.get("extra_env"),
+                "heartbeat": kwargs.get("heartbeat"),
             }
         )
         return fake_execute.next_outcome
@@ -464,8 +465,11 @@ def test_sync_clone_feeds_the_burst_and_failures_hit_the_rail(rig, tmp_path):
 
 
 def test_rails_from_env_overrides():
-    rails = Rails.from_env({"SCHEDULER_MAX_ATTEMPTS": "5", "SCHEDULER_BURST_BUDGET_USD": "0.5"})
+    rails = Rails.from_env(
+        {"SCHEDULER_MAX_ATTEMPTS": "5", "SCHEDULER_BURST_BUDGET_USD": "0.5", "SCHEDULER_LEASE_S": "30"}
+    )
     assert rails.max_attempts == 5
+    assert rails.lease_s == 30
     assert rails.max_review_rounds == 3  # untouched default
     # per-burst budget and turns are the role row's since D5 — not a rail, and
     # the retired env name is ignored here (startup refuses it, test_registry_cli)
@@ -1005,6 +1009,148 @@ def test_auto_issue_claims_with_tainted_framing(rig):
     assert task is not None and task.status in (TaskStatus.CLAIMED, TaskStatus.WORKING, TaskStatus.AWAITING_REVIEW)
     assert "tainted data" in spawned[0]["prompt"]  # auto provenance framing
     assert "reproduce" in spawned[0]["prompt"]
+
+
+# --- E1: leases, compare-and-set, and what a peer's presence changes ---
+
+PEER = "elsewhere:1"
+FAR_AHEAD = "2099-01-01T00:00:00+00:00"
+LONG_AGO = "2020-01-01T00:00:00+00:00"
+
+
+def test_pick_next_leases_the_task_and_the_tick_releases_it(rig):
+    scheduler, api, stores, spawned, _ = rig
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, next_burst_kind="work"))
+    picked = scheduler.pick_next()
+    assert picked.claimed_by == scheduler.replica and picked.claimed_until is not None
+    assert stores.ledger.get_task(tid(1)).claimed_by == scheduler.replica  # the claim is the write
+
+    api.issues[1] = _issue()
+    api.open_prs = [_pr()]
+    scheduler.run_task_burst(picked)
+    done = stores.ledger.get_task(tid(1))
+    assert done.status == TaskStatus.AWAITING_REVIEW
+    assert (done.claimed_by, done.claimed_until) == (None, None)  # released by the same statement
+    assert callable(spawned[0]["heartbeat"])  # and the burst carried its renewal
+
+
+def test_every_burst_kind_carries_the_heartbeat(rig):
+    scheduler, api, stores, spawned, _ = rig
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, pr_number=2, next_burst_kind="assess"))
+    api.prs[2] = _pr()
+    scheduler.tick()
+    assert spawned[-1]["kind"] == "assess" and callable(spawned[-1]["heartbeat"])
+
+
+def test_the_heartbeat_renews_the_lease_and_reports_a_lost_one(rig):
+    scheduler, _, stores, _, _ = rig
+    scheduler.rails.lease_s = 0  # renew on every beat
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    task = scheduler.pick_next()
+    before = task.claimed_until
+    beat = scheduler._heartbeat(task)
+    assert beat() is True
+    assert stores.ledger.get_task(tid(1)).claimed_until >= before
+
+    # a peer reclaimed the task (our lease lapsed, from its point of view)
+    stolen = stores.ledger.get_task(tid(1))
+    stolen.claimed_by = PEER
+    stores.ledger.upsert_task(stolen)
+    assert beat() is False  # the runner fences the burst on this answer
+
+    # a store error is not a lost lease: keep the burst, retry next beat
+    def boom(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    stores.ledger.renew_lease = boom
+    assert beat() is True
+
+
+def test_a_task_a_peer_reclaimed_is_not_spawned(rig):
+    """Between our claim and our spawn a peer may have taken the task (our
+    lease lapsed during a slow clone sync). The claimed → working CAS names our
+    lease, so we spawn nothing and write nothing."""
+    scheduler, api, stores, spawned, _ = rig
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, next_burst_kind="work"))
+    picked = scheduler.pick_next()
+    peer_view = stores.ledger.get_task(tid(1))
+    peer_view.claimed_by, peer_view.claimed_until = PEER, FAR_AHEAD
+    stores.ledger.upsert_task(peer_view)
+
+    api.issues[1] = _issue()
+    scheduler.run_task_burst(picked)
+    assert spawned == []
+    after = stores.ledger.get_task(tid(1))
+    assert (after.status, after.claimed_by) == (TaskStatus.CLAIMED, PEER)  # the peer's row, untouched
+
+
+def test_a_lost_observation_race_writes_nothing_and_speaks_for_nobody(rig):
+    """Two replicas observe the same merged PR; the second's CAS finds the task
+    already `done` and does not repeat the label edit or the log line — the
+    ledger moved first, the side effects belong to whoever moved it."""
+    scheduler, api, stores, _, _ = rig
+    _awaiting(stores)
+    merged = _pr(state="closed", merged=True)
+
+    def peer_wins(number):
+        stores.ledger.transition_task(
+            tid(1), {"status": TaskStatus.DONE, "next_burst_kind": None},
+            expected_status=TaskStatus.AWAITING_REVIEW, expected_holder=None,
+        )
+        return merged
+
+    api.get_pr = peer_wins
+    scheduler.observe()
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.DONE
+    assert api.label_ops == [] and api.comments == []
+
+
+def test_reconcile_leaves_a_peers_live_lease_alone_and_absorbs_a_lapsed_one(rig):
+    """A working task under a live lease is a peer's burst on another host —
+    docker here cannot see it, and must not judge it. Once the lease lapses the
+    peer is presumed dead and the survivor absorbs the task."""
+    scheduler, _, stores, _, _ = rig
+    stores.ledger.upsert_task(
+        _task(1, status=TaskStatus.WORKING, next_burst_kind="work", claimed_by=PEER, claimed_until=FAR_AHEAD)
+    )
+    stores.ledger.record_burst(BurstRecord(burst_id="theirs", task_id=tid(1)))
+    scheduler.reconcile_running()
+    assert stores.ledger.get_burst("theirs").status == BurstStatus.RUNNING
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.WORKING
+
+    lapsed = stores.ledger.get_task(tid(1))
+    lapsed.claimed_until = LONG_AGO
+    stores.ledger.upsert_task(lapsed)
+    scheduler.reconcile_running()
+    assert stores.ledger.get_burst("theirs").status == BurstStatus.KILLED
+    absorbed = stores.ledger.get_task(tid(1))
+    assert (absorbed.status, absorbed.attempts) == (TaskStatus.CLAIMED, 1)
+    assert absorbed.claimed_by is None  # anyone's to claim now, this replica included
+
+
+def test_reconcile_spares_a_lapsed_lease_whose_container_is_alive_here(rig, monkeypatch):
+    """The lease lapsed but the container is running on this host: the work is
+    alive, the heartbeat is what failed. Neither the burst nor the task moves."""
+    scheduler, _, stores, _, _ = rig
+    monkeypatch.setattr(Scheduler, "_container_alive", lambda self, burst_id: burst_id == "mine")
+    stores.ledger.upsert_task(
+        _task(1, status=TaskStatus.WORKING, claimed_by=scheduler.replica, claimed_until=LONG_AGO)
+    )
+    stores.ledger.record_burst(BurstRecord(burst_id="mine", task_id=tid(1)))
+    scheduler.reconcile_running()
+    assert stores.ledger.get_burst("mine").status == BurstStatus.RUNNING
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.WORKING
+
+
+def test_two_replicas_claim_disjoint_tasks(rig):
+    scheduler, _, stores, _, _ = rig
+    other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
+    stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
+    mine, theirs = scheduler.pick_next(), other.pick_next()
+    assert (mine.task_id, theirs.task_id) == (tid(1), tid(2))
+    assert (mine.claimed_by, theirs.claimed_by) == (scheduler.replica, PEER)
+    assert scheduler.pick_next() is None and other.pick_next() is None
 
 
 # --- C4: a product's scheduler sees only its own rows ---

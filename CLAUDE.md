@@ -253,6 +253,27 @@ replaces each (one source, or "editing the row changes the next burst" is false)
 The hand-run `burst` verb's `--model/--budget/--max-turns` remain as explicit
 per-burst overrides; `run --model` is gone.
 
+**Leases + CAS (E1)**: the scheduler's ledger writes are the four single-statement
+shapes of `STORES.md` and nothing else — no transaction outlives a store call, and
+`tests/test_transactions.py` asserts it at every I/O seam of a tick on both
+backends (`in_transaction` is the hook). A task is *claimed* by `claim_next`: one
+`UPDATE … WHERE task_id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`
+that stamps `claimed_by`/`claimed_until` (0015) on the oldest eligible row — the
+failure cooldown is its WHERE clause, the daily ceiling its fence (Postgres: one
+try-only advisory lock around the aggregate and the claim; a peer holding it
+means idle this tick). The ceiling counts *admitted* work — bursts today plus
+live leases with no burst row yet — so two replicas cannot both see "one under".
+Every other move is `Scheduler._move` → `transition_task`: write only the named
+columns, only if the row still reads the (status, holder) this replica saw;
+rowcount decides, a loser writes nothing and posts nothing. The lease is renewed
+by a heartbeat the runner asks on the clock (`HEARTBEAT_POLL_S`, output or none)
+while the container runs, and a lost lease kills the container. Reconcile touches
+only *orphaned* rows — no live lease — so a peer's burst on another host is never
+judged by this host's `docker ps`; a lapsed lease is presumed dead and absorbed.
+`upsert_task` remains for the verb/backfill/seed paths; `execute_burst` creates
+the row if absent and lands the session id by CAS. `SCHEDULER_LEASE_S` (90) is
+the one new rail. The multi-replica race itself is E2's test.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).

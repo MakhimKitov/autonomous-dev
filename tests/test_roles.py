@@ -21,7 +21,7 @@ class RecordingRunner:
     def __init__(self):
         self.specs = []
 
-    def run(self, spec, log_path=None):
+    def run(self, spec, log_path=None, heartbeat=None):
         self.specs.append(spec)
         return 0
 
