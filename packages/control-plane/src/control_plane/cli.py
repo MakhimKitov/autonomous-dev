@@ -34,6 +34,8 @@ from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError, prepare_clone
 from control_plane.github_api import COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, slug_from_origin
 from control_plane.github_auth import (
+    REVIEWER_APP_PREFIX,
+    ROLE_PREFIXES,
     AppCredentials,
     GitHubAuthError,
     InstallationTokenCache,
@@ -46,7 +48,6 @@ from control_plane.preflight import PreflightError, run_preflight
 from control_plane.review import (
     PROVIDERS_ENV,
     REVIEW_ENV,
-    REVIEWER_APP_PREFIX,
     ReviewPolicy,
     ReviewPolicyError,
 )
@@ -141,7 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "github-check",
-        help="preflight the GitHub App: mint a token, show installation + permissions",
+        help="preflight every configured role App (dev/reviewer/tester/monitor): "
+        "mint a token, show installation + permissions",
     )
 
     product = sub.add_parser(
@@ -566,23 +568,44 @@ def _product(args: argparse.Namespace, api_factory=_preflight_api) -> int:
 
 
 def _github_check() -> int:
-    try:
-        creds = AppCredentials.from_env()
+    """Preflight every configured pipeline role (D1, TO-BE §4): mint a real
+    installation token per role-prefixed App and show what it can do. A role
+    that is declared but can't mint fails the check; an unconfigured role is
+    reported and skipped — which Apps exist is the adopter's rollout state."""
+    minted = 0
+    failures = []
+    for role, prefix in ROLE_PREFIXES.items():
+        try:
+            creds = AppCredentials.from_env(prefix=prefix)
+        except GitHubAuthError as exc:
+            print(f"{role}: error: {exc}", file=sys.stderr)
+            failures.append(role)
+            continue
         if creds is None:
-            print("GitHub App not configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY_PATH unset)")
-            return 2
-        token = mint_installation_token(creds)
-    except GitHubAuthError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+            print(f"{role}: not configured ({prefix}GITHUB_APP_ID / {prefix}GITHUB_APP_PRIVATE_KEY_PATH)")
+            continue
+        try:
+            token = mint_installation_token(creds)
+        except GitHubAuthError as exc:
+            print(f"{role}: error: {exc}", file=sys.stderr)
+            failures.append(role)
+            continue
+        minted += 1
+        name, email = bot_git_identity(token, creds.app_id)
+        print(f"{role}:")
+        print(f"  app:          {token.app_slug}")
+        print(f"  bot identity: {name} <{email}>")
+        print(f"  token:        {token.token[:11]}… expires {token.expires_at}")
+        print(f"  permissions:  {token.permissions}")
+        forbidden = {"administration", "merge_queues"} & set(token.permissions)
+        if forbidden:
+            print(f"  ⚠ unexpected permissions present: {forbidden}")
+    if failures:
+        print(f"error: roles failed the check: {', '.join(failures)}", file=sys.stderr)
         return 1
-    name, email = bot_git_identity(token, creds.app_id)
-    print(f"app:          {token.app_slug}")
-    print(f"bot identity: {name} <{email}>")
-    print(f"token:        {token.token[:11]}… expires {token.expires_at}")
-    print(f"permissions:  {token.permissions}")
-    forbidden = {"administration", "merge_queues"} & set(token.permissions)
-    if forbidden:
-        print(f"⚠ unexpected permissions present: {forbidden}")
+    if not minted:
+        print("no App configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY_PATH unset)")
+        return 2
     return 0
 
 

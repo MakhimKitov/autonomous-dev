@@ -183,6 +183,15 @@ state, no audit row). A product's scheduler reads only its own tasks and bursts
 product for the tick, never the fleet. `--github owner/name` still pins one repo
 — dev mode when unregistered. SCHEDULER.md "The fleet" has the full contract.
 
+**Role-prefixed App credentials (D1)**: one App per pipeline role, addressed by
+env prefix over the same three names — the dev App reads `GITHUB_APP_ID` /
+`GITHUB_APP_PRIVATE_KEY_PATH` bare, the others behind `REVIEWER_`, `TESTER_`,
+`MONITOR_` (`ROLE_PREFIXES` in `github_auth.py`; `MONITOR_` is reserved until
+T4). App names are the adopter's choice — the prefix scheme is the contract.
+`control-plane github-check` preflights every configured role: a declared App
+that can't mint fails the check (exit 1), an unconfigured role is reported and
+skipped. The tester still posts under the reviewer App until D3.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).

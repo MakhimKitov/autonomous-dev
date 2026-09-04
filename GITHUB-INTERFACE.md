@@ -206,11 +206,18 @@ App approvals satisfy a bare count, which would quietly dissolve the human gate.
 |---|---|---|---|
 | Dev agent | App "dev" | `contents:write`, `pull_requests:write`, `issues:write` (comment + `blocked`) | merge, admin, secrets, settings |
 | Control plane | the dev App (shared) + the reviewer App for posting | labels, comments, reviews, test reports, relayed `auto` issues | merge, push to default |
-| Reviewer App | App `<product>-ai-reviewer` (separate — GitHub forbids a PR's author reviewing it) | `pull_requests:write` (reviews) + `issues:write` (symptom relay) | write code, merge, satisfy the CODEOWNERS gate |
+| Reviewer App | the `REVIEWER_`-prefixed App (separate — GitHub forbids a PR's author reviewing it) | `pull_requests:write` (reviews) + `issues:write` (symptom relay) | write code, merge, satisfy the CODEOWNERS gate |
 | Reviewer burst / Tester | **none** — findings/reports return via harvest; the control plane posts them | — | any GitHub call at all |
 | Monitor (phase 1+, not built) | App "monitor" (separate) | `issues:write` | anything else |
 | Human owner | maintainer account | full, incl. merge | — |
 | Copilot (optional) | GitHub Copilot review, requested on the owner's PAT | read (PR diff) | write |
+
+App credentials reach the platform through the role-prefix env scheme (D1): the
+dev App reads `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH`, the other roles the
+same names behind `REVIEWER_`, `TESTER_`, `MONITOR_`. App names are the adopter's
+choice — the prefixes are the contract, and `control-plane github-check` preflights
+every configured role. The tester posts under the reviewer App until D3; `MONITOR_`
+is reserved until the monitor exists (T4).
 
 No production credentials (product tokens, DB) exist in any platform identity — the
 deploy path is human-merge → CI only. **Sandbox** creds (a disposable instance of the

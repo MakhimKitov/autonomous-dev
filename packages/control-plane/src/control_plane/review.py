@@ -18,7 +18,6 @@ from control_plane.models import RepositoryRecord
 REVIEW_ENV = "REVIEW"
 PROVIDERS_ENV = "REVIEW_PROVIDERS"
 REVIEWER_MODEL_ENV = "REVIEWER_MODEL"
-REVIEWER_APP_PREFIX = "REVIEWER_"  # REVIEWER_GITHUB_APP_ID / _PRIVATE_KEY_PATH
 
 RECOGNIZED = ("claude", "codex", "copilot")
 IMPLEMENTED = ("claude", "copilot")  # codex arrives with REVIEWERS.md slice 3
