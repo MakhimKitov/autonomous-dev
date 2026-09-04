@@ -270,7 +270,8 @@ rowcount decides, a loser writes nothing and posts nothing. The lease is renewed
 by a heartbeat the runner asks on the clock (`HEARTBEAT_POLL_S`, output or none)
 while the container runs, and a lost lease kills the container. Reconcile touches
 only *orphaned* rows — no live lease — so a peer's burst on another host is never
-judged by this host's `docker ps`; a lapsed lease is presumed dead and absorbed.
+judged by this host's runner (`Runner.alive`, E4); a lapsed lease is presumed dead
+and absorbed.
 `upsert_task` remains for the verb/backfill/seed paths; `execute_burst` creates
 the row if absent and lands the session id by CAS. `SCHEDULER_LEASE_S` (90) is
 the one new rail.
@@ -311,6 +312,25 @@ process-local, nothing written: a restarted replica is not a stopped org. The
 second test in `tests/test_replicas.py` runs the done-when: a `stop` from the
 operator's CLI process kills a burst one replica holds, and `resume` finishes the
 work with nothing restarted.
+
+**The runner is a protocol (E4)**: `Runner` in `runner.py` — `run(spec,
+log_path, heartbeat) -> int` and `alive(burst_id) -> bool` — is the third seam
+beside `Ledger` and `SessionArchive` (TO-BE §6); `DockerRunner` sits behind it
+with its behavior untouched, `JobsRunner` arrives at G3 (#44). The scheduler
+holds one runner per process (`open_runner()`, chosen in `cli.py` like the two
+stores) and asks it to `run` every burst and, in `reconcile_running`, whether an
+orphaned burst is still `alive` — the old `docker ps` in the scheduler is gone;
+nothing outside `runner.py` spells `docker`. `burst_env(spec)` is the box's
+contract, factored out of the docker command line: the environment every
+runner hands the container verbatim (the one credential, the agent's OTel, the
+tester's sandbox refs), so a second runner packages the rules rather than
+re-deriving them. `tests/test_runner_contract.py` is the parameterized contract
+(the E4 done-when, reused by G3): each runner brings a rig — the docker rig is
+in-process, a `DockerRunner` with a shell in the daemon's seat — and the suite
+holds every runner to the exit code, the tee, the heartbeat on the clock, the
+fence, `alive` and `burst_env` unchanged. The suite's fakes in docker's seat
+(`SleepingRunner`, `ProbingRunner`, …) are handed in through the seam
+(`Scheduler(runner=…)`, `execute_burst(runner=…)`), never monkeypatched in.
 
 ### Task identity
 

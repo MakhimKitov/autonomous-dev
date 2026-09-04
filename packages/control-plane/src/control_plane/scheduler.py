@@ -22,6 +22,9 @@ top of every tick, before every spawn and on every heartbeat, so a `stop` from
 any host stands the whole fleet down within a tick and fences every live burst
 within a heartbeat — the runner kills it, wherever it runs. A process's own
 shutdown (SIGTERM) is the same fence with a local flag, and no ledger write.
+Where a burst runs is a seam (E4): the scheduler holds one `Runner` for the
+process — `run` for every spawn, `alive` for the reconciler's proof-of-life
+question — and never spells ``docker`` itself.
 
 A ``Scheduler`` is one product's engine — its ledger reads are scoped to its
 repository, so two products in one ledger cannot see each other's tasks. The
@@ -34,7 +37,6 @@ from __future__ import annotations
 
 import os
 import socket
-import subprocess
 import threading
 import time
 import uuid
@@ -66,7 +68,7 @@ from control_plane.review import (
     format_review_body,
     parse_findings,
 )
-from control_plane.runner import DEFAULT_IMAGE
+from control_plane.runner import DEFAULT_IMAGE, Runner, open_runner
 from control_plane.secrets import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
@@ -178,6 +180,7 @@ class Scheduler:
         sync_clone_ref: Callable[[str], Path] | None = None,
         replica: str | None = None,
         halt: threading.Event | None = None,
+        runner: Runner | None = None,
     ) -> None:
         self.stores = stores
         self.api = api
@@ -208,6 +211,9 @@ class Scheduler:
         # the tick reads it, the heartbeat fences on it. A fleet shares one across
         # every scheduler it builds
         self.halt = halt if halt is not None else threading.Event()
+        # where this replica's bursts run (E4): the one runner the process has,
+        # asked to `run` every burst and, by the reconciler, whether one is `alive`
+        self.runner = runner if runner is not None else open_runner()
         self.current_burst_id: str | None = None  # the one live burst, if any
 
     # --- the tick ---
@@ -339,13 +345,14 @@ class Scheduler:
     def reconcile_running(self) -> None:
         """A running burst or a working task that no live lease covers is a
         replica that died mid-burst (E1). A live lease is a peer's proof of life
-        from any host and is never touched; a container visible on *this* host
-        is proof of life too — the lease lapsed, the work did not (a heartbeat
-        that could not reach the ledger) — and its task is left alone."""
+        from any host and is never touched; a burst this replica's runner can
+        still see running is proof of life too — the lease lapsed, the work did
+        not (a heartbeat that could not reach the ledger) — and its task is left
+        alone."""
         repo = self.api.repo
         alive: set[str] = set()
         for burst in self.stores.ledger.running_bursts(repository=repo, orphaned=True):
-            if self._container_alive(burst.burst_id):
+            if self.runner.alive(burst.burst_id):
                 alive.add(burst.task_id)
                 continue
             burst.status = BurstStatus.KILLED
@@ -359,14 +366,6 @@ class Scheduler:
             if task.task_id in alive:
                 continue
             self._register_failure(task, "the scheduler crashed or was killed mid-burst")
-
-    def _container_alive(self, burst_id: str) -> bool:
-        out = subprocess.run(
-            ["docker", "ps", "-q", "--filter", f"name=burst-{burst_id}"],
-            capture_output=True,
-            text=True,
-        )
-        return bool(out.stdout.strip())
 
     # --- observation: GitHub facts → state transitions ---
 
@@ -586,6 +585,7 @@ class Scheduler:
                 image=self.image,
                 burst_id=self.current_burst_id,
                 heartbeat=self._heartbeat(task),
+                runner=self.runner,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -671,6 +671,7 @@ class Scheduler:
                 image=self.image,
                 burst_id=self.current_burst_id,
                 heartbeat=self._heartbeat(task),
+                runner=self.runner,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -779,6 +780,7 @@ class Scheduler:
                 burst_id=self.current_burst_id,
                 extra_env=sandbox_env,  # the resolved intersection — tester bursts only
                 heartbeat=self._heartbeat(task),
+                runner=self.runner,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))

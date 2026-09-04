@@ -216,6 +216,35 @@ by construction. Now:
   and the next `run` starts clean. (The MVP's SIGTERM left a STOP file behind
   that blocked the next start until removed.)
 
+**The runner is a protocol (E4).** Where a burst runs is the third seam beside
+the ledger and the archive (TO-BE §6): `Runner` in `runner.py`, two methods, and
+`DockerRunner` behind it with its behavior untouched.
+
+- **`run(spec, log_path, heartbeat) -> int`** — start the burst, tee its output,
+  ask the heartbeat on the clock, fence on the first False, return the burst's
+  own exit code. **`alive(burst_id) -> bool`** — the reconciler's question: is
+  this burst still running where this runner can see? Under docker that is
+  `docker ps` by the name every container carries; the scheduler no longer
+  spells `docker` anywhere — it holds one runner per process (`open_runner`,
+  the third of the `open_ledger`/`open_archive` kind: nothing to choose until
+  `JobsRunner` exists, G3, but one place to choose it) and hands it to
+  `execute_burst` and to `reconcile_running` alike.
+- **`burst_env(spec)`** is the box's contract, factored out of the docker
+  command: the environment every runner hands the container verbatim — the
+  one Anthropic credential (subscription first, none on a `check`), the
+  agent's OTel, the tester's resolved sandbox refs. A runner packages it and
+  adds nothing, so the second runner cannot re-derive those rules differently.
+- **`tests/test_runner_contract.py`** is the contract, one suite parameterized
+  over runners the way the ledger's and the archive's are — the done-when, and
+  what G3 reuses: exit code, tee, heartbeat-on-the-clock, fence, `alive`, and
+  the box getting `burst_env` unchanged. Each runner brings a *rig* (the runner,
+  a way to run a shell script as a burst, a way to read back the packaged env);
+  the docker rig is in-process — a `DockerRunner` whose three docker lines
+  (`docker run`/`kill`/`ps`) are stood in for by a shell, with the pump, the
+  tee, the clock and the fence real — so the suite needs no daemon.
+  `test_runner.py` keeps what is docker's alone: the command line, the mounts,
+  the seccomp profile, kill-by-name.
+
 ## The fleet (C4)
 
 `run` without `--github` serves **every active registered product** through the same
@@ -280,9 +309,10 @@ Defaults, `.env`-overridable:
   mid-burst → burst `killed`, task rolled back, attempts+1 (a crash loop must eventually
   trip the rail, not spin forever). A live lease — whoever holds it — is proof of life
   from any host and is never touched, so a peer's burst elsewhere is not judged by this
-  host's `docker ps`; a container visible *here* is proof of life too, whatever the
-  lease says (the heartbeat failed, the work did not). A restarted single replica
-  therefore absorbs its own crash within one lease rather than instantly.
+  host's runner; a burst this replica's runner still sees running (`Runner.alive`, E4
+  — `docker ps` under docker) is proof of life too, whatever the lease says (the
+  heartbeat failed, the work did not). A restarted single replica therefore absorbs
+  its own crash within one lease rather than instantly.
 
 ## GitHub surface
 
@@ -328,6 +358,7 @@ control_plane/
   github_api.py   # the REST surface above
   prompts.py      # work/review prompt construction (provenance framing)
   bursts.py       # execute_burst() — extracted from cli._run_burst, shared by CLI + scheduler
+  runner.py       # the Runner protocol (E4): run + alive; burst_env, the box's contract; DockerRunner behind it
   clone.py        # the platform-owned clone (above)
   cli.py          # + `run [--once] [--interval]`, `stop --reason`, `resume`
 ```

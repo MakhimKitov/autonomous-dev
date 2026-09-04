@@ -340,6 +340,20 @@ the ephemeral container.
 > process-local flag and no ledger write. `tests/test_replicas.py` runs the
 > done-when: a stop from a third process kills a burst one replica holds, and
 > the work completes after `resume`.
+>
+> **As built (E4):** the runner is a protocol. `Runner` — `run(spec, log_path,
+> heartbeat) -> int`, `alive(burst_id) -> bool` — joins `Ledger` and
+> `SessionArchive` as the third seam (TO-BE §6), with `DockerRunner` behind it
+> and its behavior untouched. The scheduler holds one runner per process,
+> chosen in one place (`open_runner`, nothing to choose until `JobsRunner`),
+> and asks it to run every burst and whether an orphaned one is still alive;
+> `docker` is spelled nowhere outside `runner.py`. What the box is given is
+> decided once for every runner — `burst_env`: the one credential, the agent's
+> OTel, the tester's sandbox refs — and a runner only packages it. The runner
+> tests are one parameterized contract suite, each runner bringing a rig; the
+> docker rig runs the real pump, tee, clock and fence with a shell in the
+> daemon's seat, so the contract runs without docker, and G3 adds the Jobs rig
+> to the same suite rather than writing a second one.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

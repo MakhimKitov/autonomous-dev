@@ -1,8 +1,14 @@
-"""Spawn burst containers. One container = one burst, then it dies (§6).
+"""Where bursts run. One container = one burst, then it dies (§6).
 
-Phase 0 shells out to the ``docker`` CLI — no daemon-API dependency. The env
-contract comes from ``dev_agent.env`` (single source of truth; the dependency
-points control-plane → dev-agent only).
+`Runner` is the seam (E4, TO-BE §6) — the third protocol beside `Ledger` and
+`SessionArchive`: `DockerRunner` behind it as built, `JobsRunner` when the
+cluster arrives (G3, #44). What the box is given is decided here once, for every
+runner: `BurstSpec` is the burst, `burst_env` the environment the box gets. The
+env contract's names come from ``dev_agent.env`` (single source of truth; the
+dependency points control-plane → dev-agent only).
+
+Phase 0's `DockerRunner` shells out to the ``docker`` CLI — no daemon-API
+dependency.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 import structlog
 from dev_agent import env as agentenv
@@ -82,51 +89,102 @@ class BurstSpec:
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
-class DockerRunner:
-    def build_command(self, spec: BurstSpec) -> list[str]:
-        env: dict[str, str] = {
-            agentenv.TASK_ID: spec.task_id,
-            agentenv.BURST_ID: spec.burst_id,
-            agentenv.ROLE: spec.role,
-            agentenv.BURST_KIND: spec.kind,
-            agentenv.CLAUDE_CONFIG_DIR: agentenv.CONTAINER_SESSION_DIR,
-        }
-        if spec.prompt:
-            env[agentenv.TASK_PROMPT] = spec.prompt
-        if spec.resume_session_id:
-            env[agentenv.RESUME_SESSION_ID] = spec.resume_session_id
-        if spec.max_budget_usd is not None:
-            env[agentenv.MAX_BUDGET_USD] = str(spec.max_budget_usd)
-        if spec.max_turns is not None:
-            env[agentenv.MAX_TURNS] = str(spec.max_turns)
-        if spec.model:
-            env[agentenv.MODEL] = spec.model
-        if spec.traceparent:
-            env[agentenv.TRACEPARENT] = spec.traceparent
-        if spec.github_token:
-            env[agentenv.GITHUB_TOKEN] = spec.github_token
-            env[agentenv.GH_TOKEN] = spec.github_token  # the gh CLI reads this one
-        if spec.git_user_name:
-            env[agentenv.GIT_USER_NAME] = spec.git_user_name
-        if spec.git_user_email:
-            env[agentenv.GIT_USER_EMAIL] = spec.git_user_email
-        # Exactly one Anthropic credential enters the box, subscription first —
-        # the CLI prefers ANTHROPIC_API_KEY over the OAuth token, so passing
-        # both would silently switch billing to the API.
-        if spec.command == "run":
-            oauth = os.environ.get(agentenv.CLAUDE_CODE_OAUTH_TOKEN)
-            api_key = os.environ.get(agentenv.ANTHROPIC_API_KEY)
-            if oauth:
-                env[agentenv.CLAUDE_CODE_OAUTH_TOKEN] = oauth
-            elif api_key:
-                env[agentenv.ANTHROPIC_API_KEY] = api_key
-            # The agent's own OTel (B2) — empty unless a collector is configured, and
-            # never on a `check`, which is the no-network boot smoke.
-            env.update(
-                agent_telemetry_env(spec.task_id, spec.burst_id, spec.role, spec.kind)
-            )
-        env.update(spec.extra_env)
+def burst_env(spec: BurstSpec) -> dict[str, str]:
+    """The environment the box is given — the same wherever the burst runs.
 
+    Every runner hands this to its container verbatim, so the rules in it are
+    decided once: which credential enters (exactly one Anthropic credential,
+    subscription first, none on a ``check``), what the agent's own OTel is told,
+    and which sandbox refs a tester burst resolved at spawn (``extra_env``, D4).
+    A runner packages it — ``-e`` flags, a pod's ``env`` — and adds nothing.
+    """
+    env: dict[str, str] = {
+        agentenv.TASK_ID: spec.task_id,
+        agentenv.BURST_ID: spec.burst_id,
+        agentenv.ROLE: spec.role,
+        agentenv.BURST_KIND: spec.kind,
+        agentenv.CLAUDE_CONFIG_DIR: agentenv.CONTAINER_SESSION_DIR,
+    }
+    if spec.prompt:
+        env[agentenv.TASK_PROMPT] = spec.prompt
+    if spec.resume_session_id:
+        env[agentenv.RESUME_SESSION_ID] = spec.resume_session_id
+    if spec.max_budget_usd is not None:
+        env[agentenv.MAX_BUDGET_USD] = str(spec.max_budget_usd)
+    if spec.max_turns is not None:
+        env[agentenv.MAX_TURNS] = str(spec.max_turns)
+    if spec.model:
+        env[agentenv.MODEL] = spec.model
+    if spec.traceparent:
+        env[agentenv.TRACEPARENT] = spec.traceparent
+    if spec.github_token:
+        env[agentenv.GITHUB_TOKEN] = spec.github_token
+        env[agentenv.GH_TOKEN] = spec.github_token  # the gh CLI reads this one
+    if spec.git_user_name:
+        env[agentenv.GIT_USER_NAME] = spec.git_user_name
+    if spec.git_user_email:
+        env[agentenv.GIT_USER_EMAIL] = spec.git_user_email
+    # Exactly one Anthropic credential enters the box, subscription first —
+    # the CLI prefers ANTHROPIC_API_KEY over the OAuth token, so passing
+    # both would silently switch billing to the API.
+    if spec.command == "run":
+        oauth = os.environ.get(agentenv.CLAUDE_CODE_OAUTH_TOKEN)
+        api_key = os.environ.get(agentenv.ANTHROPIC_API_KEY)
+        if oauth:
+            env[agentenv.CLAUDE_CODE_OAUTH_TOKEN] = oauth
+        elif api_key:
+            env[agentenv.ANTHROPIC_API_KEY] = api_key
+        # The agent's own OTel (B2) — empty unless a collector is configured, and
+        # never on a `check`, which is the no-network boot smoke.
+        env.update(agent_telemetry_env(spec.task_id, spec.burst_id, spec.role, spec.kind))
+    env.update(spec.extra_env)
+    return env
+
+
+class Runner(Protocol):
+    """Where bursts run — the seam `DockerRunner` sits behind (E4, TO-BE §6)
+    and `JobsRunner` will (G3, #44); the suite's fakes take docker's seat
+    through it.
+
+    Two questions, and what every answer holds wherever the burst runs:
+
+    - ``run`` starts the burst ``spec`` describes and returns its exit code —
+      the burst's own, never a guess. Output streams to this process's stdout
+      and, when ``log_path`` is given, is teed there too (the file catches a
+      burst that dies before writing any result; the runner makes the
+      directory). ``heartbeat`` is asked at least every ``HEARTBEAT_POLL_S``
+      while the burst runs, output or none, and the first False **fences** it:
+      the runner ends the burst, and ``run`` still returns what the burst
+      exited with. The caller remembers the answer (`execute_burst` records a
+      fenced burst ``killed``, E3); the runner only acts on it.
+    - ``alive`` is the reconciler's question: is this burst still running where
+      this runner can see? True is proof of life that outranks a lapsed lease
+      (the heartbeat failed, the work did not); False for a burst that has
+      ended or that this runner never ran.
+
+    `tests/test_runner_contract.py` is the contract, one suite parameterized over
+    every runner there is — a test that passes on one and fails on another is a
+    bug by definition, the way the ledger's and the archive's suites put it.
+    """
+
+    def run(
+        self, spec: BurstSpec, log_path: Path | None = None, heartbeat: Heartbeat | None = None
+    ) -> int: ...
+
+    def alive(self, burst_id: str) -> bool: ...
+
+
+class DockerRunner:
+    """Bursts as containers on this host, through the ``docker`` CLI.
+
+    The CLI is spoken in exactly three places — `build_command` (``docker run``),
+    `kill` (``docker kill``, the fence) and `alive` (``docker ps``) — which is
+    what lets the contract suite run this class with a shell in the daemon's
+    seat: those three replaced, the pump, the tee, the clock and the fence are
+    the real thing.
+    """
+
+    def build_command(self, spec: BurstSpec) -> list[str]:
         cmd = [
             "docker",
             "run",
@@ -142,7 +200,7 @@ class DockerRunner:
         ]
         if spec.codex_auth_dir and spec.command == "run":
             cmd += ["-v", f"{spec.codex_auth_dir}:/home/agent/.codex"]
-        for key, value in env.items():
+        for key, value in burst_env(spec).items():
             cmd += ["-e", f"{key}={value}"]
         cmd += [spec.image, spec.command]
         return cmd
@@ -184,6 +242,27 @@ class DockerRunner:
         subprocess.run(
             ["docker", "kill", f"burst-{burst_id}"], check=False, capture_output=True
         )
+
+    def alive(self, burst_id: str) -> bool:
+        """``docker ps`` by that name: the container is running on *this* host.
+        A peer's burst on another host is invisible here, and the reconciler
+        does not ask about it — a live lease is that burst's proof of life."""
+        out = subprocess.run(
+            ["docker", "ps", "-q", "--filter", f"name=burst-{burst_id}"],
+            capture_output=True,
+            text=True,
+        )
+        return bool(out.stdout.strip())
+
+
+def open_runner() -> Runner:
+    """The runner this deployment has — `open_ledger` / `open_archive`'s third.
+
+    Docker is the only one as built, so nothing is chosen here yet; this is
+    the place the choice is made when `JobsRunner` exists (G3, #44): one
+    toggle, here, and nothing downstream of it naming a substrate.
+    """
+    return DockerRunner()
 
 
 def _pump(
