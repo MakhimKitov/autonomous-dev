@@ -272,7 +272,26 @@ only *orphaned* rows — no live lease — so a peer's burst on another host is 
 judged by this host's `docker ps`; a lapsed lease is presumed dead and absorbed.
 `upsert_task` remains for the verb/backfill/seed paths; `execute_burst` creates
 the row if absent and lands the session id by CAS. `SCHEDULER_LEASE_S` (90) is
-the one new rail. The multi-replica race itself is E2's test.
+the one new rail.
+
+**Two replicas over one ledger (E2)**: `tests/test_replicas.py` is the race, run
+in the stores CI job — two `tests/replica_harness.py` processes (the real
+`_serve` → `Fleet` → `Scheduler` → `execute_burst` → `PostgresLedger`, GitHub
+and docker in fakes) on one Postgres, one SIGKILLed mid-burst; the survivor
+absorbs the orphan after its lease lapses, and the ledger shows one `succeeded`
+burst per task, one `killed` row, one failed attempt. What fans out with the
+second replica: the fleet takes each product's **observation turn** through a
+lease on its registry row (`claim_observation`, one poll interval long — N
+replicas poll GitHub once, not N times; `Scheduler.tick`, the `--github` loop,
+observes every tick without it, since dev mode may have no row); the row's
+**`concurrency`** is counted at admission in `claim_next` (tasks in flight — a
+live lease or a running burst — against the cap, default 1: a second replica is
+a hot standby unless the row says otherwise; `Rails.concurrency`, copied from
+the row by the fleet like `daily_bursts`, no env knob); and the heartbeat
+**fences itself** when the lease has gone unrenewed for two thirds of its span —
+the holder's only proof of life is the row, so it stops before a peer may
+lawfully absorb. `cli.py` copies the loop's actual `--interval` into the rails
+so the observation lease matches the cadence.
 
 ### Task identity
 

@@ -51,10 +51,12 @@ Anyone may reclaim a lapsed lease; renewal is the same statement guarded by
 `claimed_by = $replica`. The `claimed_by`/`claimed_until` pair is the one lease
 pattern; `tasks` carries it since E1 (`claim_next` is this statement, with the
 product scope and the failure cooldown in its WHERE; `renew_lease` is the
-heartbeat's renewal), `repositories` carries it for observation ticks (fanned
-out at E2). The reconciler's view of the pattern is the `orphaned` filter on
-`tasks_by_status` / `running_bursts`: rows whose lease lapsed or never existed —
-a live lease is a peer's proof of life, from any host.
+heartbeat's renewal), `repositories` carries it for observation turns since E2
+(`claim_observation` — the same UPDATE on the registry row, one poll interval
+long, so a fleet observes a product once per interval). The reconciler's view of
+the pattern is the `orphaned` filter on `tasks_by_status` / `running_bursts`:
+rows whose lease lapsed or never existed — a live lease is a peer's proof of
+life, from any host.
 
 **Transition — compare-and-set.** Rowcount decides, never a read-then-write:
 
@@ -103,9 +105,11 @@ aggregate and the claim above — released before the method returns; a peer
 holding it means "idle this tick", never "wait". The aggregate counts
 *admitted* work — bursts started today plus live leases with no burst row yet —
 because the burst row is written after the fence is released, and counting
-rows alone would let two replicas each see "one under the ceiling". SQLite has
-one process and needs no fence; its `claim_next` is the same two statements
-bare.
+rows alone would let two replicas each see "one under the ceiling". E2 added
+the second rail to the same statement: the product's tasks in flight right now
+(a live lease or a running burst) against its registered `concurrency`, so N
+replicas run as many bursts of a product as its row allows. SQLite has one
+process and needs no fence; its `claim_next` is the same two statements bare.
 
 **One clock.** Time enters comparisons only as the database's `now()` — lease
 expiry, backoff, windows all use the ledger's clock, so replica clock skew

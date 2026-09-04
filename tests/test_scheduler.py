@@ -15,6 +15,7 @@ from control_plane.github_api import COPILOT_REVIEWER, Issue, PullRequest, Revie
 from control_plane.models import (
     BurstRecord,
     BurstStatus,
+    RepositoryRecord,
     TaskRecord,
     TaskStatus,
     task_id_for,
@@ -471,6 +472,7 @@ def test_rails_from_env_overrides():
     assert rails.max_attempts == 5
     assert rails.lease_s == 30
     assert rails.max_review_rounds == 3  # untouched default
+    assert rails.concurrency == 1  # the registry row's, never the env's (E2)
     # per-burst budget and turns are the role row's since D5 — not a rail, and
     # the retired env name is ignored here (startup refuses it, test_registry_cli)
     assert not hasattr(rails, "burst_budget_usd") and not hasattr(rails, "burst_max_turns")
@@ -1062,8 +1064,57 @@ def test_the_heartbeat_renews_the_lease_and_reports_a_lost_one(rig):
     def boom(*args, **kwargs):
         raise RuntimeError("connection reset")
 
+    scheduler.rails.lease_s = 90  # a real span, so the error is early in it
+    beat = scheduler._heartbeat(stores.ledger.get_task(tid(1)))
     stores.ledger.renew_lease = boom
     assert beat() is True
+
+
+def test_a_lease_the_holder_cannot_renew_fences_before_a_peer_may_absorb(rig, monkeypatch):
+    """E2: the lease is the replica's only proof of life. A renewal that keeps
+    failing is tolerated for two thirds of the span and fences on the beat after
+    — with a third of the lease still to run, so the container is dead before
+    the row can lawfully change hands. A renewal that lands resets the clock."""
+    scheduler, _, stores, _, _ = rig
+    scheduler.rails.lease_s = 90
+    scheduler.rails.concurrency = 2  # two tasks in flight below
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(sched_mod.time, "monotonic", lambda: clock["now"])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    def ledger_down(down):
+        if down:
+            stores.ledger.renew_lease = boom
+        else:
+            stores.ledger.__dict__.pop("renew_lease", None)  # the class's own again
+
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    beat = scheduler._heartbeat(scheduler.pick_next())
+    assert beat() is True  # t=0: renewed for real
+    ledger_down(True)
+    clock["now"] += 30
+    assert beat() is True  # t=30: one failure, 60 s of lease left — keep going
+    clock["now"] += 30
+    assert beat() is False  # t=60: two thirds unrenewed — fence, 30 s before any peer can move
+
+    # the same span with a renewal landing in the middle: the clock restarts there
+    ledger_down(False)
+    stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED))
+    beat = scheduler._heartbeat(scheduler.pick_next())
+    assert beat() is True  # t=0: renewed
+    ledger_down(True)
+    clock["now"] += 30
+    assert beat() is True  # t=30: failed
+    ledger_down(False)
+    clock["now"] += 30
+    assert beat() is True  # t=60: landed — the deadline moves out
+    ledger_down(True)
+    clock["now"] += 30
+    assert beat() is True  # t=90: 30 s since the last landing — tolerated
+    clock["now"] += 30
+    assert beat() is False  # t=120: 60 s since — fenced
 
 
 def test_a_task_a_peer_reclaimed_is_not_spawned(rig):
@@ -1144,6 +1195,7 @@ def test_reconcile_spares_a_lapsed_lease_whose_container_is_alive_here(rig, monk
 
 def test_two_replicas_claim_disjoint_tasks(rig):
     scheduler, _, stores, _, _ = rig
+    scheduler.rails.concurrency = 2  # the product allows two lanes
     other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
     stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
     stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
@@ -1151,6 +1203,84 @@ def test_two_replicas_claim_disjoint_tasks(rig):
     assert (mine.task_id, theirs.task_id) == (tid(1), tid(2))
     assert (mine.claimed_by, theirs.claimed_by) == (scheduler.replica, PEER)
     assert scheduler.pick_next() is None and other.pick_next() is None
+
+
+def test_a_second_replica_stands_by_at_the_products_concurrency(rig):
+    """E2: the row's concurrency (default 1) is fleet-wide. While one replica
+    has the product's burst in flight the other picks nothing — a hot standby,
+    not a second lane — and takes over the moment the lane is free."""
+    scheduler, _, stores, _, _ = rig
+    assert scheduler.rails.concurrency == 1
+    other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
+    stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
+    mine = scheduler.pick_next()
+    assert mine.task_id == tid(1) and other.pick_next() is None
+    scheduler._move(mine, status=TaskStatus.AWAITING_REVIEW, **scheduler._released())
+    assert other.pick_next().task_id == tid(2)
+
+
+# --- E2: the observation turn — one observer per product per interval ---
+
+
+def _registered(stores, **quotas):
+    stores.ledger.register_repository(
+        RepositoryRecord(repository=REPOSITORY, team="owners", **quotas), actor="test"
+    )
+
+
+def test_the_observation_turn_is_one_replicas_per_interval(rig):
+    scheduler, api, stores, _, _ = rig
+    _registered(stores)
+    other = Scheduler(stores, api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+
+    # a zero-length lease lapses at once: the next replica through takes the turn
+    scheduler.rails.poll_interval_s = 0
+    assert scheduler.observation_turn() is True
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.CLAIMED  # it observed
+    scheduler.rails.poll_interval_s = 60
+    assert other.observation_turn() is True
+    assert stores.ledger.get_repository(REPOSITORY).claimed_by == PEER
+
+    # inside the interval nobody's claim lands — not the holder's either
+    api.ready_issues = [_issue(), _issue(2)]
+    api.issues[2] = _issue(2)
+    assert scheduler.observation_turn() is False
+    assert other.observation_turn() is False
+    assert stores.ledger.get_task(tid(2)) is None  # so nobody made the GitHub round trip
+    assert stores.ledger.get_repository(REPOSITORY).claimed_by == PEER
+
+
+def test_the_observation_turn_reconciles_too(rig):
+    """Reconcile rides the same turn: an orphan is judged once per interval,
+    by whoever observes — not by every replica that ticks."""
+    scheduler, _, stores, _, _ = rig
+    _registered(stores)
+    stores.ledger.upsert_task(
+        _task(1, status=TaskStatus.WORKING, next_burst_kind="work", claimed_by=PEER, claimed_until=LONG_AGO)
+    )
+    stores.ledger.record_burst(BurstRecord(burst_id="theirs", task_id=tid(1)))
+    assert scheduler.observation_turn() is True
+    assert stores.ledger.get_burst("theirs").status == BurstStatus.KILLED
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.CLAIMED
+
+
+def test_the_single_product_tick_observes_without_a_row(rig):
+    """`run --github` may serve an unregistered product (dev mode): its tick
+    leases nothing but tasks and observes every time."""
+    scheduler, api, stores, _, _ = rig
+    assert stores.ledger.get_repository(REPOSITORY) is None
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    api.open_prs = [_pr()]
+    api.prs[2] = _pr()
+    scheduler.tick()
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.AWAITING_REVIEW
+    api.prs[2] = _pr(state="closed", merged=True)
+    scheduler.tick()  # the very next tick observes again — no interval to wait out
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.DONE
 
 
 # --- C4: a product's scheduler sees only its own rows ---

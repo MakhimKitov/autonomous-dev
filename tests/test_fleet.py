@@ -52,13 +52,14 @@ class FakeScheduler:
         self.observe_error: Exception | None = None
         self.current_burst_id = None
 
-    def reconcile_running(self):
+    def observation_turn(self):
+        # the lease itself is the real scheduler's (test_scheduler.py, E2); the
+        # fleet's part is to ask for the turn, product by product
         self.journal.append(("reconcile", self.slug))
-
-    def observe(self):
         if self.observe_error is not None:
             raise self.observe_error
         self.journal.append(("observe", self.slug))
+        return True
 
     def pick_next(self):
         if not self.claimable:

@@ -390,21 +390,31 @@ class PostgresLedger:
         return None if row is None else _load(row, TaskRecord, _TASK_TIMESTAMPS)
 
     def claim_next(
-        self, repository: str, replica: str, *, ceiling: int, since: str, lease_s: float, cooldown_s: float
+        self,
+        repository: str,
+        replica: str,
+        *,
+        ceiling: int,
+        since: str,
+        lease_s: float,
+        cooldown_s: float,
+        concurrency: int,
     ) -> TaskRecord | None:
-        """Admission (TO-BE §5) under the one advisory lock: the daily rail's
+        """Admission (TO-BE §5) under the one advisory lock: the rails'
         aggregate, then the claim — the oldest `claimed` task of the product
         whose lease nobody holds and whose failure cooldown has passed, leased to
         `replica` for `lease_s` by the statement that picks it (STORES.md,
         "Claim — a lease is data"). `FOR UPDATE SKIP LOCKED` makes two replicas
         inside the same microsecond take different rows rather than wait.
 
-        The rail counts *admitted* work, not recorded bursts: bursts started
-        since `since`, plus spawns in flight — a live lease with no running burst
-        row yet. Under the lock that sum is exact across replicas; without the
-        second term two of them would each see "one under the ceiling" and both
-        spawn. Its one imprecision is conservative (a burst that has just
-        finished but whose task has not yet moved counts twice for a few seconds
+        The rails count *admitted* work, not recorded bursts. The daily ceiling:
+        bursts started since `since`, plus spawns in flight — a live lease with
+        no running burst row yet. The product's concurrency (E2): the tasks in
+        flight right now — a live lease or a running burst, whichever stage the
+        spawn is at. Under the lock both sums are exact across replicas; without
+        the in-flight terms two of them would each see "one under" and both
+        spawn. Their one imprecision is conservative (a burst that has just
+        finished but whose task has not yet moved counts for a few seconds more
         — a spawn deferred a tick, never one over the rail).
 
         The lock is session-level and try-only: a peer holding it means a peer is
@@ -420,17 +430,25 @@ class PostgresLedger:
             log.info("admission fence held by a peer — idling this tick", repo=repository)
             return None
         try:
-            admitted = self._execute(
+            counts = self._execute(
                 "SELECT (SELECT count(*) FROM bursts b JOIN tasks t ON t.task_id = b.task_id"
                 "        WHERE t.repository = %(repository)s AND b.started_at >= %(since)s)"
                 "     + (SELECT count(*) FROM tasks t"
                 "        WHERE t.repository = %(repository)s AND t.claimed_until > now()"
                 "          AND NOT EXISTS (SELECT 1 FROM bursts b"
-                "                          WHERE b.task_id = t.task_id AND b.status = 'running')) AS n",
+                "                          WHERE b.task_id = t.task_id AND b.status = 'running')) AS admitted,"
+                "       (SELECT count(*) FROM tasks t"
+                "        WHERE t.repository = %(repository)s"
+                "          AND (t.claimed_until > now()"
+                "               OR EXISTS (SELECT 1 FROM bursts b"
+                "                          WHERE b.task_id = t.task_id AND b.status = 'running'))) AS in_flight",
                 {"repository": repository, "since": _to_datetime(since)},
-            ).fetchone()["n"]
-            if admitted >= ceiling:
+            ).fetchone()
+            if counts["admitted"] >= ceiling:
                 log.warning("daily burst ceiling reached — not spawning", repo=repository, ceiling=ceiling)
+                return None
+            if counts["in_flight"] >= concurrency:
+                log.info("product at its concurrency — not spawning", repo=repository, concurrency=concurrency)
                 return None
             row = self._execute(
                 "UPDATE tasks SET claimed_by = %(replica)s,"
@@ -575,6 +593,19 @@ class PostgresLedger:
         )
         if cursor.rowcount == 0:
             log.warning("touch of an unregistered product ignored", repo=repository)
+
+    def claim_observation(self, repository: str, replica: str, lease_s: float) -> bool:
+        """The observation lease (E2): the product is `replica`'s to observe for
+        `lease_s` if nobody's lease on it is live. The same statement as the task
+        claim, on the registry row — so a fleet of N observes a product once per
+        interval, not N times. Operational state: no audit row, no event."""
+        cursor = self._execute(
+            "UPDATE repositories SET claimed_by = %(replica)s,"
+            "                        claimed_until = now() + make_interval(secs => %(lease_s)s) "
+            "WHERE repository = %(repository)s AND (claimed_until IS NULL OR claimed_until < now())",
+            {"replica": replica, "lease_s": float(lease_s), "repository": repository},
+        )
+        return cursor.rowcount == 1
 
     # --- violations, and the outbox row each one announces ---
 

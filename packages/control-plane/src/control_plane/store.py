@@ -274,6 +274,7 @@ class Ledger(Protocol):
     def set_repository_state(self, repository: str, state: str, actor: str, reason: str = "") -> None: ...
     def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def touch_repository_burst(self, repository: str, at: str) -> None: ...
+    def claim_observation(self, repository: str, replica: str, lease_s: float) -> bool: ...
     def audit_trail(self, target: str | None = None) -> list[AuditRecord]: ...
     def list_roles(self) -> list[RoleRecord]: ...
     def get_role(self, role: str) -> RoleRecord | None: ...
@@ -284,7 +285,15 @@ class Ledger(Protocol):
         self, task_id: str, changes: dict, *, expected_status: str, expected_holder: str | None
     ) -> TaskRecord | None: ...
     def claim_next(
-        self, repository: str, replica: str, *, ceiling: int, since: str, lease_s: float, cooldown_s: float
+        self,
+        repository: str,
+        replica: str,
+        *,
+        ceiling: int,
+        since: str,
+        lease_s: float,
+        cooldown_s: float,
+        concurrency: int,
     ) -> TaskRecord | None: ...
     def renew_lease(self, task_id: str, replica: str, lease_s: float) -> bool: ...
     def get_task(self, task_id: str) -> TaskRecord | None: ...
@@ -738,33 +747,51 @@ class SqliteLedger:
         return TaskRecord(**dict(row)) if row else None
 
     def claim_next(
-        self, repository: str, replica: str, *, ceiling: int, since: str, lease_s: float, cooldown_s: float
+        self,
+        repository: str,
+        replica: str,
+        *,
+        ceiling: int,
+        since: str,
+        lease_s: float,
+        cooldown_s: float,
+        concurrency: int,
     ) -> TaskRecord | None:
-        """Admission (TO-BE §5): the daily rail, then the claim — the oldest
+        """Admission (TO-BE §5): the rails, then the claim — the oldest
         `claimed` task of the product whose lease nobody holds and whose failure
         cooldown has passed, leased to `replica` for `lease_s` in the statement
         that picks it (STORES.md, "Claim — a lease is data"). Postgres fences the
         two under an advisory lock; one process needs no fence.
 
-        What the rail counts is *admitted* work, not recorded bursts: bursts
-        started since `since`, plus spawns in flight — a live lease with no
-        running burst row yet. The second term is what keeps two replicas from
-        each seeing "one under the ceiling" and both spawning; its one imprecision
-        is conservative (a burst that has just finished but whose task has not yet
-        moved counts twice for a few seconds — a spawn deferred a tick, never one
+        What the rails count is *admitted* work, not recorded bursts. The daily
+        ceiling: bursts started since `since`, plus spawns in flight — a live
+        lease with no running burst row yet. The product's concurrency (E2): the
+        tasks in flight right now — a live lease or a running burst, whichever
+        stage the spawn is at. The in-flight terms are what keep two replicas
+        from each seeing "one under" and both spawning; their one imprecision is
+        conservative (a burst that has just finished but whose task has not yet
+        moved counts for a few seconds more — a spawn deferred a tick, never one
         over the rail)."""
         now = utc_now()
-        admitted = self._conn.execute(
+        counts = self._conn.execute(
             "SELECT (SELECT COUNT(*) FROM bursts b JOIN tasks t ON t.task_id = b.task_id"
             "        WHERE t.repository = :repository AND b.started_at >= :since)"
             "     + (SELECT COUNT(*) FROM tasks t"
             "        WHERE t.repository = :repository AND t.claimed_until > :now"
             "          AND NOT EXISTS (SELECT 1 FROM bursts b"
-            "                          WHERE b.task_id = t.task_id AND b.status = 'running')) AS n",
+            "                          WHERE b.task_id = t.task_id AND b.status = 'running')) AS admitted,"
+            "       (SELECT COUNT(*) FROM tasks t"
+            "        WHERE t.repository = :repository"
+            "          AND (t.claimed_until > :now"
+            "               OR EXISTS (SELECT 1 FROM bursts b"
+            "                          WHERE b.task_id = t.task_id AND b.status = 'running'))) AS in_flight",
             {"repository": repository, "since": utc_iso(since), "now": now},
-        ).fetchone()["n"]
-        if admitted >= ceiling:
+        ).fetchone()
+        if counts["admitted"] >= ceiling:
             log.warning("daily burst ceiling reached — not spawning", repo=repository, ceiling=ceiling)
+            return None
+        if counts["in_flight"] >= concurrency:
+            log.info("product at its concurrency — not spawning", repo=repository, concurrency=concurrency)
             return None
         row = self._conn.execute(
             "UPDATE tasks SET claimed_by = :replica, claimed_until = :until "
@@ -916,6 +943,20 @@ class SqliteLedger:
         self._conn.commit()
         if cursor.rowcount == 0:
             log.warning("touch of an unregistered product ignored", repo=repository)
+
+    def claim_observation(self, repository: str, replica: str, lease_s: float) -> bool:
+        """The observation lease (E2): the product is `replica`'s to observe for
+        `lease_s` if nobody's lease on it is live. The same statement as the task
+        claim, on the registry row — so a fleet of N observes a product once per
+        interval, not N times. Operational state: no audit row, no event."""
+        now = utc_now()
+        cursor = self._conn.execute(
+            "UPDATE repositories SET claimed_by = :replica, claimed_until = :until "
+            "WHERE repository = :repository AND (claimed_until IS NULL OR claimed_until < :now)",
+            {"replica": replica, "until": _after(now, lease_s), "repository": repository, "now": now},
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     def record_violation(self, violation: Violation) -> None:
         """Record the violation and announce it — both rows, or neither.

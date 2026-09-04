@@ -100,7 +100,9 @@ jobs:
           esac
       - name: the suite, against the service backends
         # Both contract suites see their service backend here — the ledger's
-        # because LEDGER_DSN is set, the archive's because ARCHIVE_URL is.
+        # because LEDGER_DSN is set, the archive's because ARCHIVE_URL is — and
+        # so does the multi-replica race (tests/test_replicas.py, E2): two
+        # control-plane processes on this Postgres, one killed mid-burst.
         # Everything else keeps its own scratch space regardless
         # (tests/conftest.py explains why that has to be forced).
         run: uv run pytest
