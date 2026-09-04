@@ -5,6 +5,7 @@ import json
 import jwt as pyjwt
 import pytest
 from control_plane.github_auth import (
+    BURST_PERMISSIONS,
     ROLE_PREFIXES,
     AppCredentials,
     GitHubAuthError,
@@ -123,6 +124,61 @@ def test_mint_token_and_identity():
     name, email = bot_git_identity(minted, CREDS.app_id)
     assert name == "auto-dev[bot]"
     assert email == "12345+auto-dev[bot]@users.noreply.github.com"
+
+
+def test_mint_downscopes_at_the_api():
+    # the burst tier (D2): the restriction rides the mint request itself —
+    # GitHub enforces it, not our shell discipline
+    captured = {}
+
+    def get(url, **kwargs):
+        return FakeResponse([{"id": 42, "app_slug": "auto-dev"}])
+
+    def post(url, json=None, **kwargs):
+        captured["json"] = json
+        return FakeResponse(
+            {"token": "ghs_scoped", "expires_at": "", "permissions": {"contents": "write"}},
+            status_code=201,
+        )
+
+    mint_installation_token(
+        CREDS,
+        http_get=get,
+        http_post=post,
+        repositories=["discord-bot"],
+        permissions={"contents": "write", "issues": "write"},
+    )
+    assert captured["json"] == {
+        "repositories": ["discord-bot"],
+        "permissions": {"contents": "write", "issues": "write"},
+    }
+
+
+def test_mint_without_scope_sends_no_body():
+    # the control-plane tier stays the App's full grant — an empty body would
+    # still work, but None keeps the request byte-identical to pre-D2
+    captured = {}
+
+    def get(url, **kwargs):
+        return FakeResponse([{"id": 42, "app_slug": "auto-dev"}])
+
+    def post(url, json=None, **kwargs):
+        captured["json"] = json
+        return FakeResponse({"token": "ghs_broad", "expires_at": "", "permissions": {}}, status_code=201)
+
+    mint_installation_token(CREDS, http_get=get, http_post=post)
+    assert captured["json"] is None
+
+
+def test_burst_permissions_are_dev_only():
+    # reviewer/tester bursts hold no GitHub credential at all (TO-BE §4) —
+    # their absence from the map is the contract, not an omission
+    assert set(BURST_PERMISSIONS) == {"dev"}
+    assert BURST_PERMISSIONS["dev"] == {
+        "contents": "write",
+        "issues": "write",
+        "pull_requests": "write",
+    }
 
 
 def test_http_errors_surface():

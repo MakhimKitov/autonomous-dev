@@ -39,6 +39,15 @@ ROLE_PREFIXES: dict[str, str] = {
     "monitor": MONITOR_APP_PREFIX,
 }
 
+# The burst token tier's per-role grant (TO-BE §4, D2): minted *below* the
+# App's own grant, so "a burst can't reach another product" (§13) is a
+# per-token fact. Only the dev role holds a GitHub credential inside the
+# container at all — reviewer and tester bursts stay credential-free, which
+# is the stronger wall; their absence here is deliberate.
+BURST_PERMISSIONS: dict[str, dict[str, str]] = {
+    "dev": {"contents": "write", "issues": "write", "pull_requests": "write"},
+}
+
 # requests-compatible callables, injectable for tests
 HttpGet = Callable[..., Any]
 HttpPost = Callable[..., Any]
@@ -131,13 +140,25 @@ def mint_installation_token(
     creds: AppCredentials,
     http_get: HttpGet = requests.get,
     http_post: HttpPost = requests.post,
+    repositories: list[str] | None = None,
+    permissions: dict[str, str] | None = None,
 ) -> InstallationToken:
+    """Mint an installation token; ``repositories``/``permissions`` downscope
+    it below the App's grant at mint (D2). ``repositories`` takes bare repo
+    names, resolved within the installation. Omitted = the App's full grant —
+    the broad, cached control-plane tier."""
     installation_id, app_slug = discover_installation(creds, http_get)
     headers = {"Authorization": f"Bearer {make_app_jwt(creds)}"}
+    body: dict[str, Any] = {}
+    if repositories is not None:
+        body["repositories"] = repositories
+    if permissions is not None:
+        body["permissions"] = permissions
     data = _check(
         http_post(
             f"{GITHUB_API}/app/installations/{installation_id}/access_tokens",
             headers=headers,
+            json=body or None,
             timeout=30,
         ),
         "minting installation token",

@@ -192,6 +192,17 @@ T4). App names are the adopter's choice — the prefix scheme is the contract.
 that can't mint fails the check (exit 1), an unconfigured role is reported and
 skipped. The tester still posts under the reviewer App until D3.
 
+**Burst-token downscoping (D2)**: two token tiers (TO-BE §4). The control plane
+keeps the App's full grant, cached (`InstallationTokenCache`). A burst token is
+minted fresh per spawn and *downscoped at mint* — `repositories=[the task's
+repo]` + the role's permission subset (`BURST_PERMISSIONS` in `github_auth.py`;
+dev = contents/issues/pull_requests write, and dev is the only role that holds
+a burst credential at all). "A burst can't reach another product" (§13) is a
+per-token fact GitHub enforces: product A's burst token is rejected on product
+B by construction (403/404, proven live). `mint_burst_token` in `bursts.py` is
+the one place the burst tier is minted; a credential request for a non-dev role
+refuses loudly.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).

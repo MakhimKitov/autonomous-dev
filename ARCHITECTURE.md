@@ -265,6 +265,13 @@ the ephemeral container.
 > platform's contract. `github-check` preflights every configured role — a
 > declared App that cannot mint is a check failure, never a silent skip. The
 > tester's own posting identity arrives at D3.
+>
+> **As built (D2):** burst tokens are downscoped at mint (TO-BE §4's two
+> tiers): `repositories=[the task's repo]` plus the role's permission subset,
+> so a burst for product A holds a token product B rejects by construction —
+> GitHub enforces the wall, not shell discipline. The control plane's cached
+> tier keeps the App's full grant; only the dev role carries a burst
+> credential at all (reviewer/tester bursts stay credential-free).
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,
