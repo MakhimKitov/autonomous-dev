@@ -217,7 +217,10 @@ dev App reads `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY_PATH`, the other roles t
 same names behind `REVIEWER_`, `TESTER_`, `MONITOR_`. App names are the adopter's
 choice — the prefixes are the contract, and `control-plane github-check` preflights
 every configured role. The tester posts under the reviewer App until D3; `MONITOR_`
-is reserved until the monitor exists (T4).
+is reserved until the monitor exists (T4). Tokens come in two tiers (D2): the
+control plane's cached tokens carry the App's full grant, while a burst token is
+minted fresh per spawn, pinned to the task's repository and the role's permission
+subset — product A's burst token is rejected on product B by GitHub itself.
 
 No production credentials (product tokens, DB) exist in any platform identity — the
 deploy path is human-merge → CI only. **Sandbox** creds (a disposable instance of the

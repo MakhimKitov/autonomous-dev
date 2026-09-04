@@ -14,7 +14,9 @@ from pathlib import Path
 import structlog
 
 from control_plane.github_auth import (
+    BURST_PERMISSIONS,
     AppCredentials,
+    GitHubAuthError,
     bot_git_identity,
     mint_installation_token,
 )
@@ -67,6 +69,38 @@ def codex_auth_dir() -> Path | None:
     return codex if (codex / "auth.json").is_file() else None
 
 
+def mint_burst_token(task: TaskRecord, role: str) -> tuple[str, str, str] | None:
+    """The burst token tier (TO-BE §4, D2): minted fresh per spawn, downscoped
+    below the App's grant — pinned to the task's repository and to the role's
+    permission subset, so a burst for product A holds a token product B rejects
+    by construction. The broad cached tier stays control-plane-only.
+
+    Returns ``(token, git_name, git_email)``, or None when the App isn't
+    configured (the burst runs without GitHub — dev mode).
+    """
+    creds = AppCredentials.from_env()
+    if creds is None:
+        return None
+    if role not in BURST_PERMISSIONS:
+        # reviewer/tester bursts hold no GitHub credential at all — a request
+        # for one is a broken code path, not a policy to satisfy
+        raise GitHubAuthError(f"role {role!r} holds no GitHub credential inside a burst (TO-BE §4)")
+    minted = mint_installation_token(
+        creds,
+        repositories=[task.repository.split("/", 1)[1]],
+        permissions=BURST_PERMISSIONS[role],
+    )
+    git_name, git_email = bot_git_identity(minted, creds.app_id)
+    log.info(
+        "github token minted",
+        pushes_as=git_name,
+        expires=minted.expires_at,
+        scoped_to=task.repository,
+        permissions=sorted(minted.permissions),
+    )
+    return minted.token, git_name, git_email
+
+
 def execute_burst(
     stores: PlatformStores,
     task: TaskRecord,
@@ -89,8 +123,9 @@ def execute_burst(
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
 
-    ``with_github`` mints the dev App token into the box (dev bursts push;
-    reviewer bursts get no GitHub credential at all — REVIEWERS.md).
+    ``with_github`` mints the dev App token into the box, downscoped to the
+    task's repository + the role's permission subset (`mint_burst_token`, D2);
+    reviewer bursts get no GitHub credential at all — REVIEWERS.md.
     ``mount_codex`` mounts the operator's codex auth (slice 3, reviewer only).
     ``extra_env`` injects sandbox credentials — the resolved TEST_ intersection,
     tester bursts only (TESTER.md).
@@ -106,12 +141,9 @@ def execute_burst(
 
     github_token = git_name = git_email = None
     if mode == "run" and with_github:
-        creds = AppCredentials.from_env()
-        if creds is not None:
-            minted = mint_installation_token(creds)
-            github_token = minted.token
-            git_name, git_email = bot_git_identity(minted, creds.app_id)
-            log.info("github token minted", pushes_as=git_name, expires=minted.expires_at)
+        scoped = mint_burst_token(task, role)
+        if scoped is not None:
+            github_token, git_name, git_email = scoped
 
     burst_id = burst_id or uuid.uuid4().hex[:12]
     # The node this burst descends from: the leaf of the task's session tree, or
