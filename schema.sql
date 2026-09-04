@@ -38,12 +38,11 @@
 -- Shape note: still converging on STORES.md's target. Landed: org tables and
 -- walls (A4), the session tree (A5), composite task identity (A6), the
 -- tasks→repositories foreign key with the registry that can create a row (C1),
--- the task lease columns with the claim statements that use them (E1).
--- Outstanding: the `org_state` STOP row at E3 (#34), `bursts.pinned` with the
--- golden-replay harness that needs it at G4 (#45), and `bursts.subscription_id`
--- with the pool at F (#38–41). All but `org_state` are additions to a *live*
--- table, which is why they wait for the stage that needs them rather than
--- landing speculatively here.
+-- the task lease columns with the claim statements that use them (E1), the
+-- `org_state` STOP row (E3). Outstanding: `bursts.pinned` with the golden-replay
+-- harness that needs it at G4 (#45), and `bursts.subscription_id` with the pool
+-- at F (#38–41). Both are additions to a *live* table, which is why they wait
+-- for the stage that needs them rather than landing speculatively here.
 
 -- repositories — one row per registered product; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
@@ -246,6 +245,21 @@ CREATE TABLE memory_entries (
     updated_at        timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT memory_entries_product_scope_check CHECK ((scope = 'product') = (repository IS NOT NULL)),
     CONSTRAINT memory_entries_role_scope_check CHECK ((scope = 'role') = (role IS NOT NULL))
+);
+
+-- org_state — exactly one row. STOP moves from the filesystem into the ledger
+-- (TO-BE §5, E3): non-null stop_reason means no ticks, no spawns, from any
+-- replica, and every live burst's heartbeat fences on it. The boolean key that
+-- must be true is what makes the row single; the shape CHECK makes a stop carry
+-- who and when or not exist. Seeded by migration (0016), never inserted or
+-- deleted again — platform_app holds SELECT and UPDATE on it and nothing else.
+CREATE TABLE org_state (
+    id          boolean PRIMARY KEY DEFAULT true CONSTRAINT org_state_singleton_check CHECK (id),
+    stop_reason text,
+    stopped_by  text,
+    stopped_at  timestamptz,
+    CONSTRAINT org_state_stop_shape_check
+        CHECK ((stop_reason IS NULL) = (stopped_by IS NULL) AND (stop_reason IS NULL) = (stopped_at IS NULL))
 );
 
 

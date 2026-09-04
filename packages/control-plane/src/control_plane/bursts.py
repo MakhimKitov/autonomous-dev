@@ -139,7 +139,10 @@ def execute_burst(
     ``extra_env`` injects sandbox credentials — the declared-ref intersection
     resolved at spawn (D4), tester bursts only (TESTER.md). ``heartbeat`` (E1)
     is the scheduler's lease renewal, asked by the runner while the container
-    runs; the hand-run verb holds no lease and passes none.
+    runs; the hand-run verb holds no lease and passes none. A burst the
+    heartbeat fenced — a False answer, on which the runner kills the container
+    — is recorded ``killed`` rather than ``failed`` (E3): the exit code alone
+    cannot tell a kill from a crash, so the answer is remembered here.
 
     Task writes here are the E1 shapes: the row is created if the ledger has
     never seen it (never overwritten if it has), and the dev burst's session id
@@ -238,9 +241,25 @@ def execute_burst(
             extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"
-        exit_code = runner.run(spec, log_path=log_path, heartbeat=heartbeat)
+        fenced = False
+
+        def beat() -> bool:
+            # the heartbeat's False is the runner's cue to kill the container; it
+            # is remembered here because the exit code that comes back is the
+            # container's (137, or whatever the kill left) and cannot say why
+            nonlocal fenced
+            alive = heartbeat()  # type: ignore[misc] — only bound when a heartbeat was given
+            fenced = fenced or not alive
+            return alive
+
+        exit_code = runner.run(spec, log_path=log_path, heartbeat=beat if heartbeat is not None else None)
         burst.exit_code = exit_code
-        burst.status = BurstStatus.SUCCEEDED if exit_code == 0 else BurstStatus.FAILED
+        if fenced:
+            # killed, not failed (E3): the lease was lost, the org stopped or the
+            # replica is shutting down — the work was stopped, it did not break
+            burst.status = BurstStatus.KILLED
+        else:
+            burst.status = BurstStatus.SUCCEEDED if exit_code == 0 else BurstStatus.FAILED
         burst.finished_at = utc_now()
         span.set_attribute("burst.exit_code", exit_code)
 

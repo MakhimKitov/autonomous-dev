@@ -61,7 +61,7 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | `working` | burst ok ∧ linked PR open | record `pr_number`; review round → re-request Copilot + owner | `awaiting_review` |
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
-| `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back | pre-burst state |
+| `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back (E3: killed via the heartbeat and the runner — STOP row, lost lease or shutdown; a crash is `killed` by the reconciler) | pre-burst state |
 | `awaiting_review` | unseen owner `changes_requested` **or machine findings**, rounds < max | rounds+1; queue review prompt | `claimed` (review) |
 | `awaiting_review` | unseen owner `changes_requested`, rounds = max | comment; clear `in-progress` | `blocked` |
 | `awaiting_review` | unseen machine findings, rounds = max | soft cap: advance cursor; comment | `awaiting_review` |
@@ -109,17 +109,19 @@ Notes:
 
 ```
 tick():
-    if stop_requested(): shutdown_clean()     # STOP flag or SIGTERM
+    if standing_down(): return                # the org's STOP row, or this process's shutdown flag (E3) — a no-op tick
     reconcile_running()                       # orphaned "running"/"working" (no live lease) → killed + rollback
     observe_github()                          # ready issues → claims; reviews/merges → events
     advance()                                 # apply the transition table (every write a CAS)
+    if standing_down(): return                # read again: a `stop` may have landed during the GitHub round trips
     task = pick_next()                        # admission: ceiling + claim, one ledger call — the task comes back leased
     if task: execute_burst(task)              # the proven M0/M1 choreography; the runner heartbeats the lease
 ```
 
-`control-plane run` loops the tick (`--interval`, default 60 s); `--once` runs a single
-tick — the unit CI and humans debug with. In the fleet (below) the first two lines are
-one product's **observation turn**, taken through a lease on its registry row (E2).
+`control-plane run` loops the tick (`--interval`, default 60 s) until the process is
+told to shut down; `--once` runs a single tick — the unit CI and humans debug with. In
+the fleet (below) the reconcile and observe lines are one product's **observation
+turn**, taken through a lease on its registry row (E2).
 
 ## Leases and compare-and-set (E1)
 
@@ -179,6 +181,41 @@ replica:
   takes over the moment the lane is free or the lease lapses; a row set wider
   runs that many bursts of the product at once, one per replica.
 
+**The kill switch is a row (E3)**, and the same rig proves it: `stop` issued from
+a third process kills a burst one replica holds, and `resume` picks the work back
+up with nothing restarted (`tests/test_replicas.py`, second test). The MVP's STOP
+was a file under the data dir plus a `docker kill` from the same shell — one host
+by construction. Now:
+
+- **`org_state`** is one row for the whole ledger (`stop_reason`, `stopped_by`,
+  `stopped_at`; STORES.md). `control-plane stop --reason …` sets it by
+  compare-and-set, with its audit row (`org.stop`, target `org`) and outbox
+  event (`org_stopped`) in the same statement; `control-plane resume` clears it
+  the same way. A second `stop` is refused and names the stop in force — which
+  is also how you ask whether the org is stopped. No file, no `docker kill`: the
+  verb writes the row and reports what is live and who holds it.
+- **Every loop reads it** at the top of every tick and again before every spawn
+  (`standing_down`) — the fleet and the single-product loop alike — so a stop
+  lands on every replica, on every host, within a tick. The loop keeps ticking
+  while stopped, reading the row and doing nothing, so `resume` needs no
+  restart anywhere; `run` no longer refuses to start under a STOP, because a
+  supervisor restarting replicas must not crash-loop them.
+- **Every live burst's heartbeat reads it**, on every beat — every
+  `HEARTBEAT_POLL_S`, not every third of the lease — and a stop makes the beat
+  answer False, on which **the runner holding the burst kills its container**,
+  on whatever host that is. That is the path from a verb on one machine to a
+  container on another: the row, the heartbeat, the runner. A burst the
+  heartbeat fenced is recorded `killed` (the exit code alone cannot tell a kill
+  from a crash — both leave 137 — so `execute_burst` remembers the answer), and
+  its task rolls back to `claimed` with one more attempt, the reason reading
+  "was killed", not "failed".
+- **SIGTERM/SIGINT are the same fence, locally.** `_serve` sets the engine's
+  `halt` flag — the process's own, shared by every scheduler a fleet builds —
+  the heartbeat fences the live burst on it, the tick completes, the loop exits.
+  Nothing is written to the ledger: a restarted replica is not a stopped org,
+  and the next `run` starts clean. (The MVP's SIGTERM left a STOP file behind
+  that blocked the next start until removed.)
+
 ## The fleet (C4)
 
 `run` without `--github` serves **every active registered product** through the same
@@ -229,11 +266,14 @@ Defaults, `.env`-overridable:
 
 ## Kill switch & crash recovery
 
-- **`control-plane stop`** — writes the `STOP` flag under the data dir and kills the live
-  burst container (`docker kill burst-<id>`, name from the ledger). The runner returns,
-  the burst is marked `killed`, the task rolls back to its pre-burst state, the loop exits
-  before the next spawn. SIGTERM does the same in-process. Removing `STOP` and re-running
-  resumes cleanly — every decision re-derives from GitHub + ledger.
+- **`control-plane stop --reason …`** — sets the org's STOP row (E3, above). Every
+  replica stands down at its next tick; every live burst is fenced by its own heartbeat
+  and killed by its own runner within a heartbeat, wherever it runs; the burst is
+  marked `killed`, the task rolls back to `claimed` with one more attempt. The loops
+  keep ticking, idle. **`control-plane resume`** clears the row and they pick up as they
+  are — every decision re-derives from GitHub + ledger. SIGTERM/SIGINT fence the live
+  burst the same way and exit the process, writing nothing. A container whose replica
+  is already dead is out of everyone's reach and ends on its own rails (budget, turns).
 - **Reconciliation, every tick** (in the fleet: every observation turn, E2) — a `running`
   burst or a `working` task that **no live
   lease covers** (E1: `claimed_until` lapsed or never set) is a replica that died
@@ -263,7 +303,8 @@ that read it: `create_task`, `transition_task`, `claim_next`, `renew_lease`, and
 `orphaned` filter on `tasks_by_status` / `running_bursts`. `upsert_task` — the whole-row
 write — is no longer something the scheduler calls. E2 added `claim_observation` on the
 registry row's lease pair (columns since 0002) and the `concurrency` count to `claim_next`
-— no new columns.
+— no new columns. E3 added the `org_state` row (migration 0016) and its three verbs:
+`org_stop` (the read every tick, spawn and heartbeat makes), `stop_org`, `resume_org`.
 
 ## The clone
 
@@ -283,12 +324,12 @@ written into config that gets mounted into the box.
 
 ```
 control_plane/
-  scheduler.py    # tick, state machine, rails; leases + CAS (E1); observation turn + concurrency (E2)
+  scheduler.py    # tick, state machine, rails; leases + CAS (E1); observation turn + concurrency (E2); STOP row + shutdown flag (E3)
   github_api.py   # the REST surface above
   prompts.py      # work/review prompt construction (provenance framing)
   bursts.py       # execute_burst() — extracted from cli._run_burst, shared by CLI + scheduler
   clone.py        # the platform-owned clone (above)
-  cli.py          # + `run [--once] [--interval]`, `stop`
+  cli.py          # + `run [--once] [--interval]`, `stop --reason`, `resume`
 ```
 
 ## Deliberately out

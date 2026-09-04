@@ -27,9 +27,11 @@ import psycopg
 import pytest
 from control_plane.migrate import migrate
 from control_plane.models import (
+    ORG_TARGET,
     BurstKind,
     BurstRecord,
     BurstStatus,
+    OrgStop,
     RepositoryRecord,
     Role,
     TaskRecord,
@@ -76,6 +78,8 @@ def ledger(request, tmp_path):
             # refuses to leave a referencing table out (CASCADE would take
             # whatever else appeared later, which is not the same promise).
             conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+            # the org row is a singleton, never truncated — a test's `stop` is lifted here (E3)
+            conn.execute("UPDATE org_state SET stop_reason = NULL, stopped_by = NULL, stopped_at = NULL")
             # roles cannot be truncated (frozen pipeline rows, D5) — reset the
             # open fields to their seed so a `role set` never outlives its test
             conn.execute(
@@ -417,6 +421,16 @@ def test_no_call_leaves_a_transaction_open(ledger):
         ledger.set_repository_state(REPOSITORY, "paused", actor="t", reason="again")
     idle()
     idle(ledger.update_role("dev", {"max_turns": 7}, actor="t"))
+    idle(ledger.org_stop())
+    idle(ledger.stop_org("t", "drill"))
+    with pytest.raises(RegistryError):
+        ledger.stop_org("t", "again")  # the refused stop too
+    idle()
+    idle(ledger.org_stop())
+    idle(ledger.resume_org("t"))
+    with pytest.raises(RegistryError):
+        ledger.resume_org("t")
+    idle()
     idle(ledger.tasks_by_status(TaskStatus.WORKING, orphaned=True))
     idle(ledger.running_bursts(orphaned=True))
     idle(ledger.bursts_started_since(LONG_AGO))
@@ -896,6 +910,52 @@ def test_set_changes_the_row_and_bumps_updated_at(ledger):
     assert after.updated_at > before.updated_at
     assert after.registered_at == before.registered_at
     assert after.state == before.state  # set never touches it
+
+
+# --- the org STOP (E3) ---
+#
+# One row for the whole ledger, seeded running (0016 on Postgres, _SCHEMA on
+# SQLite). Two verbs, both compare-and-set on `stop_reason`, both trailing an
+# audit row and an event in the same write — the registry's discipline on the org.
+
+
+def test_the_org_starts_running_and_a_stop_is_the_row(ledger):
+    assert ledger.org_stop() is None
+    ledger.stop_org("maksim", "incident #12")
+    stop = ledger.org_stop()
+    assert isinstance(stop, OrgStop)
+    assert (stop.reason, stop.stopped_by) == ("incident #12", "maksim")
+    assert datetime.fromisoformat(stop.stopped_at).tzinfo is not None  # an ISO stamp, like every other
+    ledger.resume_org("maksim", "all clear")
+    assert ledger.org_stop() is None
+
+
+def test_stop_and_resume_flip_exactly_once_and_leave_a_trail(ledger):
+    """A second `stop` is refused and names the stop in force — the answer to
+    "is it stopped?" — and a refusal writes nothing: no audit row, no event."""
+    ledger.stop_org("op", "incident")
+    with pytest.raises(RegistryError, match="already stopped — since .* by op: incident"):
+        ledger.stop_org("op", "again")
+    ledger.resume_org("op")
+    with pytest.raises(RegistryError, match="not stopped"):
+        ledger.resume_org("op")
+
+    trail = ledger.audit_trail(ORG_TARGET)
+    assert [(a.actor, a.action, a.target, a.reason) for a in trail] == [
+        ("op", "org.stop", ORG_TARGET, "incident"),
+        ("op", "org.resume", ORG_TARGET, ""),
+    ]
+    events = [e for e in ledger.events() if e.kind.startswith("org_")]
+    assert [e.kind for e in events] == ["org_stopped", "org_resumed"]
+    assert events[0].payload == {"audit_id": trail[0].id, "actor": "op", "reason": "incident"}
+    assert events[1].payload == {"audit_id": trail[1].id, "actor": "op"}
+
+
+def test_stopping_needs_a_reason(ledger):
+    with pytest.raises(RegistryError, match="reason"):
+        ledger.stop_org("op", "  ")
+    assert ledger.org_stop() is None
+    assert ledger.audit_trail(ORG_TARGET) == []
 
 
 # --- roles (D5) ---

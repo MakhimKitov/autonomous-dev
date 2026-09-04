@@ -50,7 +50,6 @@ class FakeScheduler:
         self.journal = journal
         self.claimable = False
         self.observe_error: Exception | None = None
-        self.current_burst_id = None
 
     def observation_turn(self):
         # the lease itself is the real scheduler's (test_scheduler.py, E2); the
@@ -221,10 +220,53 @@ def test_an_empty_registry_is_an_idle_tick(rig):
     assert journal == []
 
 
-def test_the_stop_flag_freezes_the_fleet(rig):
+# --- the org STOP (E3): a row, read at the top of the tick and before the spawn ---
+
+
+def test_the_org_stop_freezes_the_fleet(rig):
     fleet, stores, fakes, journal, _ = rig
     register(stores, A)
-    fleet.stop_path.touch()
+    stores.ledger.stop_org("op", "drill")
+    fleet.tick()
+    assert journal == []  # no build, no observe, no burst — the tick is a read of the row
+
+    stores.ledger.resume_org("op")
+    fleet.tick()  # and nothing needed restarting
+    assert journal == [("build", A), ("reconcile", A), ("observe", A)]
+
+
+def test_a_stop_landing_during_observation_spawns_nothing(rig):
+    """The second read, before the spawn: observation is GitHub round trips, and
+    a `stop` that lands in the middle of them must not be followed by a burst."""
+    fleet, stores, fakes, journal, _ = rig
+    register(stores, A)
+    fleet.tick()
+    fakes[A].claimable = True
+    original = fakes[A].observation_turn
+
+    def observe_then_stop():
+        original()
+        stores.ledger.stop_org("op", "incident")
+
+    fakes[A].observation_turn = observe_then_stop
+    journal.clear()
+    fleet.tick()
+    assert ("observe", A) in journal and bursts(journal) == []
+
+
+def test_the_process_shutdown_flag_freezes_the_fleet_and_reaches_every_scheduler(rig):
+    """SIGTERM sets the fleet's `halt` (cli._serve); the tick stands down on it
+    like on the row, and every scheduler the fleet builds carries the same flag,
+    so the live burst's heartbeat — whichever product owns it — fences on it."""
+    fleet, stores, fakes, journal, _ = rig
+    register(stores, A)
+    register(stores, B)
+    fleet.tick()
+    assert fakes[A].halt is fleet.halt and fakes[B].halt is fleet.halt
+    assert stores.ledger.org_stop() is None  # a shutdown is not an org STOP: nothing written
+
+    journal.clear()
+    fleet.halt.set()
     fleet.tick()
     assert journal == []
 

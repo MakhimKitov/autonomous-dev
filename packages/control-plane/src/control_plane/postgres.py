@@ -51,13 +51,17 @@ from psycopg.types.json import Json
 from control_plane.models import (
     BURST_FINALIZE_COLUMNS,
     EVENT_CHANNEL,
+    EVENT_ORG_RESUMED,
+    EVENT_ORG_STOPPED,
     EVENT_PRODUCT_REGISTERED,
     EVENT_PRODUCT_UPDATED,
     EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
+    ORG_TARGET,
     AuditRecord,
     BurstRecord,
     Event,
+    OrgStop,
     RepositoryRecord,
     RoleRecord,
     TaskRecord,
@@ -66,7 +70,14 @@ from control_plane.models import (
 )
 from control_plane.roles import RoleError
 from control_plane.roles import check_settable as check_role_settable
-from control_plane.store import RegistryError, _check_settable, _check_transition, _registry_transition
+from control_plane.store import (
+    RegistryError,
+    _already_stopped,
+    _check_settable,
+    _check_stop_reason,
+    _check_transition,
+    _registry_transition,
+)
 
 log = structlog.get_logger()
 
@@ -606,6 +617,64 @@ class PostgresLedger:
             {"replica": replica, "lease_s": float(lease_s), "repository": repository},
         )
         return cursor.rowcount == 1
+
+    # --- the org STOP (E3) ---
+    #
+    # One row for the whole ledger, read by every tick, spawn and heartbeat.
+    # The verbs are the registry's CTE shape: a compare-and-set on `stop_reason`
+    # that writes the audit row and the outbox event only if the row moved — a
+    # stop of a stopped org or a resume of a running one leaves no trail.
+
+    def org_stop(self) -> OrgStop | None:
+        row = self._execute("SELECT stop_reason, stopped_by, stopped_at FROM org_state").fetchone()
+        if row is None or row["stop_reason"] is None:
+            return None
+        return OrgStop(reason=row["stop_reason"], stopped_by=row["stopped_by"], stopped_at=_to_iso(row["stopped_at"]))
+
+    def stop_org(self, actor: str, reason: str) -> None:
+        _check_stop_reason(reason)
+        cursor = self._execute(
+            # stopped_at binds from Python like every other stamp — utc_now() is
+            # the one clock the ledger's history is ordered by
+            "WITH changed AS ("
+            "    UPDATE org_state SET stop_reason = %(reason)s, stopped_by = %(actor)s, stopped_at = %(at)s"
+            "    WHERE stop_reason IS NULL"
+            "    RETURNING id"
+            "), recorded AS ("
+            "    INSERT INTO audit (actor, action, target, reason)"
+            "    SELECT %(actor)s, 'org.stop', %(target)s, %(reason)s FROM changed"
+            "    RETURNING id"
+            "), announced AS ("
+            "    INSERT INTO events (kind, payload)"
+            "    SELECT %(kind)s, jsonb_build_object('audit_id', id, 'actor', %(actor)s, 'reason', %(reason)s)"
+            "    FROM recorded RETURNING id"
+            ") SELECT pg_notify(%(channel)s, id::text) FROM announced",
+            {"reason": reason, "actor": actor, "at": _to_datetime(utc_now()), "target": ORG_TARGET,
+             "kind": EVENT_ORG_STOPPED, "channel": EVENT_CHANNEL},
+        )
+        if not cursor.fetchall():  # the CAS refused — nothing was written; say what stands
+            raise RegistryError(_already_stopped(self.org_stop()))
+
+    def resume_org(self, actor: str, reason: str = "") -> None:
+        cursor = self._execute(
+            "WITH changed AS ("
+            "    UPDATE org_state SET stop_reason = NULL, stopped_by = NULL, stopped_at = NULL"
+            "    WHERE stop_reason IS NOT NULL"
+            "    RETURNING id"
+            "), recorded AS ("
+            "    INSERT INTO audit (actor, action, target, reason)"
+            "    SELECT %(actor)s, 'org.resume', %(target)s, %(reason)s FROM changed"
+            "    RETURNING id"
+            "), announced AS ("
+            "    INSERT INTO events (kind, payload)"
+            "    SELECT %(kind)s, jsonb_build_object('audit_id', id, 'actor', %(actor)s)"
+            "    FROM recorded RETURNING id"
+            ") SELECT pg_notify(%(channel)s, id::text) FROM announced",
+            {"actor": actor, "reason": reason, "target": ORG_TARGET, "kind": EVENT_ORG_RESUMED,
+             "channel": EVENT_CHANNEL},
+        )
+        if not cursor.fetchall():
+            raise RegistryError("the org is not stopped")
 
     # --- violations, and the outbox row each one announces ---
 

@@ -9,7 +9,7 @@ id by compare-and-set against the (status, holder) the task carried on entry.
 import json
 
 from control_plane.bursts import PlatformStores, execute_burst
-from control_plane.models import TaskRecord, TaskStatus
+from control_plane.models import BurstStatus, TaskRecord, TaskStatus
 from dev_agent.env import BURST_RESULT_FILENAME
 
 REPOSITORY = "owner/product"
@@ -82,3 +82,38 @@ def test_the_dev_session_lands_by_cas_and_a_moved_task_is_left_alone(tmp_path):
     execute_burst(stores, _task(status=TaskStatus.CLAIMED), repo, "judge", role="reviewer", fresh=True,
                   runner=ResultRunner("sess-reviewer"))
     assert stores.ledger.get_task(task.task_id).session_id is None
+
+
+# --- E3: a burst the heartbeat fenced is `killed`, not `failed` ---
+
+
+class FencedRunner(ResultRunner):
+    """Docker's seat when the heartbeat says no: the container is killed and
+    its exit code comes back — 137, the same number a crash would leave."""
+
+    def run(self, spec, log_path=None, heartbeat=None):
+        assert heartbeat() is False
+        return 137
+
+
+class CrashedRunner(ResultRunner):
+    def run(self, spec, log_path=None, heartbeat=None):
+        assert heartbeat() is True
+        return 137
+
+
+def test_a_fenced_burst_is_killed_and_a_crashed_one_failed(tmp_path):
+    """The exit code cannot tell a kill from a crash — both are 137 — so the
+    engine remembers the heartbeat's answer: fenced (the lease lost, the org
+    stopped, the replica shutting down) is `killed`; the same exit without a
+    fence is `failed`. Neither counts as success."""
+    stores, repo = _rig(tmp_path)
+    task = _task(status=TaskStatus.WORKING, claimed_by="r1")
+    stores.ledger.upsert_task(task)
+
+    fenced = execute_burst(stores, task, repo, "fix", runner=FencedRunner(), heartbeat=lambda: False)
+    assert (fenced.burst.status, fenced.exit_code, fenced.succeeded) == (BurstStatus.KILLED, 137, False)
+    assert stores.ledger.get_burst(fenced.burst.burst_id).status == BurstStatus.KILLED
+
+    crashed = execute_burst(stores, task, repo, "fix", runner=CrashedRunner(), heartbeat=lambda: True)
+    assert (crashed.burst.status, crashed.exit_code, crashed.succeeded) == (BurstStatus.FAILED, 137, False)

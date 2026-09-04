@@ -76,6 +76,7 @@ def db(walls_dsn):
     """
     with psycopg.connect(walls_dsn, autocommit=True) as conn:
         conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+        conn.execute("UPDATE org_state SET stop_reason = NULL, stopped_by = NULL, stopped_at = NULL")  # a previous test's stop (E3)
         conn.execute("DELETE FROM roles WHERE kind = 'custom'")  # a previous test's leftovers
         conn.execute(  # …and a previous test's `role set` — the open fields back to seed (D5)
             "UPDATE roles SET prompt_preamble = '', model = 'claude-sonnet-5', max_budget_usd = 2.00, "
@@ -477,11 +478,12 @@ def test_the_evidence_tables_are_append_only(db, table, verb):
         attempt(db, statement, role="platform_app")
 
 
-@pytest.mark.parametrize("table", ["tasks", "bursts", "repositories", "roles"])
+@pytest.mark.parametrize("table", ["tasks", "bursts", "repositories", "roles", "org_state"])
 def test_the_runtime_cannot_delete_its_own_state(db, table):
     """No DELETE grant anywhere: retention is platform_admin's, on a horizon —
     unregistering a product is not a verb (C1 granted INSERT/UPDATE only), and
-    neither is dropping a role (D5 granted UPDATE only)."""
+    neither is dropping a role (D5 granted UPDATE only) or the org row (E3
+    granted UPDATE only — the kill switch can be flipped, never removed)."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, f"DELETE FROM {table}", role="platform_app")
 
@@ -499,6 +501,10 @@ def test_the_runtime_cannot_delete_its_own_state(db, table):
             "a subscription",
             "INSERT INTO subscriptions (subscription_id, member, secret_ref, cap_tokens, "
             "expires_at, status) VALUES ('s1', 'm', 'env:TOKEN', 100, now(), 'active')",
+        ),
+        (
+            "a second org row",
+            "INSERT INTO org_state (id) VALUES (false)",
         ),
     ],
 )
@@ -656,6 +662,48 @@ def test_the_outbox_statement_runs_under_the_runtime_grants(db, walls_dsn):
         events = ledger.events()
         assert [e.kind for e in events] == ["violation_recorded"]
         assert events[0].payload["task_id"] == "t1"
+    finally:
+        ledger.close()
+
+
+# ------------------------------------------------------------ the org STOP row
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "error"),
+    [
+        ("a second row by default", "INSERT INTO org_state DEFAULT VALUES", psycopg.errors.UniqueViolation),
+        ("a second row by key", "INSERT INTO org_state (id) VALUES (false)", psycopg.errors.CheckViolation),
+        ("a stop without who", "UPDATE org_state SET stop_reason = 'x', stopped_at = now()", psycopg.errors.CheckViolation),
+        ("a stop without when", "UPDATE org_state SET stop_reason = 'x', stopped_by = 'op'", psycopg.errors.CheckViolation),
+        ("a who without a stop", "UPDATE org_state SET stopped_by = 'op'", psycopg.errors.CheckViolation),
+    ],
+)
+def test_the_org_row_is_single_and_a_stop_is_whole(db, label, sql, error):
+    """E3, structurally: the org has one STOP row — a boolean key that must be
+    true admits no second — and a stop carries who and when or is not a state
+    the row can hold. As platform_admin, so the grants are not what refuses."""
+    assert db.execute("SELECT count(*) FROM org_state").fetchone()[0] == 1  # seeded by 0016
+    with pytest.raises(error):
+        attempt(db, sql)
+
+
+def test_the_org_verbs_run_under_the_runtime_grants(db, walls_dsn):
+    """The E3 grant (0016): SELECT for every tick, spawn and heartbeat, UPDATE
+    for the two verbs — each a CTE writing org_state + audit + events through
+    pg_notify, checked per table and per returned column by running the real
+    methods as the real role."""
+    from control_plane.postgres import PostgresLedger
+
+    ledger = PostgresLedger(walls_dsn)
+    try:
+        ledger._conn.execute("SET ROLE platform_app")  # for the rest of the session
+        assert ledger.org_stop() is None
+        ledger.stop_org("op", "rehearsal")
+        assert ledger.org_stop().reason == "rehearsal"
+        ledger.resume_org("op")
+        assert ledger.org_stop() is None
+        assert [a.action for a in ledger.audit_trail("org")] == ["org.stop", "org.resume"]
     finally:
         ledger.close()
 

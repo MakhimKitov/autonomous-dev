@@ -17,6 +17,11 @@ and the product's declared concurrency is counted at admission, so N replicas
 run as many bursts of it as its row allows — one, by default, the rest standing
 by. `tests/test_replicas.py` runs two processes over one Postgres and kills one
 mid-burst; the survivor absorbs the work after the lease lapses, exactly once.
+The kill switch is a row too (E3): the org's STOP is `org_state`, read at the
+top of every tick, before every spawn and on every heartbeat, so a `stop` from
+any host stands the whole fleet down within a tick and fences every live burst
+within a heartbeat — the runner kills it, wherever it runs. A process's own
+shutdown (SIGTERM) is the same fence with a local flag, and no ledger write.
 
 A ``Scheduler`` is one product's engine — its ledger reads are scoped to its
 repository, so two products in one ledger cannot see each other's tasks. The
@@ -30,6 +35,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -74,8 +80,6 @@ from control_plane.testing import (
     resolve_citations,
     resolve_test_env,
 )
-
-STOP_FILENAME = "STOP"
 
 log = structlog.get_logger()
 
@@ -136,6 +140,24 @@ def default_replica() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def standing_down(ledger, halt: threading.Event) -> bool:
+    """Whether a loop acts at all, asked at the top of every tick and again
+    before every spawn (E3). Two reasons, one answer: this process is shutting
+    down — `halt`, set by `_serve` on SIGTERM/SIGINT, the process's own and
+    written nowhere — or the org is stopped, the `org_state` row, one for the
+    whole ledger. A `stop` from any replica on any host therefore lands on
+    every loop within a tick; the row has no expiry, so it holds until an
+    operator lifts it, and the loop keeps ticking meanwhile — reading the row,
+    doing nothing — so `resume` needs no restart anywhere."""
+    if halt.is_set():
+        return True
+    stop = ledger.org_stop()
+    if stop is None:
+        return False
+    log.info("org STOP in force — standing down", reason=stop.reason, by=stop.stopped_by, since=stop.stopped_at)
+    return True
+
+
 class Scheduler:
     def __init__(
         self,
@@ -155,6 +177,7 @@ class Scheduler:
         sync_clone: Callable[[], Path] | None = None,
         sync_clone_ref: Callable[[str], Path] | None = None,
         replica: str | None = None,
+        halt: threading.Event | None = None,
     ) -> None:
         self.stores = stores
         self.api = api
@@ -181,29 +204,28 @@ class Scheduler:
         self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
         self.sync_clone_ref = sync_clone_ref  # same, to a PR head sha (assess bursts)
         self.replica = replica or default_replica()  # the name on this replica's leases (E1)
-        self.current_burst_id: str | None = None  # for the kill switch mid-burst
-
-    # --- stop flag ---
-
-    @property
-    def stop_path(self) -> Path:
-        return self.stores.data_dir / STOP_FILENAME
-
-    def stop_requested(self) -> bool:
-        return self.stop_path.exists()
+        # the process's shutdown flag (E3): `_serve` sets it on SIGTERM/SIGINT,
+        # the tick reads it, the heartbeat fences on it. A fleet shares one across
+        # every scheduler it builds
+        self.halt = halt if halt is not None else threading.Event()
+        self.current_burst_id: str | None = None  # the one live burst, if any
 
     # --- the tick ---
+
+    def stopped(self) -> bool:
+        """`standing_down` for this loop: the process's flag or the org's row."""
+        return standing_down(self.stores.ledger, self.halt)
 
     def tick(self) -> None:
         """The single-product loop (`run --github`): one process, one product,
         possibly no registry row (dev mode) — so it observes every tick and
         leases nothing but its tasks. The fleet's tick is the multi-replica one:
         it takes `observation_turn` per product instead."""
-        if self.stop_requested():
+        if self.stopped():
             return
         self.reconcile_running()
         self.observe()
-        if self.stop_requested():  # `stop` may have landed during observation
+        if self.stopped():  # `stop` may have landed during observation
             return
         task = self.pick_next()
         if task is not None:
@@ -268,25 +290,40 @@ class Scheduler:
         while a third still runs, and the container is dead before anyone may
         legally start its successor. Waiting for the full span would fence
         *after* a peer could have spawned — the doubled burst the lease exists
-        to prevent."""
+        to prevent.
+
+        The same answer is the kill switch (E3): every beat — not every third
+        of the lease — reads the org's STOP row and the process's own shutdown
+        flag, and False on either makes the runner kill the container, wherever
+        it runs. That is how a `stop` issued on one host reaches a burst on
+        another: through the ledger, to the heartbeat, to the runner holding
+        it, within `HEARTBEAT_POLL_S`."""
         every = self.rails.lease_s / 3
         last = float("-inf")
         renewed_at = time.monotonic()  # the claim's own stamp, as of this replica's clock
 
         def beat() -> bool:
             nonlocal last, renewed_at
+            if self.halt.is_set():
+                log.warning("replica shutting down — fencing the burst", task=task.task_id)
+                return False
             now = time.monotonic()
-            if now - last < every:
-                return True
-            last = now
             try:
+                stop = self.stores.ledger.org_stop()
+                if stop is not None:
+                    log.warning("org STOP — fencing the burst", task=task.task_id,
+                                reason=stop.reason, by=stop.stopped_by)
+                    return False
+                if now - last < every:
+                    return True
+                last = now
                 renewed = self.stores.ledger.renew_lease(task.task_id, self.replica, self.rails.lease_s)
             except Exception as exc:  # noqa: BLE001 — any store error; see the docstring
                 if now - renewed_at >= self.rails.lease_s - every:
                     log.error("lease unrenewable for most of its span — fencing before a peer can absorb",
                               task=task.task_id, error=str(exc))
                     return False
-                log.warning("lease renewal failed — keeping the burst, retrying next beat",
+                log.warning("ledger unreachable from the heartbeat — keeping the burst, retrying next beat",
                             task=task.task_id, error=str(exc))
                 return True
             if renewed:
@@ -558,7 +595,7 @@ class Scheduler:
             self.current_burst_id = None
 
         if not outcome.succeeded:
-            self._register_failure(task, f"burst {outcome.burst.burst_id} failed (see its log)")
+            self._register_failure(task, self._burst_ended_badly(outcome))
             return
 
         queue_assess = False
@@ -591,6 +628,16 @@ class Scheduler:
         else:
             changes.update(status=TaskStatus.AWAITING_REVIEW, next_burst_kind=None)
         self._move(task, **changes, **self._released())
+
+    @staticmethod
+    def _burst_ended_badly(outcome, kind: str = WORK) -> str:
+        """The attempt's reason: a burst the runner fenced — the lease lost, the
+        org stopped, the replica shutting down — is `killed` (E3), and reads so
+        in the trail; anything else that came back non-zero failed on its own."""
+        what = "burst" if kind == WORK else f"{kind} burst"
+        if outcome.burst.status == BurstStatus.KILLED:
+            return f"{what} {outcome.burst.burst_id} was killed — fenced by its heartbeat (see its log)"
+        return f"{what} {outcome.burst.burst_id} failed (see its log)"
 
     def _run_assess_burst(self, task: TaskRecord) -> None:
         """A reviewer-role burst judging the open PR (REVIEWERS.md): fresh
@@ -633,7 +680,7 @@ class Scheduler:
             self.current_burst_id = None
 
         if not outcome.succeeded:
-            self._register_failure(task, f"assess burst {outcome.burst.burst_id} failed (see its log)")
+            self._register_failure(task, self._burst_ended_badly(outcome, ASSESS))
             return
         try:
             parsed = parse_findings((outcome.harvest.result or {}).get("final_text") or "")
@@ -741,7 +788,7 @@ class Scheduler:
             self.current_burst_id = None
 
         if not outcome.succeeded:
-            self._register_failure(task, f"test burst {outcome.burst.burst_id} failed (see its log)")
+            self._register_failure(task, self._burst_ended_badly(outcome, TEST))
             return
         try:
             report = parse_report((outcome.harvest.result or {}).get("final_text") or "")
@@ -968,6 +1015,11 @@ class Fleet:
 
     A product's trouble stays its own: a build or observe failure is logged
     and skips that product for the tick, never the fleet.
+
+    The org's STOP (E3) is read here at the top of the tick and again before
+    every spawn — `standing_down`, the same read the single-product loop makes
+    — and the fleet's one shutdown flag is handed to every scheduler it builds,
+    so a live burst's heartbeat fences on SIGTERM whichever product owns it.
     """
 
     def __init__(
@@ -977,46 +1029,39 @@ class Fleet:
     ) -> None:
         self.stores = stores
         self.build_scheduler = build_scheduler
-        self.current: Scheduler | None = None  # whoever holds the burst turn
+        self.halt = threading.Event()  # the process's shutdown flag (E3), shared with every scheduler built
 
-    @property
-    def current_burst_id(self) -> str | None:
-        """For the kill switch — the one live burst, whichever product owns it."""
-        return self.current.current_burst_id if self.current is not None else None
-
-    @property
-    def stop_path(self) -> Path:
-        return self.stores.data_dir / STOP_FILENAME
-
-    def stop_requested(self) -> bool:
-        return self.stop_path.exists()
+    def stopped(self) -> bool:
+        """`standing_down` for this loop: the process's flag or the org's row."""
+        return standing_down(self.stores.ledger, self.halt)
 
     def tick(self) -> None:
-        if self.stop_requested():
+        if self.stopped():
             return
         pairs: list[tuple[RepositoryRecord, Scheduler]] = []
         for row in self.stores.ledger.list_repositories():
             if row.state != ProductState.ACTIVE:
                 continue  # paused products are ignored entirely — no observe, no spawn
             try:
-                pairs.append((row, self.build_scheduler(row)))
+                sched = self.build_scheduler(row)
             except (ReviewPolicyError, E2EPolicyError, GitHubApiError, GitHubAuthError) as exc:
                 # `set` preflights on this machine (C2), so this is drift since
                 # registration (env changed, repo unreachable) — quarantine the
                 # product for the tick, not the fleet
                 log.error("product skipped this tick", repo=row.repository, error=str(exc))
+                continue
+            sched.halt = self.halt  # one flag per process, whoever's burst it is
+            pairs.append((row, sched))
         if not pairs:
             log.warning("no operable active products — idle tick")
             return
         for row, sched in pairs:
-            if self.stop_requested():  # `stop` may land during observation
-                return
             try:
                 sched.observation_turn()
             except (GitHubApiError, GitHubAuthError) as exc:
                 log.warning("observe failed — product skipped this tick", repo=row.repository, error=str(exc))
         for row, sched in sorted(pairs, key=lambda pair: _least_recently_served(pair[0])):
-            if self.stop_requested():
+            if self.stopped():  # `stop` may have landed during observation
                 return
             task = sched.pick_next()
             if task is None:
@@ -1024,9 +1069,5 @@ class Fleet:
             # the turn is the unit of fairness, stamped when taken — a spawn
             # that then fails still spent this product's place in line
             self.stores.ledger.touch_repository_burst(row.repository, utc_now())
-            self.current = sched
-            try:
-                sched.run_task_burst(task)
-            finally:
-                self.current = None
+            sched.run_task_burst(task)
             return  # one burst per tick — the loop stays serial
