@@ -26,7 +26,14 @@ from control_plane.github_api import GitHubApiError
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import RepositoryRecord
 from control_plane.review import ReviewPolicy, ReviewPolicyError
-from control_plane.testing import MANIFEST_FILENAME, ManifestError, TestManifest, parse_manifest
+from control_plane.testing import (
+    MANIFEST_FILENAME,
+    E2EPolicy,
+    E2EPolicyError,
+    ManifestError,
+    TestManifest,
+    parse_manifest,
+)
 
 # the commit vocabulary is shared platform-wide (GITHUB-INTERFACE.md); any of
 # these at the repo root counts as the product enforcing it
@@ -85,11 +92,16 @@ def run_preflight(
     except ReviewPolicyError as exc:
         raise PreflightError(str(exc)) from exc
 
-    # 3. `e2e on` must be executable end to end: the funnel has a trigger, the
+    # 3. `e2e on` must be executable end to end: the tester App exists (its
+    #    identity posts the reports — D3), the funnel has a trigger, the
     #    manifest parses, and every env name it declares maps to a ref that
     #    points at something. Values are never read here — D4 resolves them.
     manifest, problem = _manifest_state(repo)
     if row.e2e_enabled:
+        try:
+            E2EPolicy.from_product(row, env)
+        except E2EPolicyError as exc:
+            raise PreflightError(str(exc)) from exc
         providers = row.review_provider.split(",") if row.review_provider else []
         if not (row.review_enabled and "claude" in providers):
             raise PreflightError(

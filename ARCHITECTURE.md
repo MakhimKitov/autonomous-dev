@@ -272,6 +272,14 @@ the ephemeral container.
 > GitHub enforces the wall, not shell discipline. The control plane's cached
 > tier keeps the App's full grant; only the dev role carries a burst
 > credential at all (reviewer/tester bursts stay credential-free).
+>
+> **As built (D3):** the tester has its own provenance — test reports and the
+> relayed `auto` issues post under the `TESTER_`-prefixed App, and the tester's
+> `REQUEST_CHANGES` triggers dev rounds through the same machine-reviewer
+> registry. `e2e on` without that App refuses at startup and at registration
+> preflight (the honor-check lives in `E2EPolicy`, mirroring the claude
+> provider's). The MVP's deferral — the tester riding the reviewer App — ends
+> here; the tester burst itself still holds no GitHub credential.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

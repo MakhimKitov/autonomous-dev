@@ -31,6 +31,8 @@ def hermetic_platform_env(monkeypatch):
         "GITHUB_APP_INSTALLATION_ID",
         "REVIEWER_GITHUB_APP_ID",
         "REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH",
+        "TESTER_GITHUB_APP_ID",
+        "TESTER_GITHUB_APP_PRIVATE_KEY_PATH",
         "GITHUB_COPILOT_REVIEW_TOKEN",
         "SCHEDULER_POLL_INTERVAL_S",
     ):
@@ -254,3 +256,16 @@ def test_fleet_startup_refuses_an_unhonorable_declaration(tmp_path, monkeypatch,
     assert cli._run_scheduler(_run_args(tmp_path)) == 2
     err = capsys.readouterr().err
     assert A in err and "reviewer App is not configured" in err
+
+
+def test_fleet_startup_refuses_e2e_without_the_tester_app(tmp_path, monkeypatch, capsys):
+    # D3: the report's identity is part of e2e's honorability — same shape as
+    # the claude/reviewer-App refusal above
+    _declare_app(monkeypatch, tmp_path)
+    monkeypatch.setenv("REVIEWER_GITHUB_APP_ID", "2")
+    monkeypatch.setenv("REVIEWER_GITHUB_APP_PRIVATE_KEY_PATH", str(tmp_path / "app.pem"))
+    stores = PlatformStores.open(tmp_path / "data")
+    register(stores, A, review_enabled=True, review_provider="claude", e2e_enabled=True)
+    assert cli._run_scheduler(_run_args(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert A in err and "tester App is not configured" in err
