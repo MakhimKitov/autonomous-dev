@@ -326,6 +326,20 @@ the ephemeral container.
 > And a holder that cannot renew its lease for two thirds of its span fences
 > its own burst — the row is its only proof of life, and it stops before a peer
 > may lawfully start the successor.
+>
+> **As built (E3):** the kill switch is a ledger row. `org_state` — one row,
+> `stop_reason`/`stopped_by`/`stopped_at`, seeded by migration 0016 — replaces
+> the MVP's STOP file and local `docker kill`. `control-plane stop --reason …`
+> sets it by compare-and-set with its audit row and `org_stopped` event in one
+> statement; `resume` clears it. Every loop reads the row at the top of every
+> tick and before every spawn and keeps ticking while stopped, so a `resume`
+> restarts nothing; every live burst's heartbeat reads it on every beat and the
+> runner holding the burst kills its container — a `stop` on one host reaches a
+> burst on another through the row, the heartbeat and the runner. Fenced
+> bursts are `killed`, not `failed`; SIGTERM is the same fence with a
+> process-local flag and no ledger write. `tests/test_replicas.py` runs the
+> done-when: a stop from a third process kills a burst one replica holds, and
+> the work completes after `resume`.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

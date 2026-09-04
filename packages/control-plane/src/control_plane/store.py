@@ -39,16 +39,20 @@ import structlog
 
 from control_plane.models import (
     BURST_FINALIZE_COLUMNS,
+    EVENT_ORG_RESUMED,
+    EVENT_ORG_STOPPED,
     EVENT_PRODUCT_PAUSED,
     EVENT_PRODUCT_REGISTERED,
     EVENT_PRODUCT_RESUMED,
     EVENT_PRODUCT_UPDATED,
     EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
+    ORG_TARGET,
     TASK_TRANSITION_COLUMNS,
     AuditRecord,
     BurstRecord,
     Event,
+    OrgStop,
     ProductState,
     RepositoryRecord,
     RoleRecord,
@@ -178,6 +182,23 @@ def _registry_transition(state: str, reason: str) -> tuple[str, str]:
     raise RegistryError(f"a product is active or paused — {state!r} is neither")
 
 
+def _check_stop_reason(reason: str) -> None:
+    """The org STOP's one rule (E3), in the one place both backends pass
+    through: a stop names why. The reason is what every replica logs while it
+    stands down and what `resume` is read against later — an empty one would
+    leave the whole fleet idle with nothing to say for it."""
+    if not reason.strip():
+        raise RegistryError("stopping the org requires a reason — it lands in the audit row and in every replica's log")
+
+
+def _already_stopped(stop: OrgStop | None) -> str:
+    """The refusal a second `stop` earns — and the answer to "is it stopped?",
+    since the message names the stop in force."""
+    if stop is None:  # the CAS refused, yet the row reads running: a `resume` raced in between
+        return "the org was stopped when this call arrived and has been resumed since — retry"
+    return f"the org is already stopped — since {stop.stopped_at} by {stop.stopped_by}: {stop.reason}"
+
+
 def _check_settable(changes: dict) -> None:
     if not changes:
         raise RegistryError("nothing to set — name at least one column to change")
@@ -275,6 +296,9 @@ class Ledger(Protocol):
     def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def touch_repository_burst(self, repository: str, at: str) -> None: ...
     def claim_observation(self, repository: str, replica: str, lease_s: float) -> bool: ...
+    def org_stop(self) -> OrgStop | None: ...
+    def stop_org(self, actor: str, reason: str) -> None: ...
+    def resume_org(self, actor: str, reason: str = "") -> None: ...
     def audit_trail(self, target: str | None = None) -> list[AuditRecord]: ...
     def list_roles(self) -> list[RoleRecord]: ...
     def get_role(self, role: str) -> RoleRecord | None: ...
@@ -424,6 +448,17 @@ CREATE TABLE IF NOT EXISTS audit (
     reason TEXT NOT NULL DEFAULT '',
     at TEXT NOT NULL
 );
+-- org_state — exactly one row, the SQLite twin of migration 0016 (E3): the key
+-- must be 1, so a second row is a constraint violation; the stop columns are
+-- all-or-nothing. Seeded running on open (OR IGNORE keeps a stop in force).
+CREATE TABLE IF NOT EXISTS org_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    stop_reason TEXT,
+    stopped_by TEXT,
+    stopped_at TEXT,
+    CHECK ((stop_reason IS NULL) = (stopped_by IS NULL) AND (stop_reason IS NULL) = (stopped_at IS NULL))
+);
+INSERT OR IGNORE INTO org_state (id) VALUES (1);
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     repository TEXT NOT NULL,
@@ -559,15 +594,18 @@ class SqliteLedger:
     # without its audit row, no audit row without its announcement.
 
     def _audit_and_announce(self, actor: str, action: str, target: str, reason: str,
-                            kind: str, extra: dict | None = None, subject: str = "repository") -> None:
+                            kind: str, extra: dict | None = None, subject: str | None = "repository") -> None:
         """The two rows every registry mutation trails. Caller commits.
         ``subject`` is the payload key the target rides under — a product's
-        events say ``repository``, a role's say ``role`` (D5)."""
+        events say ``repository``, a role's say ``role`` (D5); None for the org
+        verbs (E3), whose target is the org itself and rides under no key."""
         cursor = self._conn.execute(
             "INSERT INTO audit (actor, action, target, reason, at) VALUES (?, ?, ?, ?, ?)",
             (actor, action, target, reason, utc_now()),
         )
-        payload = {"audit_id": cursor.lastrowid, subject: target, "actor": actor, **(extra or {})}
+        payload = {"audit_id": cursor.lastrowid, "actor": actor, **(extra or {})}
+        if subject is not None:
+            payload[subject] = target
         self._conn.execute(
             "INSERT INTO events (kind, payload, created_at) VALUES (?, ?, ?)",
             (kind, json.dumps(payload), utc_now()),
@@ -957,6 +995,45 @@ class SqliteLedger:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    # --- the org STOP (E3) ---
+    #
+    # One row for the whole ledger. Read by every tick, every spawn and every
+    # heartbeat; written by the two verbs, each a compare-and-set on
+    # `stop_reason` with its audit row and event in the same transaction — the
+    # registry's discipline, on the org.
+
+    def org_stop(self) -> OrgStop | None:
+        row = self._conn.execute(
+            "SELECT stop_reason, stopped_by, stopped_at FROM org_state"
+        ).fetchone()
+        if row is None or row["stop_reason"] is None:
+            return None
+        return OrgStop(reason=row["stop_reason"], stopped_by=row["stopped_by"], stopped_at=row["stopped_at"])
+
+    def stop_org(self, actor: str, reason: str) -> None:
+        _check_stop_reason(reason)
+        cursor = self._conn.execute(
+            "UPDATE org_state SET stop_reason = ?, stopped_by = ?, stopped_at = ? WHERE stop_reason IS NULL",
+            (reason, actor, utc_now()),
+        )
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise RegistryError(_already_stopped(self.org_stop()))
+        self._audit_and_announce(actor, "org.stop", ORG_TARGET, reason, EVENT_ORG_STOPPED,
+                                 extra={"reason": reason}, subject=None)
+        self._conn.commit()
+
+    def resume_org(self, actor: str, reason: str = "") -> None:
+        cursor = self._conn.execute(
+            "UPDATE org_state SET stop_reason = NULL, stopped_by = NULL, stopped_at = NULL "
+            "WHERE stop_reason IS NOT NULL"
+        )
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise RegistryError("the org is not stopped")
+        self._audit_and_announce(actor, "org.resume", ORG_TARGET, reason, EVENT_ORG_RESUMED, subject=None)
+        self._conn.commit()
 
     def record_violation(self, violation: Violation) -> None:
         """Record the violation and announce it — both rows, or neither.

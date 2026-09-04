@@ -3,7 +3,8 @@
 ``burst`` — the M0/M1 manual driver: one burst, by hand. ``run`` — the M2
 scheduler: the same choreography, driven unattended by the reconciler loop
 (SCHEDULER.md); without ``--github`` it serves every active product in the
-registry through one serial loop (C4). ``stop`` — the kill switch. ``github-check`` — App preflight.
+registry through one serial loop (C4). ``stop`` / ``resume`` — the org's kill
+switch, a ledger row every replica reads (E3). ``github-check`` — App preflight.
 ``migrate`` — the Postgres ledger's schema, from numbered SQL (STORES.md).
 ``backfill`` — the one-shot that carries MVP history into the service stores (A6).
 ``product`` — the registry verbs (C1) behind registration preflight, with
@@ -18,9 +19,7 @@ import getpass
 import os
 import re
 import signal
-import subprocess
 import sys
-import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -44,7 +43,14 @@ from control_plane.github_auth import (
     mint_installation_token,
 )
 from control_plane.migrate import MigrationError, migrate, status
-from control_plane.models import ProductState, RepositoryRecord, RoleRecord, TaskRecord, task_id_for
+from control_plane.models import (
+    ORG_TARGET,
+    ProductState,
+    RepositoryRecord,
+    RoleRecord,
+    TaskRecord,
+    task_id_for,
+)
 from control_plane.preflight import PreflightError, run_preflight
 from control_plane.roles import (
     PIPELINE_ROLES,
@@ -59,12 +65,11 @@ from control_plane.review import (
     ReviewPolicy,
     ReviewPolicyError,
 )
-from control_plane.runner import DEFAULT_IMAGE
-from control_plane.scheduler import STOP_FILENAME, Fleet, Rails, Scheduler
+from control_plane.runner import DEFAULT_IMAGE, HEARTBEAT_POLL_S
+from control_plane.scheduler import Fleet, Rails, Scheduler
 from control_plane.secrets import SecretError, parse_ref
 from control_plane.store import (
     LEDGER_DSN_ENV,
-    LEDGER_FILENAME,
     ArchiveError,
     LocalSessionArchive,
     RegistryError,
@@ -122,8 +127,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--interval", type=int, default=None, help="seconds between ticks (default: rails)")
     run.add_argument("--once", action="store_true", help="one tick, then exit")
 
-    stop = sub.add_parser("stop", help="kill switch: write the STOP flag and kill the live burst")
+    stop = sub.add_parser(
+        "stop",
+        help="the org's kill switch: every replica stands down and every live burst is killed, "
+        "wherever it runs; holds until `resume`",
+    )
     stop.add_argument("--data-dir", type=Path, default=Path("data"))
+    stop.add_argument("--reason", required=True, help="why — it lands in the audit row and in every replica's log")
+    stop.add_argument("--actor", default=None, help="who is acting — lands in the audit row (default: the OS login)")
+
+    resume = sub.add_parser("resume", help="lift the org's STOP: the replicas pick up on their next tick, no restart")
+    resume.add_argument("--data-dir", type=Path, default=Path("data"))
+    resume.add_argument("--reason", default="", help="lands in the audit row")
+    resume.add_argument("--actor", default=None, help="who is acting — lands in the audit row (default: the OS login)")
 
     migrate_cmd = sub.add_parser("migrate", help="apply pending schema migrations to the Postgres ledger")
     migrate_cmd.add_argument("--dsn", default=None, help=f"Postgres DSN (default: ${LEDGER_DSN_ENV})")
@@ -789,18 +805,20 @@ def _scheduler_policies(
 
 
 def _serve(engine, interval: int, once: bool) -> int:
-    """The loop both modes share: tick, honor STOP, kill the live burst on a
-    signal. ``engine`` is a Scheduler (one product) or a Fleet (C4)."""
+    """The loop both modes share: tick, sleep, repeat — until this process is
+    told to shut down. ``engine`` is a Scheduler (one product) or a Fleet (C4).
+
+    SIGTERM/SIGINT set the engine's ``halt`` (E3): the live burst's heartbeat
+    reads it and the runner kills the container, the tick completes, the loop
+    exits. That flag is this process's own — a restart is not an org STOP, so
+    nothing is written to the ledger. The org's STOP is the engine's business:
+    a stopped org makes every tick a no-op and the loop keeps ticking, so
+    `resume` takes effect here without anyone restarting anything.
+    """
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
-        engine.stop_path.touch()
-        if engine.current_burst_id:
-            subprocess.run(
-                ["docker", "kill", f"burst-{engine.current_burst_id}"],
-                check=False,
-                capture_output=True,
-            )
-        log.info("stop requested — exiting after this tick")
+        engine.halt.set()
+        log.info("shutdown requested — the live burst is fenced by its heartbeat; exiting after this tick")
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -810,13 +828,17 @@ def _serve(engine, interval: int, once: bool) -> int:
             engine.tick()
         except (GitHubApiError, GitHubAuthError) as exc:
             log.warning("github error — retrying next tick", error=str(exc))
-        if engine.stop_requested():
-            log.info("STOP flag present — exiting")
+        if engine.halt.is_set():
+            log.info("shutting down")
             break
         if once:
             break
-        time.sleep(interval)
-    trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]
+        if engine.halt.wait(interval):  # the sleep, cut short by a shutdown
+            log.info("shutting down")
+            break
+    provider = trace.get_tracer_provider()
+    if hasattr(provider, "shutdown"):  # a proxy provider (telemetry never initialized) has none
+        provider.shutdown()
     return 0
 
 
@@ -980,9 +1002,9 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         return 2
     init_telemetry()
     stores = PlatformStores.open(args.data_dir)
-    if (stores.data_dir / STOP_FILENAME).exists():
-        print(f"error: STOP flag present ({stores.data_dir / STOP_FILENAME}) — remove it to start", file=sys.stderr)
-        return 2
+    # a stopped org is not a refusal to start (E3): the loop comes up and stands
+    # down every tick until `resume` — a supervisor restarting replicas under a
+    # STOP must not crash-loop them. The tick logs the stop in force.
     refusal = _roles_executable(stores)  # D5: the rows the engine spawns from
     if refusal:
         print(f"error: {refusal}", file=sys.stderr)
@@ -1098,20 +1120,50 @@ def _run_scheduler(args: argparse.Namespace) -> int:
 
 
 def _stop(args: argparse.Namespace) -> int:
-    data_dir = args.data_dir.expanduser().resolve()
-    flag = data_dir / STOP_FILENAME
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.touch()
-    log.info("stop flag written", flag=str(flag))
-    # Ask whichever ledger this deployment has. Guarded so `stop` before any run
-    # doesn't create an empty SQLite file just to find nothing in it.
-    dsn_configured = bool(os.environ.get(LEDGER_DSN_ENV, "").strip())
-    if dsn_configured or (data_dir / LEDGER_FILENAME).is_file():
-        for burst in open_ledger(data_dir).running_bursts():
-            subprocess.run(["docker", "kill", f"burst-{burst.burst_id}"], check=False, capture_output=True)
-            log.info("live burst killed", container=f"burst-{burst.burst_id}")
-    log.info("the scheduler exits before its next spawn — remove the flag to allow `run` again")
-    return 0
+    """The org's kill switch (E3): one audited row in the ledger, and nothing
+    else — no file, no `docker kill` from this shell. Every replica reads the row
+    at the top of its tick and before its spawns, and every live burst's
+    heartbeat reads it on the clock; the runner holding the burst kills the
+    container, on whatever host that is. So a `stop` issued here reaches a
+    burst spawned elsewhere, which a local `docker kill` never could."""
+    actor = args.actor or getpass.getuser()
+    ledger = open_ledger(args.data_dir.expanduser().resolve())
+    try:
+        try:
+            ledger.stop_org(actor, args.reason)
+        except RegistryError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"org stopped: {args.reason}")
+        live = ledger.running_bursts()
+        if live:
+            holders = []
+            for burst in live:
+                task = ledger.get_task(burst.task_id)
+                holders.append(f"{burst.burst_id} ({burst.task_id}, held by {task.claimed_by if task else '?'})")
+            print(f"{len(live)} live burst(s) — fenced by their replicas within {HEARTBEAT_POLL_S:g} s: " + ", ".join(holders))
+        print("every replica stands down at its next tick and keeps ticking — `control-plane resume` lifts it")
+        return 0
+    finally:
+        ledger.close()
+
+
+def _resume(args: argparse.Namespace) -> int:
+    actor = args.actor or getpass.getuser()
+    ledger = open_ledger(args.data_dir.expanduser().resolve())
+    try:
+        try:
+            ledger.resume_org(actor, args.reason)
+        except RegistryError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print("org resumed — the replicas pick up on their next tick")
+        for entry in ledger.audit_trail(ORG_TARGET)[-2:]:
+            reason = f" — {entry.reason}" if entry.reason else ""
+            print(f"  #{entry.id} {entry.at} {entry.actor} {entry.action}{reason}")
+        return 0
+    finally:
+        ledger.close()
 
 
 def _migrate(args: argparse.Namespace) -> int:
@@ -1154,6 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_scheduler(args)
     if args.command == "stop":
         return _stop(args)
+    if args.command == "resume":
+        return _resume(args)
     if args.command == "migrate":
         return _migrate(args)
     if args.command == "backfill":

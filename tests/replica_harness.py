@@ -12,7 +12,9 @@ It runs as a process, not a thread, so that a SIGKILL from the test is exactly
 what a crashed replica is: a connection that vanishes mid-statement, a lease
 nobody renews, a burst row left `running`. What each replica did is written to
 an events file — one JSON object per line, wall-clock stamped — which is what
-the test reads to prove nothing ran twice.
+the test reads to prove nothing ran twice. Replicas share the ledger and the
+session archive (`--archive-dir`), as a deployment's do; everything else under
+`--data-dir` is the process's own.
 
 Not collected by pytest (no `test_` prefix); run with the interpreter of the
 environment under test:
@@ -23,9 +25,11 @@ environment under test:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import functools
 import json
 import os
+import signal
 import sys
 import time
 from dataclasses import replace
@@ -129,7 +133,9 @@ class SleepingRunner:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dsn", required=True)
-    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--data-dir", type=Path, required=True, help="this replica's own: volumes, logs, clone")
+    parser.add_argument("--archive-dir", type=Path, default=None,
+                        help="the session archive, shared by every replica like the ledger is (default: the data dir)")
     parser.add_argument("--events", type=Path, required=True)
     parser.add_argument("--issues", type=int, default=4)
     parser.add_argument("--burst-s", type=float, default=1.5)
@@ -138,14 +144,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-interval-s", type=int, default=1, help="the observation lease's span")
     args = parser.parse_args(argv)
 
+    # a replica that goes quiet can be asked where it is: `kill -USR1 <pid>`
+    # dumps every thread's stack to stderr (the test keeps stderr per replica)
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     for name in ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "OTEL_EXPORTER_OTLP_ENDPOINT"):
         os.environ.pop(name, None)  # a dev-mode burst: token-less, like the fakes
     init_telemetry()
     args.data_dir.mkdir(parents=True, exist_ok=True)
     events = Events(args.events)
+    # the two stores the replicas share are the ledger and the archive — a task's
+    # next burst resumes from the snapshot its last one left, whichever replica
+    # ran it; the data dir (volumes, logs) is this process's own
     stores = PlatformStores(
         data_dir=args.data_dir,
-        archive=LocalSessionArchive(args.data_dir),
+        archive=LocalSessionArchive(args.archive_dir or args.data_dir),
         ledger=PostgresLedger(args.dsn),
     )
     runner = SleepingRunner(args.burst_s, events)

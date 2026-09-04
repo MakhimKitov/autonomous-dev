@@ -365,10 +365,10 @@ def test_agent_blocked_label_parks_the_task(rig):
     assert stores.ledger.get_task(tid(1)).status == TaskStatus.BLOCKED
 
 
-def test_stop_flag_freezes_the_tick(rig):
+def test_the_org_stop_freezes_the_tick(rig):
     scheduler, api, stores, spawned, _ = rig
     api.ready_issues = [_issue()]
-    scheduler.stop_path.touch()
+    stores.ledger.stop_org("op", "drill")
     scheduler.tick()
     assert stores.ledger.get_task(tid(1)) is None  # nothing claimed
     assert not spawned and not api.label_ops
@@ -1281,6 +1281,82 @@ def test_the_single_product_tick_observes_without_a_row(rig):
     api.prs[2] = _pr(state="closed", merged=True)
     scheduler.tick()  # the very next tick observes again — no interval to wait out
     assert stores.ledger.get_task(tid(1)).status == TaskStatus.DONE
+
+
+# --- E3: the kill switch is a row — read per tick, per spawn, per heartbeat ---
+
+
+def test_a_stop_landing_during_observation_spawns_nothing(rig):
+    """Observation is GitHub round trips; the row is read again after them, so a
+    `stop` that lands mid-tick is followed by no burst. The observe itself still
+    completes — state advanced, nothing spawned."""
+    scheduler, api, stores, spawned, _ = rig
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    original = api.list_ready_issues
+
+    def ready_then_stop():
+        stores.ledger.stop_org("op", "incident")
+        return original()
+
+    api.list_ready_issues = ready_then_stop
+    scheduler.tick()
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.CLAIMED  # observed
+    assert spawned == []  # not spawned
+
+    stores.ledger.resume_org("op")
+    api.list_ready_issues = original
+    api.ready_issues = []
+    api.open_prs = [_pr()]
+    api.prs[2] = _pr()
+    scheduler.tick()  # the same process, the next tick — no restart
+    assert len(spawned) == 1
+
+
+def test_the_heartbeat_fences_the_burst_on_the_org_stop(rig):
+    """How a `stop` reaches a burst on another host: the row, the heartbeat, the
+    runner. Every beat reads the row — not every third of the lease — so the
+    container is dead within HEARTBEAT_POLL_S of the verb, wherever it runs."""
+    scheduler, _, stores, _, _ = rig
+    scheduler.rails.lease_s = 90  # renewals are throttled; the stop read is not
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    task = scheduler.pick_next()
+    beat = scheduler._heartbeat(task)
+    assert beat() is True
+    assert beat() is True  # inside the renewal throttle: still asked, still alive
+    stores.ledger.stop_org("op", "incident")
+    assert beat() is False  # the very next beat — the runner kills the container
+    assert stores.ledger.get_task(tid(1)).claimed_by == scheduler.replica  # the lease is ours to release, later
+
+
+def test_the_heartbeat_fences_the_burst_on_the_process_shutdown(rig):
+    """SIGTERM sets `halt` (cli._serve): the same fence, no ledger write — a
+    restarted replica is not a stopped org."""
+    scheduler, _, stores, _, _ = rig
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    beat = scheduler._heartbeat(scheduler.pick_next())
+    assert beat() is True
+    scheduler.halt.set()
+    assert beat() is False
+    assert stores.ledger.org_stop() is None
+    assert scheduler.stopped() is True  # and the tick stands down on the same flag
+
+
+def test_a_fenced_burst_is_a_killed_attempt(rig):
+    """The kill switch's transition (SCHEDULER.md): burst `killed`, the task
+    rolled back to `claimed` with one more attempt — the reason says killed,
+    not failed, so the trail reads as what happened."""
+    scheduler, api, stores, spawned, fake_execute = rig
+    scheduler.rails.max_attempts = 1  # so the reason surfaces as the parking comment
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    killed = _outcome(exit_code=137)
+    killed.burst.status = BurstStatus.KILLED
+    fake_execute.next_outcome = killed
+    scheduler.tick()
+    task = stores.ledger.get_task(tid(1))
+    assert (task.status, task.attempts) == (TaskStatus.BLOCKED, 1)
+    assert any("was killed" in body and "fenced" in body for _, body in api.comments)
 
 
 # --- C4: a product's scheduler sees only its own rows ---

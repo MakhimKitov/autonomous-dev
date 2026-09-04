@@ -141,10 +141,11 @@ and `schema.sql` as what exists: Stage A closed most of the gap (org tables and
 walls at A4, per-burst snapshots at A5, derived task identity at A6), C1 added
 `tasks.repository`'s foreign key along with the registry verbs that can create a
 `repositories` row, E1 the task claim columns with the statements that use them
-(0015), and what remains arrives with the stage that needs it — `org_state` at
-E3, `bursts.subscription_id` with the pool at F, `bursts.pinned` with the harness
-that pins fixtures at G4. `schema.sql`'s header carries that list, and it is the
-shorter document to keep honest.
+(0015), E3 the `org_state` STOP row with the two verbs over it (0016), and what
+remains arrives with the stage that needs it — `bursts.subscription_id` with the
+pool at F, `bursts.pinned` with the harness that pins fixtures at G4.
+`schema.sql`'s header carries that list, and it is the shorter document to keep
+honest.
 
 Four things here are outside what a schema diff can see, all measured rather than
 assumed: the `roles_pipeline_guard` trigger, every grant, the seeded role rows,
@@ -319,12 +320,15 @@ CREATE TABLE memory_entries (
 );
 
 -- org_state — exactly one row. STOP moves from the filesystem into the ledger
--- (TO-BE §5): non-null stop_reason means no ticks, no spawns, from any replica.
+-- (TO-BE §5, E3): non-null stop_reason means no ticks, no spawns, from any
+-- replica, and every live burst's heartbeat fences on it. Seeded running by
+-- migration; the runtime holds SELECT and UPDATE on it and nothing else.
 CREATE TABLE org_state (
     id          boolean PRIMARY KEY DEFAULT true CHECK (id),
     stop_reason text,
     stopped_by  text,
-    stopped_at  timestamptz
+    stopped_at  timestamptz,
+    CHECK ((stop_reason IS NULL) = (stopped_by IS NULL) AND (stop_reason IS NULL) = (stopped_at IS NULL))
 );
 INSERT INTO org_state DEFAULT VALUES;
 ```
@@ -338,6 +342,7 @@ INSERT INTO org_state DEFAULT VALUES;
 | One task per issue | `UNIQUE (repository, issue_number)`; the derived `task_id` makes collisions unrepresentable |
 | A task names a registered product | `tasks_repository_fk` (C1): the scheduler cannot invent tenants, and neither can a bug — `product register` is the only way a repository enters the ledger |
 | `violations` / `audit` / `events` are append-only | grants: `platform_app` gets `SELECT, INSERT` only — append-only is a grant, not a promise |
+| The org has one STOP row, and a stop is whole | `org_state` (E3): a boolean key that must be true — a second row is a duplicate key or a CHECK violation — and `org_state_stop_shape_check`, so a stop carries who and when or is not a state the row can hold. `platform_app` holds `SELECT, UPDATE` on it: the kill switch can be flipped by any replica's verb and removed by none |
 | Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to the wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows, plus renames of `role` itself and deletion — a row that can be dropped and re-inserted is not frozen. CHECKs pin the `identity`/`sink` enumerations for every row, and `platform_app` holds `UPDATE` on `roles` and nothing else (D5's `role set`, 0014) — it can move the open fields and can neither open a trust slot (no `INSERT`) nor drop one (no `DELETE`) |
 | No secret values at rest | nothing to enforce — no column exists for a value; refs only |
 
@@ -434,8 +439,11 @@ instruments (`TO-BE.md` §12).
   `product_paused`, `product_resumed`, `product_updated`, each written in the
   same statement as the row change *and* its audit row — three tables, one
   write — with the payload naming its audit row (`audit_id`) so a consumer can
-  read the who/why. `capacity_exhausted`, `subscription_expiring` and
-  `task_blocked` arrive with the stages that raise them.
+  read the who/why. `role_updated` followed at D5 and the org's two at E3 —
+  `org_stopped` (payload carries the reason too: it is a page) and
+  `org_resumed` — in the same shape. `capacity_exhausted`,
+  `subscription_expiring` and `task_blocked` arrive with the stages that raise
+  them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
   — at-least-once, ordered, replayable; each consumer keeps its own cursor, and
   the `Ledger` protocol's `events(after_id)` is that read. No `LISTEN/NOTIFY`
@@ -526,7 +534,7 @@ What Stage A moves, and where:
 | `_ensure_column` ad-hoc migration | numbered SQL + `schema_migrations` + `migrate` verb. The single-node ledger self-bootstraps a *fresh* file and no longer repairs an old one: A6 retires it as an origin, so it refuses a pre-A6 file and names `control-plane backfill`. What survived is `_ADDITIVE_COLUMNS`: a column with a default, added to a file whose ids are already current, is DDL and not guesswork — the SQLite half of a numbered migration, listed one line per migration | A2, A6 ✔ |
 | the experiment's history, single-node | `control-plane backfill --repository owner/name`: rows re-keyed, blobs re-keyed as their last dev burst's snapshot, manual-era rows dropped, source left read-only | A6 ✔ |
 | no claim verbs (single process) | lease + CAS statements in the `Ledger` protocol | A3 (the finalize CAS), E1 (`claimed_by`/`claimed_until` + the claim verbs), E2 (used in anger) |
-| STOP flag on the filesystem | `org_state` row | E3 |
+| STOP flag on the filesystem | `org_state` row — `stop_org` / `resume_org` / `org_stop` in the `Ledger` protocol, read by every tick, spawn and heartbeat; the `stop` verb writes the row and nothing else | E3 ✔ |
 
 The `Ledger` protocol keeps its nine MVP methods; new verbs (claim, CAS
 transition, finalize) arrive additively at A3 so `SqliteLedger` callers never

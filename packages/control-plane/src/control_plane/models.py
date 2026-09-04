@@ -141,10 +141,26 @@ class AuditRecord:
 
     id: int
     actor: str
-    action: str  # 'product.register' | 'product.pause' | 'product.resume' | 'product.set' | 'role.set'
-    target: str
+    action: str  # 'product.register' | 'product.pause' | 'product.resume' | 'product.set' | 'role.set' | 'org.stop' | 'org.resume'
+    target: str  # the product slug, the role name, or ORG_TARGET
     reason: str
     at: str
+
+
+# The audit target of the org verbs (E3): the org has no name of its own in the
+# ledger, so its rows carry this one — `audit_trail(ORG_TARGET)` is its history.
+ORG_TARGET = "org"
+
+
+@dataclass(slots=True)
+class OrgStop:
+    """The org STOP as the ledger holds it (E3): the one `org_state` row while
+    its `stop_reason` is set. `Ledger.org_stop` returns None for a running org —
+    there is no "running" record, because the row carries nothing then."""
+
+    reason: str
+    stopped_by: str
+    stopped_at: str
 
 
 @dataclass(slots=True)
@@ -287,6 +303,11 @@ EVENT_PRODUCT_PAUSED = "product_paused"
 EVENT_PRODUCT_RESUMED = "product_resumed"
 EVENT_PRODUCT_UPDATED = "product_updated"
 EVENT_ROLE_UPDATED = "role_updated"  # `role set` (D5): payload names the role and the changed columns
+# The org STOP (E3): `stop` and `resume`, same shape — the mutation, its audit row
+# and this announcement in one statement. `org_stopped` also carries the reason,
+# so the page it becomes needs no second read.
+EVENT_ORG_STOPPED = "org_stopped"
+EVENT_ORG_RESUMED = "org_resumed"
 
 # The optional wake channel. A consumer may LISTEN on it to poll sooner; nothing
 # is allowed to depend on a notification arriving.

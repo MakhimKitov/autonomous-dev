@@ -42,7 +42,8 @@ uv run control-plane burst --issue 1 --repo ../discord-bot \
 
 # The M2 scheduler (SCHEDULER.md): ready issue → PR → review rounds, unattended
 uv run control-plane run --repo ../discord-bot     # loop (--once for a single tick)
-uv run control-plane stop                          # kill switch: STOP flag + docker kill
+uv run control-plane stop --reason "…"             # kill switch: the org's STOP row — every replica stands down, live bursts are killed by their runners
+uv run control-plane resume                        # lift it; the loops pick up on their next tick, no restart
 ```
 
 ## Stores
@@ -292,6 +293,24 @@ the row by the fleet like `daily_bursts`, no env knob); and the heartbeat
 the holder's only proof of life is the row, so it stops before a peer may
 lawfully absorb. `cli.py` copies the loop's actual `--interval` into the rails
 so the observation lease matches the cadence.
+
+**The kill switch is a row (E3)**: `org_state`, one row for the whole ledger
+(migration 0016; `Ledger.org_stop` / `stop_org` / `resume_org`), replaces the
+MVP's STOP file and its local `docker kill`. `control-plane stop --reason …` sets
+it by CAS with its audit row (`org.stop`, target `org`) and `org_stopped` event
+in one statement; `resume` clears it. Every loop reads it at the top of every
+tick and before every spawn (`standing_down` in `scheduler.py`) and keeps
+ticking while stopped, so `resume` needs no restart and `run` no longer refuses
+to start under a STOP. Every live burst's heartbeat reads it on **every beat**
+and answers False, on which the runner holding the burst kills its container —
+that is how a `stop` on one host reaches a burst on another. A fenced burst is
+recorded `killed`, not `failed` (`execute_burst` remembers the heartbeat's
+answer; the exit code is 137 either way), and its task rolls back with one more
+attempt. SIGTERM/SIGINT set the engine's `halt` flag instead — the same fence,
+process-local, nothing written: a restarted replica is not a stopped org. The
+second test in `tests/test_replicas.py` runs the done-when: a `stop` from the
+operator's CLI process kills a burst one replica holds, and `resume` finishes the
+work with nothing restarted.
 
 ### Task identity
 
