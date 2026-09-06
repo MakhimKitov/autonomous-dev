@@ -1,6 +1,6 @@
 """One burst, end to end — the choreography the CLI and the scheduler share.
 
-prepare volume → mint GitHub token → burst span → docker run (log tee) →
+prepare volume → mint GitHub token → burst span → the runner's `run` (log tee) →
 harvest → ledger. This is the proven M0/M1 manual-driver path, extracted so
 the M2 scheduler runs exactly the same code.
 """
@@ -23,7 +23,7 @@ from control_plane.github_auth import (
 from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
 from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_only
 from control_plane.roles import validate as validate_role
-from control_plane.runner import DEFAULT_IMAGE, BurstSpec, DockerRunner, Heartbeat
+from control_plane.runner import DEFAULT_IMAGE, BurstSpec, Heartbeat, Runner, open_runner
 from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
@@ -121,7 +121,7 @@ def execute_burst(
     with_github: bool = False,
     mount_codex: bool = False,
     extra_env: dict[str, str] | None = None,
-    runner: DockerRunner | None = None,
+    runner: Runner | None = None,
     heartbeat: Heartbeat | None = None,
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
@@ -143,6 +143,9 @@ def execute_burst(
     heartbeat fenced — a False answer, on which the runner kills the container
     — is recorded ``killed`` rather than ``failed`` (E3): the exit code alone
     cannot tell a kill from a crash, so the answer is remembered here.
+    ``runner`` is where the burst runs (E4): the deployment's (`open_runner`)
+    unless the caller brings its own — the scheduler's one per process, the
+    suite's fakes in docker's seat.
 
     Task writes here are the E1 shapes: the row is created if the ledger has
     never seen it (never overwritten if it has), and the dev burst's session id
@@ -152,7 +155,7 @@ def execute_burst(
     May raise GitHubAuthError (before the container starts) — callers decide
     whether that aborts (CLI) or waits for the next tick (scheduler).
     """
-    runner = runner or DockerRunner()
+    runner = runner if runner is not None else open_runner()
     profile = stores.ledger.get_role(role)
     if profile is None:
         raise RoleError(f"role {role!r} has no row in the ledger — the pipeline roles are seeded (TO-BE §4)")

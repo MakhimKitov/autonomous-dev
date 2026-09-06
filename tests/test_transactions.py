@@ -17,8 +17,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from control_plane import scheduler as sched_mod
-from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.bursts import PlatformStores
 from control_plane.github_api import Issue, PullRequest, Review
 from control_plane.migrate import migrate
 from control_plane.models import BurstRecord, BurstStatus, RepositoryRecord, TaskStatus, task_id_for
@@ -126,7 +125,8 @@ class ProbingApi:
 
 
 class ProbingRunner:
-    """Docker's seat: the longest I/O of all, with the heartbeat asked inside it."""
+    """Docker's seat: the longest I/O of all, with the heartbeat asked inside it —
+    and the reconciler's `alive`, the other I/O a runner does."""
 
     def __init__(self, probe):
         self._probe = probe
@@ -140,6 +140,10 @@ class ProbingRunner:
             self._probe.probe("after a heartbeat")
             self.beats += 1
         return 0
+
+    def alive(self, burst_id):
+        self._probe.probe("runner.alive")
+        return False
 
 
 @pytest.fixture(scope="module")
@@ -187,13 +191,10 @@ def rig(request, tmp_path, monkeypatch, pg_dsn):
         rails=Rails(failure_cooldown_s=0, lease_s=0),  # lease_s=0: every heartbeat renews
         review=ReviewPolicy(enabled=True, providers=("copilot",)),
         sync_clone=sync_clone,
+        runner=runner,  # the real choreography, with the probing runner in docker's seat
     )
-    # the real choreography, with the probing runner in docker's seat and no
-    # App in the environment (a dev-mode burst: token-less, like the fakes)
-    monkeypatch.setattr(sched_mod, "execute_burst", lambda *a, **kw: execute_burst(*a, runner=runner, **kw))
     for name in ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(Scheduler, "_container_alive", lambda self, burst_id: False)
+        monkeypatch.delenv(name, raising=False)  # a dev-mode burst: token-less, like the fakes
     yield scheduler, api, stores, probe, runner
     raw.close()
 

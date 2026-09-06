@@ -65,7 +65,7 @@ from control_plane.review import (
     ReviewPolicy,
     ReviewPolicyError,
 )
-from control_plane.runner import DEFAULT_IMAGE, HEARTBEAT_POLL_S
+from control_plane.runner import DEFAULT_IMAGE, HEARTBEAT_POLL_S, open_runner
 from control_plane.scheduler import Fleet, Rails, Scheduler
 from control_plane.secrets import SecretError, parse_ref
 from control_plane.store import (
@@ -930,6 +930,8 @@ def _run_fleet(
         )
         return 2
 
+    runner = open_runner()  # where this replica's bursts run (E4) — one for the process
+
     def build_scheduler(row: RepositoryRecord) -> Scheduler:
         slug = row.repository
         review, testing = _scheduler_policies(row)  # honor-checked every build (C3)
@@ -966,6 +968,7 @@ def _run_fleet(
             image=args.image,
             sync_clone=sync_clone,
             sync_clone_ref=sync_clone_ref,
+            runner=runner,
         )
 
     log.info(
@@ -1097,6 +1100,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         image=args.image,
         sync_clone=sync_clone,
         sync_clone_ref=sync_clone_ref,
+        runner=open_runner(),
     )
     log.info(
         "scheduler starting",

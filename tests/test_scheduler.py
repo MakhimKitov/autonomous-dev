@@ -1,7 +1,8 @@
 """The M2 reconciler: state machine transitions, rails, kill switch, recovery.
 
-GitHub is a recording fake; execute_burst is monkeypatched — these tests drive
-the decision layer only (the burst choreography has its own tests).
+GitHub is a recording fake; execute_burst is monkeypatched and the runner in
+docker's seat never has a burst `alive` — these tests drive the decision layer
+only (the burst choreography has its own tests).
 """
 
 import json
@@ -29,6 +30,17 @@ from control_plane.volume import HarvestOutcome
 OWNER = "owner1"
 REPOSITORY = "owner1/product"
 COPILOT_ON = ReviewPolicy(enabled=True, providers=("copilot",))
+
+
+class NoContainers:
+    """Docker's seat (a `Runner`, E4) for a suite that fakes `execute_burst`:
+    nothing ever runs here, so nothing is ever alive."""
+
+    def run(self, spec, log_path=None, heartbeat=None):
+        raise AssertionError("execute_burst is faked in this suite — the runner is never reached")
+
+    def alive(self, burst_id):
+        return False
 
 
 class FakeApi:
@@ -96,8 +108,9 @@ def rig(tmp_path, monkeypatch):
     stores = PlatformStores.open(tmp_path / "data")
     api = FakeApi()
     rails = Rails(max_attempts=2, max_review_rounds=2, failure_cooldown_s=0)
-    scheduler = Scheduler(stores, api, tmp_path / "repo", OWNER, rails=rails, review=COPILOT_ON)
-    monkeypatch.setattr(Scheduler, "_container_alive", lambda self, burst_id: False)
+    scheduler = Scheduler(
+        stores, api, tmp_path / "repo", OWNER, rails=rails, review=COPILOT_ON, runner=NoContainers()
+    )
     spawned = []
 
     def fake_execute(stores_, task, repo, prompt, **kwargs):
@@ -1183,7 +1196,7 @@ def test_reconcile_spares_a_lapsed_lease_whose_container_is_alive_here(rig, monk
     """The lease lapsed but the container is running on this host: the work is
     alive, the heartbeat is what failed. Neither the burst nor the task moves."""
     scheduler, _, stores, _, _ = rig
-    monkeypatch.setattr(Scheduler, "_container_alive", lambda self, burst_id: burst_id == "mine")
+    monkeypatch.setattr(scheduler.runner, "alive", lambda burst_id: burst_id == "mine")
     stores.ledger.upsert_task(
         _task(1, status=TaskStatus.WORKING, claimed_by=scheduler.replica, claimed_until=LONG_AGO)
     )
@@ -1196,7 +1209,7 @@ def test_reconcile_spares_a_lapsed_lease_whose_container_is_alive_here(rig, monk
 def test_two_replicas_claim_disjoint_tasks(rig):
     scheduler, _, stores, _, _ = rig
     scheduler.rails.concurrency = 2  # the product allows two lanes
-    other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
+    other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER, runner=scheduler.runner)
     stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
     stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
     mine, theirs = scheduler.pick_next(), other.pick_next()
@@ -1211,7 +1224,7 @@ def test_a_second_replica_stands_by_at_the_products_concurrency(rig):
     not a second lane — and takes over the moment the lane is free."""
     scheduler, _, stores, _, _ = rig
     assert scheduler.rails.concurrency == 1
-    other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
+    other = Scheduler(stores, scheduler.api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER, runner=scheduler.runner)
     stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, created_at="2026-01-01T00:00:00+00:00"))
     stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED, created_at="2026-01-02T00:00:00+00:00"))
     mine = scheduler.pick_next()
@@ -1232,7 +1245,7 @@ def _registered(stores, **quotas):
 def test_the_observation_turn_is_one_replicas_per_interval(rig):
     scheduler, api, stores, _, _ = rig
     _registered(stores)
-    other = Scheduler(stores, api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER)
+    other = Scheduler(stores, api, scheduler.repo, OWNER, rails=scheduler.rails, replica=PEER, runner=scheduler.runner)
     api.ready_issues = [_issue()]
     api.issues[1] = _issue()
 

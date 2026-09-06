@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
-import functools
 import json
 import os
 import signal
@@ -35,12 +34,11 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from control_plane import scheduler as sched_mod
-from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.bursts import PlatformStores
 from control_plane.cli import _serve
 from control_plane.github_api import Issue, PullRequest
 from control_plane.postgres import PostgresLedger
-from control_plane.scheduler import Fleet, Rails, Scheduler
+from control_plane.scheduler import Fleet, Rails, Scheduler, default_replica
 from control_plane.store import LocalSessionArchive
 from control_plane.telemetry import init_telemetry
 
@@ -101,9 +99,10 @@ class ScriptedGitHub:
 
 
 class SleepingRunner:
-    """Docker's seat: a burst is `seconds` of wall clock with the heartbeat
-    asked throughout; a False fences it, as `DockerRunner` would kill the
-    container."""
+    """Docker's seat (a `Runner`, E4): a burst is `seconds` of wall clock with
+    the heartbeat asked throughout; a False fences it, as `DockerRunner` would
+    kill the container. Nothing is ever `alive` here — no containers exist, so
+    the reconciler judges by the lease alone."""
 
     def __init__(self, seconds: float, events: Events):
         self._seconds = seconds
@@ -128,6 +127,9 @@ class SleepingRunner:
                 return 137
         self._events.write("finish", burst=spec.burst_id, task=spec.task_id)
         return 0
+
+    def alive(self, burst_id):
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -160,11 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         archive=LocalSessionArchive(args.archive_dir or args.data_dir),
         ledger=PostgresLedger(args.dsn),
     )
-    runner = SleepingRunner(args.burst_s, events)
-    # docker's seat, twice: the runner inside execute_burst, and the `docker ps`
-    # the reconciler asks — no containers exist here
-    sched_mod.execute_burst = functools.partial(execute_burst, runner=runner)
-    Scheduler._container_alive = lambda self, burst_id: False  # type: ignore[method-assign]
+    runner = SleepingRunner(args.burst_s, events)  # docker's seat, through the seam
     rails = Rails(
         failure_cooldown_s=0,
         lease_s=args.lease_s,
@@ -182,9 +180,10 @@ def main(argv: list[str] | None = None) -> int:
             row.team,
             rails=replace(rails, daily_burst_ceiling=row.daily_bursts, concurrency=row.concurrency),
             sync_clone=lambda: repo_dir,
+            runner=runner,
         )
 
-    events.write("up", replica=sched_mod.default_replica())
+    events.write("up", replica=default_replica())
     return _serve(Fleet(stores, build_scheduler), args.interval, once=False)
 
 
