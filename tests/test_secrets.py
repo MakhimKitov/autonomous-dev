@@ -4,7 +4,7 @@ env, a file, or the one out-of-band helper — never from the ledger."""
 import stat
 
 import pytest
-from control_plane.secrets import (
+from secret_refs import (
     SCHEMES,
     SECRET_HELPER_ENV,
     SecretError,

@@ -22,7 +22,7 @@ key — cost without benefit at our scale: the loop is serial and a burst takes 
 so 60 s of poll lag is noise, and a tick's handful of API calls (~360/h) sits far under
 the 5000/h App limit. When the control plane moves off the laptop, a webhook receiver
 (issues, pull_request, pull_request_review, push) simply **wakes the reconciler early**;
-the tick logic doesn't change.
+the tick logic doesn't change. *Built at E5 — "Webhooks as wake-up" below.*
 
 ## Task state machine
 
@@ -245,6 +245,42 @@ the ledger and the archive (TO-BE §6): `Runner` in `runner.py`, two methods, an
   `test_runner.py` keeps what is docker's alone: the command line, the mounts,
   the seccomp profile, kill-by-name.
 
+**Webhooks as wake-up, polls as truth (E5).** The transport paragraph at the top is
+now built, exactly as it said: a delivery makes the next poll happen *now*, and
+decides nothing else. Three parts, one wall between them (TO-BE §5):
+
+- **The receiver** (`packages/webhook-receiver`, its own image, the platform's only
+  public surface) verifies `X-Hub-Signature-256` against the App's webhook secret
+  (`WEBHOOK_APPS="<app id>=<secret ref>,…"` — refs, resolved once at start), drops a
+  delivery id it has seen (an in-memory LRU; a restart forgets, and the price is one
+  duplicate poll), and POSTs a *wake* — `repository`, `kind` (the event name),
+  `delivery` — to `WAKE_URL`. Forged → 401 and the id is *not* remembered (a forger
+  cannot poison the dedup); replayed → 200; not a wake (`ping`, `installation`…) →
+  200; forwarded → 202 whether or not the control plane took it. It never imports
+  the control plane and carries no other secret: CI checks the image cannot import
+  `control_plane`, `psycopg`, `boto3`, and has no git and no docker.
+- **The wake endpoint** (`WAKE_BIND`, internal, unauthenticated by design — the
+  worst a caller can cause is one poll of real GitHub state): `POST /wake` is one
+  ledger statement, `wake_repository` — the product's **observation lease is
+  cleared** (the lease is a rate, not a correctness wall, E2, so clearing a live one
+  is exactly one extra poll) and a `product_woken` event with the delivery id is
+  written; the replicas' `wakes` channel is notified. A product that is not active
+  is 404, nothing written. `GET /healthz` for whatever sits in front.
+- **Every replica's loop sleeps on a `wake` flag**, not a timer: its own endpoint
+  sets it, and `subscribe_wakes` — the Postgres ledger's LISTEN, a thread with its
+  own connection, reconnecting — sets it when *any* replica's endpoint took a
+  delivery. So a webhook that reached one replica has every replica looking within
+  a second, and the observation lease still makes exactly one of them poll. A lost
+  notification costs latency (the interval), never truth.
+
+`tests/test_wakes.py` runs the done-when as processes on Postgres: two replicas (one
+with an endpoint, one hearing wakes only through the channel) and the real receiver;
+a signed delivery is one poll within seconds and one `product_woken` event; the
+same delivery replayed and two forgeries (wrong secret, unknown App) are zero polls
+and zero events, each named in the receiver's log by delivery id; a second signed
+delivery is exactly one more poll. `product_woken.created_at` → the task's first
+burst is the ready-to-claim latency E6 measures.
+
 ## The fleet (C4)
 
 `run` without `--github` serves **every active registered product** through the same
@@ -360,12 +396,14 @@ control_plane/
   bursts.py       # execute_burst() — extracted from cli._run_burst, shared by CLI + scheduler
   runner.py       # the Runner protocol (E4): run + alive; burst_env, the box's contract; DockerRunner behind it
   clone.py        # the platform-owned clone (above)
-  cli.py          # + `run [--once] [--interval]`, `stop --reason`, `resume`
+  wake.py         # the internal wake endpoint + attach_wakes (E5): a webhook's wake → one ledger write → every loop's flag
+  cli.py          # + `run [--once] [--interval]`, `stop --reason`, `resume`; the loop sleeps on the wake flag
+packages/webhook-receiver/   # the public HMAC filter (E5): verify · dedup · forward; never imports control-plane
+packages/secret-refs/        # SecretResolver (D4), the leaf both share
 ```
 
 ## Deliberately out
 
-Webhooks (wake-up optimization once off the laptop — see above) ·
-concurrent bursts · Postgres/SeaweedFS backends · Phoenix compose service · the monitor
+Concurrent bursts · Postgres/SeaweedFS backends · Phoenix compose service · the monitor
 (the `auto` pipeline runs already — the tester feeds it, TESTER.md; a monitor adds
 production telemetry as a second feeder).

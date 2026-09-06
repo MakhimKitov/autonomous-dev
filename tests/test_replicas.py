@@ -149,14 +149,17 @@ class Replica:
         )
 
 
-def wait_for(condition, timeout: float, what: str):
+def wait_for(condition, timeout: float, what):
+    """``what`` names the wait in the failure; pass a callable to build it only
+    then — a `dump()` in an eagerly formatted f-string sends SIGUSR1 to a
+    replica that may not have registered its handler yet, which kills it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = condition()
         if value:
             return value
         time.sleep(0.05)
-    raise AssertionError(f"timed out after {timeout}s waiting for {what}")
+    raise AssertionError(f"timed out after {timeout}s waiting for {what() if callable(what) else what}")
 
 
 def test_two_replicas_one_killed_mid_burst_the_survivor_absorbs_exactly_once(fresh_dsn, tmp_path):

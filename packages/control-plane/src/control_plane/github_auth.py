@@ -18,7 +18,7 @@ from typing import Any, Callable
 import jwt
 import requests
 
-from control_plane.secrets import SecretError, SecretResolver
+from secret_refs import SecretError, SecretResolver
 
 GITHUB_API = "https://api.github.com"
 

@@ -1,0 +1,19 @@
+[project]
+name = "webhook-receiver"
+version = "0.1.0"
+description = "The platform's only public surface (TO-BE §5): verifies GitHub App webhook signatures, drops replays, forwards a wake to the control plane. Stateless and credential-free — never depends on control-plane."
+requires-python = ">=3.12"
+dependencies = [
+    "secret-refs",
+    "structlog>=26.1.0",
+]
+
+[project.scripts]
+webhook-receiver = "webhook_receiver.cli:main"
+
+[tool.uv.sources]
+secret-refs = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"

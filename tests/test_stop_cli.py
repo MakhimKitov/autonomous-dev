@@ -12,6 +12,7 @@ and the ledger is not told, because a restarted replica is not a stopped org.
 import os
 import signal
 import threading
+import time
 
 import pytest
 from control_plane import cli
@@ -78,12 +79,19 @@ def test_the_actor_defaults_to_the_os_login(tmp_path, monkeypatch):
 
 
 class Engine:
-    """What `_serve` needs of a Scheduler or a Fleet: a tick and a halt flag."""
+    """What `_serve` needs of a Scheduler or a Fleet: a tick, a halt flag and
+    the wake flag the sleep waits on (E5)."""
 
     def __init__(self, on_tick=None):
         self.halt = threading.Event()
+        self.wake = threading.Event()
         self.ticks = 0
         self.on_tick = on_tick
+
+    def shut_down(self):
+        """What the signal handler does: the halt, and the wake that ends the sleep."""
+        self.halt.set()
+        self.wake.set()
 
     def tick(self):
         self.ticks += 1
@@ -118,7 +126,27 @@ def test_the_sleep_is_cut_short_by_the_flag():
     """The loop waits on the flag, not the clock, so a shutdown during the
     interval is a prompt exit, not a `--interval` later."""
     engine = Engine()
-    timer = threading.Timer(0.05, engine.halt.set)
+    timer = threading.Timer(0.05, engine.shut_down)
     timer.start()
     assert cli._serve(engine, interval=30, once=False) == 0
     assert engine.ticks == 1
+
+
+def test_a_wake_cuts_the_sleep_and_the_next_tick_follows(tmp_path):
+    """E5: a webhook's wake sets the flag during the interval; the loop ticks
+    now instead of `--interval` later, and then sleeps again — the flag is
+    consumed, not left set (or the loop would spin)."""
+    engine = Engine()
+    ticked_at = []
+
+    def stamp(engine):
+        ticked_at.append(time.monotonic())
+        if engine.ticks == 2:
+            engine.shut_down()
+
+    engine.on_tick = stamp
+    threading.Timer(0.1, engine.wake.set).start()
+    started = time.monotonic()
+    assert cli._serve(engine, interval=30, once=False) == 0
+    assert engine.ticks == 2
+    assert 0.05 < ticked_at[1] - started < 5.0  # the second tick came with the wake, not the interval

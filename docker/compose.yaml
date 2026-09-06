@@ -11,6 +11,16 @@
 #
 # With LEDGER_DSN / ARCHIVE_URL unset the platform runs on SQLite and a local
 # directory exactly as before — the rig is never required to run the MVP.
+#
+# The `platform` profile (E5) adds the platform itself on top of the two stores —
+# the migration, two control-plane replicas and the webhook receiver — as the
+# images CI builds. It is the T0 deployment shape (TO-BE §6: a Docker host is
+# first-class; k8s arrives with the runners in Stage G) and E6's rehearsal rig:
+#
+#   export PLATFORM_DATA=/srv/autonomous-dev/data     # absolute; see control-plane below
+#   docker compose -f docker/compose.yaml --profile platform up -d --build --wait
+#
+# Off by default, so `up` without the profile is still just the stores.
 
 name: autonomous-dev-rig
 
@@ -57,6 +67,82 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  # --- the platform (profile: platform) ---
+
+  migrate:
+    # Runs once, as the schema owner, before any replica starts: `migrate` is
+    # platform_admin's verb and the replicas connect as platform_app (STORES.md).
+    image: autonomous-dev/control-plane:latest
+    build:
+      context: ..
+      dockerfile: docker/control-plane/Dockerfile
+    profiles: [platform]
+    environment:
+      LEDGER_DSN: postgresql://platform_admin:platform@postgres:5432/platform?sslmode=disable
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    image: autonomous-dev/control-plane:latest
+    build:
+      context: ..
+      dockerfile: docker/control-plane/Dockerfile
+    profiles: [platform]
+    deploy:
+      replicas: 2 # two stateless peers over one ledger (E2); the service name resolves to both
+    env_file:
+      - path: ../.env # the App refs and switches — the same file a laptop run reads
+        required: false
+    environment:
+      LEDGER_DSN: postgresql://platform_app:platform_app@postgres:5432/platform?sslmode=disable
+      ARCHIVE_URL: s3://platform:platform-dev-secret@seaweedfs:8333/platform-sessions?tls=false
+      WAKE_BIND: 0.0.0.0:8081 # the internal wake endpoint — on the compose network only, never published
+      DEV_AGENT_OTLP_ENDPOINT: ${DEV_AGENT_OTLP_ENDPOINT:-}
+    volumes:
+      # bursts are `docker run` against the host's daemon (DockerRunner, until
+      # Stage G), which reads bind-mount paths in *its* namespace — so the data
+      # dir is mounted at the same absolute path inside the replica as on the host
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PLATFORM_DATA:-/srv/autonomous-dev/data}:${PLATFORM_DATA:-/srv/autonomous-dev/data}
+    command: ["run", "--data-dir", "${PLATFORM_DATA:-/srv/autonomous-dev/data}", "--interval", "${SCHEDULER_POLL_INTERVAL_S:-60}"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
+
+  webhook-receiver:
+    # The one public surface. TLS terminates in front of this (E6's HTTPS route);
+    # here the port is published plain for the rehearsal.
+    image: autonomous-dev/webhook-receiver:latest
+    build:
+      context: ..
+      dockerfile: docker/webhook-receiver/Dockerfile
+    profiles: [platform]
+    env_file:
+      - path: ../.env # WEBHOOK_APPS and whatever env: refs it names
+        required: false
+    environment:
+      WAKE_URL: http://control-plane:8081
+      RECEIVER_BIND: 0.0.0.0:8080
+    ports:
+      - "${RECEIVER_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    depends_on:
+      control-plane:
+        condition: service_started
 
 volumes:
   postgres-data:

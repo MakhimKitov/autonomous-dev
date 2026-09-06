@@ -67,7 +67,7 @@ from control_plane.review import (
 )
 from control_plane.runner import DEFAULT_IMAGE, HEARTBEAT_POLL_S, open_runner
 from control_plane.scheduler import Fleet, Rails, Scheduler
-from control_plane.secrets import SecretError, parse_ref
+from secret_refs import SecretError, parse_ref
 from control_plane.store import (
     LEDGER_DSN_ENV,
     ArchiveError,
@@ -78,6 +78,7 @@ from control_plane.store import (
 )
 from control_plane.telemetry import init_telemetry
 from control_plane.testing import E2E_ENV, E2EPolicy, E2EPolicyError
+from control_plane.wake import attach_wakes
 from dev_agent.log import configure_logging
 
 log = structlog.get_logger()
@@ -814,10 +815,16 @@ def _serve(engine, interval: int, once: bool) -> int:
     nothing is written to the ledger. The org's STOP is the engine's business:
     a stopped org makes every tick a no-op and the loop keeps ticking, so
     `resume` takes effect here without anyone restarting anything.
+
+    The sleep between ticks is a wait on the engine's ``wake`` flag (E5), so a
+    webhook's wake — set by this process's endpoint or by the ledger's channel
+    when a peer's took it — ends it early and the next tick polls the woken
+    product now. `attach_wakes` wires the flag before this is called.
     """
 
     def _shutdown(signum, frame):  # noqa: ARG001 — signal handler shape
         engine.halt.set()
+        engine.wake.set()  # cut the sleep, if that is where the loop is
         log.info("shutdown requested — the live burst is fenced by its heartbeat; exiting after this tick")
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -833,7 +840,11 @@ def _serve(engine, interval: int, once: bool) -> int:
             break
         if once:
             break
-        if engine.halt.wait(interval):  # the sleep, cut short by a shutdown
+        # the sleep: the interval, or sooner — a wake (E5: a webhook reached this
+        # replica's endpoint or a peer's) or a shutdown sets the flag
+        engine.wake.wait(interval)
+        engine.wake.clear()
+        if engine.halt.is_set():
             log.info("shutting down")
             break
     provider = trace.get_tracer_provider()
@@ -988,7 +999,11 @@ def _run_fleet(
             daily_bursts=row.daily_bursts,
             policy_source="registry row",
         )
-    return _serve(Fleet(stores, build_scheduler), interval, args.once)
+    fleet = Fleet(stores, build_scheduler)
+    # WAKE_BIND: this replica's internal endpoint; the ledger's wake channel
+    # regardless. A second ledger handle: the endpoint writes from its own thread
+    attach_wakes(fleet, open_ledger(stores.data_dir))
+    return _serve(fleet, interval, args.once)
 
 
 def _run_scheduler(args: argparse.Namespace) -> int:
@@ -1120,6 +1135,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         policy_source="registry row" if product_row is not None else "env (dev mode)",
     )
 
+    attach_wakes(scheduler, open_ledger(stores.data_dir))  # its own handle — see _run_fleet
     return _serve(scheduler, interval, args.once)
 
 

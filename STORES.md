@@ -441,16 +441,22 @@ instruments (`TO-BE.md` §12).
   write — with the payload naming its audit row (`audit_id`) so a consumer can
   read the who/why. `role_updated` followed at D5 and the org's two at E3 —
   `org_stopped` (payload carries the reason too: it is a page) and
-  `org_resumed` — in the same shape. `capacity_exhausted`,
-  `subscription_expiring` and `task_blocked` arrive with the stages that raise
-  them.
+  `org_resumed` — in the same shape. `product_woken` (E5) is the webhook's
+  trace: `repository`, `kind` (the GitHub event) and the receiver's `delivery`
+  id, written in the statement that clears the product's observation lease —
+  its `created_at` against the task's first burst is the ready-to-claim latency.
+  `capacity_exhausted`, `subscription_expiring` and `task_blocked` arrive with
+  the stages that raise them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
   — at-least-once, ordered, replayable; each consumer keeps its own cursor, and
   the `Ledger` protocol's `events(after_id)` is that read. No `LISTEN/NOTIFY`
   dependency: like webhooks (§5), a push channel may *wake* a consumer early, but
   the poll is the truth. The channel is `events`, notified from inside the same
   statement — transactional, so it is delivered at commit or not at all, and
-  dropped entirely if nobody happens to be listening.
+  dropped entirely if nobody happens to be listening. The replicas' own channel
+  is `wakes` (E5): `wake_repository` notifies it with the repository, and every
+  replica's loop LISTENs (`subscribe_wakes`) so one replica's webhook cuts every
+  replica's sleep — same rule, a lost notification costs the interval, never truth.
 - **Retention** is a `platform_admin` concern (the runtime role can't delete):
   prune by age once consumers confirm cursors past the horizon.
 

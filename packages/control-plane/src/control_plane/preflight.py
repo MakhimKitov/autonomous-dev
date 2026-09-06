@@ -25,7 +25,7 @@ from control_plane.github_api import GitHubApiError
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import RepositoryRecord
 from control_plane.review import ReviewPolicy, ReviewPolicyError
-from control_plane.secrets import SecretResolver
+from secret_refs import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
     E2EPolicy,
