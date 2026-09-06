@@ -30,6 +30,7 @@ import os
 import re
 import sqlite3
 import tarfile
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,7 @@ from control_plane.models import (
     EVENT_PRODUCT_REGISTERED,
     EVENT_PRODUCT_RESUMED,
     EVENT_PRODUCT_UPDATED,
+    EVENT_PRODUCT_WOKEN,
     EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
@@ -296,6 +298,8 @@ class Ledger(Protocol):
     def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def touch_repository_burst(self, repository: str, at: str) -> None: ...
     def claim_observation(self, repository: str, replica: str, lease_s: float) -> bool: ...
+    def wake_repository(self, repository: str, kind: str, delivery: str | None = None) -> bool: ...
+    def subscribe_wakes(self, on_wake: Callable[[str], None]) -> None: ...
     def org_stop(self) -> OrgStop | None: ...
     def stop_org(self, actor: str, reason: str) -> None: ...
     def resume_org(self, actor: str, reason: str = "") -> None: ...
@@ -556,7 +560,12 @@ class SqliteLedger:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path)
+        # check_same_thread=False: the wake endpoint (E5) holds a handle of its
+        # own and writes through it from the server's threads, serialized by its
+        # lock. The guard removed here never protected a transaction — the
+        # module is compiled serialized — only a connection from being touched
+        # off its thread at all; the loop's handle stays the loop's regardless.
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)  # a no-op on a file that already has them
         self._require_current_shape(path)
@@ -995,6 +1004,38 @@ class SqliteLedger:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    # --- wakes (E5) ---
+
+    def wake_repository(self, repository: str, kind: str, delivery: str | None = None) -> bool:
+        """A webhook said this product changed: clear its observation lease so the
+        next replica to look polls it now, and announce it. The lease is a rate,
+        not a correctness wall (E2 — observe is idempotent by CAS), so clearing
+        a live one costs at most one extra poll, which is the whole price of a
+        forged or replayed delivery. False for a product that is not active —
+        paused products are not observed, woken or not — and nothing is written."""
+        cursor = self._conn.execute(
+            "UPDATE repositories SET claimed_by = NULL, claimed_until = NULL "
+            "WHERE repository = :repository AND state = :active",
+            {"repository": repository, "active": ProductState.ACTIVE},
+        )
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            return False
+        self._conn.execute(
+            "INSERT INTO events (kind, payload, created_at) VALUES (?, ?, ?)",
+            (EVENT_PRODUCT_WOKEN,
+             json.dumps({"repository": repository, "kind": kind, "delivery": delivery}),
+             utc_now()),
+        )
+        self._conn.commit()
+        return True
+
+    def subscribe_wakes(self, on_wake: Callable[[str], None]) -> None:
+        """Nothing to subscribe to: the single-node ledger has one process, and
+        that process's own wake endpoint nudges its own loop. `on_wake` is never
+        called — the Postgres ledger's LISTEN is what this stands in for."""
+        log.debug("single-node ledger — wakes are in-process, nothing to listen on")
 
     # --- the org STOP (E3) ---
     #

@@ -354,6 +354,24 @@ the ephemeral container.
 > docker rig runs the real pump, tee, clock and fence with a shell in the
 > daemon's seat, so the contract runs without docker, and G3 adds the Jobs rig
 > to the same suite rather than writing a second one.
+>
+> **As built (E5):** webhooks as wake-up, polls as truth (TO-BE §5). A third
+> workspace package, `webhook-receiver`, is the platform's only public surface
+> — an HMAC filter: it verifies each App delivery against the App's webhook
+> secret (refs, through the shared `secret-refs` leaf), drops replayed delivery
+> ids from memory, and forwards a wake (`repository`, `kind`, `delivery`) to the
+> control plane's internal endpoint; it never imports the control plane, and its
+> image provably cannot. The endpoint makes one ledger write, `wake_repository`
+> — the product's observation lease cleared, a `product_woken` event with the
+> delivery id — and the replicas' `wakes` channel wakes every loop, which sleeps
+> on a flag rather than a timer; the observation lease still makes exactly one
+> replica poll. Forgery and replay are harmless by construction: a forged
+> delivery is refused and remembered nowhere, a replay is dropped, and the worst
+> either can cost after a receiver restart is one poll of real GitHub state —
+> never a state transition. `tests/test_wakes.py` runs it as processes: two
+> replicas and the receiver on one Postgres. The platform now ships as images
+> (control-plane, webhook-receiver) with a compose `platform` profile — the T0
+> deployment on a Docker host — and reference k8s manifests, validated in CI.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

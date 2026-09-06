@@ -17,6 +17,11 @@ How secrets reach env, files or the helper is the adopter's instrument
 (``repositories.test_env_refs``, later ``subscriptions.secret_ref``); values
 exist in memory between resolve and inject, and in the container env until it
 dies. Nothing here logs a value.
+
+Its own workspace package (E5), stdlib only, because two processes hold refs:
+the control plane and the webhook receiver — and the receiver must never import
+the control plane (TO-BE §5: no DB client, no GitHub client behind the public
+surface). One grammar, one implementation, two dependents.
 """
 
 from __future__ import annotations

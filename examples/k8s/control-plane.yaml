@@ -1,0 +1,104 @@
+# The control plane on a cluster: N stateless replicas over one ledger (TO-BE
+# §5), and the internal wake endpoint the receiver forwards to (E5). Reference
+# only — see README.md; bursts on a cluster arrive with Stage G.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-plane
+data:
+  WAKE_BIND: "0.0.0.0:8081"
+  SCHEDULER_POLL_INTERVAL_S: "60"
+  # The session archive: any S3-compatible bucket (STORES.md). Credentials
+  # belong in the Secret below, as part of the URL, if the bucket needs them.
+  ARCHIVE_URL: "REPLACE_ME"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: control-plane
+type: Opaque
+stringData:
+  # platform_app's DSN — the replicas' role, whose grants are the walls (STORES.md).
+  LEDGER_DSN: "REPLACE_ME"
+  # The dev App (D1): id + private key. The key variable is a secret ref (D4):
+  # here a file: ref onto the key mounted from this same Secret.
+  GITHUB_APP_ID: "REPLACE_ME"
+  GITHUB_APP_PRIVATE_KEY_PATH: "file:/etc/autonomous-dev/keys/github-app.pem"
+  github-app.pem: |
+    REPLACE_ME
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  labels:
+    app.kubernetes.io/name: control-plane
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: control-plane
+    spec:
+      automountServiceAccountToken: false # no k8s API from a replica — an absence of credential, not a policy
+      containers:
+        - name: control-plane
+          image: autonomous-dev/control-plane:latest
+          args: ["run", "--data-dir", "/var/lib/autonomous-dev", "--interval", "$(SCHEDULER_POLL_INTERVAL_S)"]
+          envFrom:
+            - configMapRef:
+                name: control-plane
+            - secretRef:
+                name: control-plane
+          ports:
+            - name: wake
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: wake
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: wake
+            periodSeconds: 15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/autonomous-dev
+            - name: keys
+              mountPath: /etc/autonomous-dev/keys
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          emptyDir: {} # the replica's own scratch: volumes, logs, the clone — nothing durable lives here
+        - name: keys
+          secret:
+            secretName: control-plane
+            items:
+              - key: github-app.pem
+                path: github-app.pem
+                mode: 0400
+---
+# Internal: the receiver's WAKE_URL is http://control-plane:8081. Never given an Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: control-plane
+  ports:
+    - name: wake
+      port: 8081
+      targetPort: wake

@@ -19,14 +19,54 @@ jobs:
         # Neither compose file has a test behind it — the stores rig is booted by the
         # job below, but the telemetry rig is a laptop tool CI never runs, so a typo
         # in it would first be found by a human waiting to look at a burst. `config`
-        # interpolates and validates without pulling anything.
+        # interpolates and validates without pulling anything. The platform profile
+        # (E5) is rendered too — it is off by default, so a bare `config` skips it.
         run: |
           docker compose -f docker/compose.yaml config -q
+          docker compose -f docker/compose.yaml --profile platform config -q
           docker compose -f docker/compose.telemetry.yaml config -q
       - name: migrations take no unsafe locks
         # Needs no database — it reads the SQL. Rules and exclusions live in
         # .squawk.toml, each exclusion with the claim that justifies it.
         run: uv run squawk packages/control-plane/src/control_plane/migrations/*.sql
+
+  # The deployment's artifacts (E5): the two platform images build, the public
+  # one is as empty as it claims, and the reference manifests are valid k8s.
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the control-plane image
+        run: docker build -f docker/control-plane/Dockerfile -t autonomous-dev/control-plane:latest .
+      - name: the webhook-receiver image
+        run: docker build -f docker/webhook-receiver/Dockerfile -t autonomous-dev/webhook-receiver:latest .
+      - name: the receiver image is an HMAC filter and nothing else
+        # TO-BE §5: no control-plane code, no ledger client, no GitHub client, no
+        # git, no docker behind the public route. Every module in the list must
+        # fail to import (an explicit check — `set -e` ignores a `!`-inverted
+        # command); the receiver itself must import, as a non-root user.
+        run: |
+          set -e
+          img=autonomous-dev/webhook-receiver:latest
+          for banned in control_plane dev_agent psycopg boto3 jwt requests; do
+            if docker run --rm --entrypoint python "$img" -c "import $banned" 2>/dev/null; then
+              echo "::error::the receiver image can import $banned — the public process is no longer just an HMAC filter"
+              exit 1
+            fi
+          done
+          if docker run --rm --entrypoint sh "$img" -c "command -v git || command -v docker" 2>/dev/null; then
+            echo "::error::the receiver image carries git or docker"; exit 1
+          fi
+          docker run --rm --entrypoint python "$img" -c "import webhook_receiver.cli, secret_refs"
+          test "$(docker run --rm --entrypoint id "$img" -u)" = "1000"
+      - name: the control-plane image runs the CLI
+        run: |
+          docker run --rm autonomous-dev/control-plane:latest --help >/dev/null
+          docker run --rm --entrypoint sh autonomous-dev/control-plane:latest -c "docker --version && git --version"
+      - name: the reference k8s manifests are valid
+        # kubeconform, pinned, from its image — no cluster, no kubectl; the
+        # manifests are examples (TO-BE §5) and this is what keeps them from rotting.
+        run: docker run --rm -v "$PWD/examples/k8s:/m:ro" ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary /m
 
   # The state block's per-PR proof: the schema applies from nothing, twice, and
   # the suite then runs against the real service backends rather than the
@@ -101,8 +141,9 @@ jobs:
       - name: the suite, against the service backends
         # Both contract suites see their service backend here — the ledger's
         # because LEDGER_DSN is set, the archive's because ARCHIVE_URL is — and
-        # so does the multi-replica race (tests/test_replicas.py, E2): two
-        # control-plane processes on this Postgres, one killed mid-burst.
+        # so do the process tests: the multi-replica race (tests/test_replicas.py,
+        # E2/E3) and the webhook path (tests/test_wakes.py, E5), replicas and
+        # the receiver as real processes on this Postgres.
         # Everything else keeps its own scratch space regardless
         # (tests/conftest.py explains why that has to be forced).
         run: uv run pytest

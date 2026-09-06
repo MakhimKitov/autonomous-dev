@@ -41,6 +41,8 @@ from control_plane.postgres import PostgresLedger
 from control_plane.scheduler import Fleet, Rails, Scheduler, default_replica
 from control_plane.store import LocalSessionArchive
 from control_plane.telemetry import init_telemetry
+from dev_agent.log import configure_logging
+from control_plane.wake import attach_wakes
 
 
 class Events:
@@ -144,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=0.2, help="the loop's sleep (`run --interval`)")
     parser.add_argument("--lease-s", type=int, default=3)
     parser.add_argument("--poll-interval-s", type=int, default=1, help="the observation lease's span")
+    parser.add_argument("--wake-bind", default=None,
+                        help="host:port for this replica's internal wake endpoint (E5; `WAKE_BIND`); "
+                             "port 0 binds an ephemeral one, announced in the `up` event")
     args = parser.parse_args(argv)
 
     # a replica that goes quiet can be asked where it is: `kill -USR1 <pid>`
@@ -151,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     for name in ("GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "OTEL_EXPORTER_OTLP_ENDPOINT"):
         os.environ.pop(name, None)  # a dev-mode burst: token-less, like the fakes
+    configure_logging()  # logfmt on stdout, as a replica's is; the test that wants it captures it
     init_telemetry()
     args.data_dir.mkdir(parents=True, exist_ok=True)
     events = Events(args.events)
@@ -183,8 +189,12 @@ def main(argv: list[str] | None = None) -> int:
             runner=runner,
         )
 
-    events.write("up", replica=default_replica())
-    return _serve(Fleet(stores, build_scheduler), args.interval, once=False)
+    fleet = Fleet(stores, build_scheduler)
+    # the wake wiring cli._run_fleet does: the ledger's channel always, the
+    # endpoint when asked — on a handle of its own, as the endpoint's thread needs
+    endpoint = attach_wakes(fleet, PostgresLedger(args.dsn), args.wake_bind or "")
+    events.write("up", replica=default_replica(), wake_port=endpoint.port if endpoint else None)
+    return _serve(fleet, args.interval, once=False)
 
 
 if __name__ == "__main__":

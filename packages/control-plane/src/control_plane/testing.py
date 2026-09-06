@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from control_plane.models import RepositoryRecord
-from control_plane.secrets import SecretError, SecretResolver
+from secret_refs import SecretError, SecretResolver
 
 E2E_ENV = "E2E"
 TEST_ENV_PREFIX = "TEST_"  # the allowlist boundary and the radioactivity marker

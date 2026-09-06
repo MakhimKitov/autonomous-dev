@@ -5,6 +5,7 @@ description = "The scheduler: spawns burst containers, owns all persistence (ses
 requires-python = ">=3.12"
 dependencies = [
     "dev-agent",
+    "secret-refs",
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "pyjwt>=2.8",
@@ -24,6 +25,7 @@ control-plane = "control_plane.cli:main"
 
 [tool.uv.sources]
 dev-agent = { workspace = true }
+secret-refs = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.9.21,<0.10.0"]

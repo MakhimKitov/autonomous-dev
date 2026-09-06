@@ -22,10 +22,13 @@ cp .env.example .env         # add CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-t
 
 ## Layout
 
-Two workspace packages behind the §12 seam — `packages/control-plane` (scheduler,
-owns all persistence + telemetry) and `packages/dev-agent` (the burst worker; ships
-alone in the image and **must never import control-plane**). The env-var contract
-lives in `dev_agent.env`; control-plane imports it, never the reverse.
+Four workspace packages behind the §12 seam — `packages/control-plane` (scheduler,
+owns all persistence + telemetry), `packages/dev-agent` (the burst worker; ships
+alone in the image and **must never import control-plane**), `packages/webhook-receiver`
+(the public HMAC filter, E5; its own image, **must never import control-plane**
+either — CI checks the image) and `packages/secret-refs` (SecretResolver, stdlib
+only — the one module the control plane and the receiver share). The env-var
+contract lives in `dev_agent.env`; control-plane imports it, never the reverse.
 
 ## Run
 
@@ -44,6 +47,13 @@ uv run control-plane burst --issue 1 --repo ../discord-bot \
 uv run control-plane run --repo ../discord-bot     # loop (--once for a single tick)
 uv run control-plane stop --reason "…"             # kill switch: the org's STOP row — every replica stands down, live bursts are killed by their runners
 uv run control-plane resume                        # lift it; the loops pick up on their next tick, no restart
+
+# Webhooks as wake-up (E5): WAKE_BIND on the replica, the receiver in front of it
+WAKE_BIND=0.0.0.0:8081 uv run control-plane run …  # the internal wake endpoint (+ GET /healthz)
+WEBHOOK_APPS="<app id>=env:DEV_WEBHOOK_SECRET" WAKE_URL=http://localhost:8081 uv run webhook-receiver serve
+
+# The platform as images + compose (E5): stores + migrate + 2 replicas + receiver
+docker compose -f docker/compose.yaml --profile platform up -d --build --wait
 ```
 
 ## Stores
@@ -331,6 +341,35 @@ holds every runner to the exit code, the tee, the heartbeat on the clock, the
 fence, `alive` and `burst_env` unchanged. The suite's fakes in docker's seat
 (`SleepingRunner`, `ProbingRunner`, …) are handed in through the seam
 (`Scheduler(runner=…)`, `execute_burst(runner=…)`), never monkeypatched in.
+
+**Webhooks as wake-up, polls as truth (E5)**: three parts and one wall (TO-BE §5).
+`packages/webhook-receiver` is the platform's only public surface — verify
+`X-Hub-Signature-256` against the App's webhook secret (`WEBHOOK_APPS="<app id>=
+<secret ref>,…"`, refs resolved once at start), drop replayed delivery ids (an
+in-memory LRU; a forged delivery is 401 and *not* remembered, so it cannot poison
+the dedup), POST a wake (`repository`, `kind`, `delivery`) to `WAKE_URL`. It never
+imports the control plane, and its image (`docker/webhook-receiver/Dockerfile`)
+cannot import `control_plane`/`psycopg`/`boto3` and has no git or docker — CI
+checks. The replica's internal endpoint (`WAKE_BIND`, `wake.py`; unauthenticated by
+design — the worst a caller can do is one poll of real GitHub state) turns a wake
+into one ledger statement, `wake_repository`: the product's observation lease is
+cleared (a rate, not a wall — clearing it is exactly one extra poll) and a
+`product_woken` event with the delivery id is written; the `wakes` channel is
+notified. Every loop sleeps on its engine's `wake` flag instead of a timer
+(`_serve`); the endpoint sets it locally and `Ledger.subscribe_wakes` (Postgres
+LISTEN, own thread and connection, reconnecting) sets it on every replica — so a
+webhook that reached one replica has all of them looking within a second, and the
+observation lease still makes exactly one poll. The endpoint holds its own ledger
+handle (`open_ledger` twice): it writes from the server's threads, the loop from
+its own. `tests/test_wakes.py` runs the done-when as processes on Postgres: two
+replicas + the real receiver; a signed delivery is one poll within seconds, a
+replay and two forgeries are none — each named in the receiver's log by delivery
+id — and a second delivery is exactly one more. The images
+(`docker/control-plane/Dockerfile` — the CLI plus git and the docker *CLI*, the
+host's socket mounted; the receiver's, slim) and the compose `platform` profile
+(migrate + 2 replicas + receiver over the stores) are the T0 deployment shape;
+`examples/k8s/` is the reference cluster shape, kubeconform-validated, with the
+caveat that bursts on a cluster are Stage G.
 
 ### Task identity
 

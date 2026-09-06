@@ -39,6 +39,9 @@ for a single scheduler, and the seam a pool replaces when replicas arrive (E).
 
 from __future__ import annotations
 
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Any
@@ -55,13 +58,16 @@ from control_plane.models import (
     EVENT_ORG_STOPPED,
     EVENT_PRODUCT_REGISTERED,
     EVENT_PRODUCT_UPDATED,
+    EVENT_PRODUCT_WOKEN,
     EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
+    WAKE_CHANNEL,
     AuditRecord,
     BurstRecord,
     Event,
     OrgStop,
+    ProductState,
     RepositoryRecord,
     RoleRecord,
     TaskRecord,
@@ -80,6 +86,8 @@ from control_plane.store import (
 )
 
 log = structlog.get_logger()
+
+WAKE_RECONNECT_S = 5.0  # a listener that lost its connection tries again after this long
 
 # Which columns are timestamps, per table. Declared, not detected: the store layer
 # is the only place that knows, and a silent miss would hand a caller a datetime
@@ -617,6 +625,51 @@ class PostgresLedger:
             {"replica": replica, "lease_s": float(lease_s), "repository": repository},
         )
         return cursor.rowcount == 1
+
+    # --- wakes (E5) ---
+
+    def wake_repository(self, repository: str, kind: str, delivery: str | None = None) -> bool:
+        """A webhook said this product changed: clear its observation lease so the
+        next replica to look polls it now, announce it, and notify the replicas'
+        wake channel so they look now rather than at the interval. One
+        statement — the lease, the event and both notifications — and nothing
+        at all for a product that is not active."""
+        cursor = self._execute(
+            "WITH woken AS ("
+            "    UPDATE repositories SET claimed_by = NULL, claimed_until = NULL"
+            "    WHERE repository = %(repository)s AND state = %(active)s"
+            "    RETURNING repository"
+            "), announced AS ("
+            "    INSERT INTO events (kind, payload)"
+            "    SELECT %(kind)s, jsonb_build_object('repository', repository, 'kind', %(event)s::text,"
+            "                                        'delivery', %(delivery)s::text)"
+            "    FROM woken RETURNING id"
+            ") SELECT pg_notify(%(channel)s, id::text), pg_notify(%(wakes)s, %(repository)s) FROM announced",
+            {"repository": repository, "active": ProductState.ACTIVE, "kind": EVENT_PRODUCT_WOKEN,
+             "event": kind, "delivery": delivery, "channel": EVENT_CHANNEL, "wakes": WAKE_CHANNEL},
+        )
+        return bool(cursor.fetchall())
+
+    def subscribe_wakes(self, on_wake: Callable[[str], None]) -> None:
+        """LISTEN on the wake channel from a thread of its own, for as long as the
+        process lives: every notification — a peer's endpoint took a webhook —
+        calls `on_wake(repository)`. Its own connection, because a listening
+        connection does nothing else; a lost one is reconnected, and the
+        notifications missed meanwhile cost latency only (the next tick polls)."""
+
+        def listen() -> None:
+            while True:
+                try:
+                    with psycopg.connect(self.dsn, autocommit=True) as conn:
+                        conn.execute(f"LISTEN {WAKE_CHANNEL}")
+                        log.info("listening for wakes", channel=WAKE_CHANNEL)
+                        for notice in conn.notifies():
+                            on_wake(notice.payload)
+                except psycopg.Error as exc:
+                    log.warning("wake listener lost the ledger — reconnecting", error=str(exc))
+                    time.sleep(WAKE_RECONNECT_S)
+
+        threading.Thread(target=listen, name="wake-listener", daemon=True).start()
 
     # --- the org STOP (E3) ---
     #

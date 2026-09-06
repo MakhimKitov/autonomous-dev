@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from control_plane.models import RepositoryRecord
-from control_plane.secrets import SecretResolver
+from secret_refs import SecretResolver
 from control_plane.testing import (
     CitationError,
     ManifestError,

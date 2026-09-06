@@ -32,6 +32,7 @@ from control_plane.models import (
     BurstRecord,
     BurstStatus,
     OrgStop,
+    ProductState,
     RepositoryRecord,
     Role,
     TaskRecord,
@@ -1079,6 +1080,87 @@ def test_roles_and_kinds_round_trip_as_their_string_values(ledger):
     ledger.record_burst(_burst(kind=BurstKind.TEST, role=Role.TESTER))
     burst = ledger.get_burst("b1")
     assert (burst.kind, burst.role) == ("test", "tester")
+
+
+# --- wakes (E5): a webhook clears the observation lease and says so ---
+
+
+def test_a_wake_clears_the_observation_lease_and_announces_itself(ledger):
+    """The receiver's forward becomes one write: the product's live observation
+    lease is cleared — the next replica to look polls it now instead of at the
+    interval — and a `product_woken` event names the repository, the GitHub
+    event and the delivery id the receiver logged. The lease is a rate, so
+    clearing a live one is exactly one extra poll: the whole price of a wake."""
+    assert ledger.claim_observation(REPOSITORY, REPLICA, 60) is True
+    assert ledger.claim_observation(REPOSITORY, PEER, 60) is False  # live
+    events_before = len(ledger.events())
+
+    assert ledger.wake_repository(REPOSITORY, "issues", "d-1") is True
+    row = ledger.get_repository(REPOSITORY)
+    assert (row.claimed_by, row.claimed_until) == (None, None)
+    assert ledger.claim_observation(REPOSITORY, PEER, 60) is True  # anyone's, now
+
+    (woken,) = ledger.events()[events_before:]
+    assert woken.kind == "product_woken"
+    assert woken.payload == {"repository": REPOSITORY, "kind": "issues", "delivery": "d-1"}
+
+    # a wake with no delivery id — a hand-made one — is still whole
+    assert ledger.wake_repository(REPOSITORY, "manual") is True
+    assert ledger.events()[-1].payload["delivery"] is None
+
+
+def test_a_wake_for_a_product_not_observed_writes_nothing(ledger):
+    """Unknown or paused: not observed, so not woken — no lease to clear, no
+    event to announce. The endpoint answers 404 on this False."""
+    events_before = len(ledger.events())
+    assert ledger.wake_repository("ghost/none", "issues", "d-2") is False
+    ledger.set_repository_state(REPOSITORY, ProductState.PAUSED, "op", reason="rehearsal")
+    assert ledger.wake_repository(REPOSITORY, "issues", "d-3") is False
+    assert [e.kind for e in ledger.events()[events_before:]] == ["product_paused"]
+
+
+@needs_postgres
+def test_a_wake_notifies_the_wake_channel_and_subscribers_hear_it(pg_dsn):
+    """The replicas' channel: `wake_repository` notifies `wakes` with the
+    repository, and `subscribe_wakes` — a LISTEN on its own connection — calls
+    back with it. What lets a webhook that reached one replica's endpoint cut
+    every replica's sleep."""
+    import threading
+
+    from control_plane.models import WAKE_CHANNEL
+    from control_plane.postgres import PostgresLedger
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+    ledger = PostgresLedger(pg_dsn)
+    ledger.register_repository(RepositoryRecord(repository=REPOSITORY, team="owners"), actor="t")
+    heard: list[str] = []
+    arrived = threading.Event()
+
+    def on_wake(repository):
+        heard.append(repository)
+        arrived.set()
+
+    try:
+        with psycopg.connect(pg_dsn, autocommit=True) as listener:
+            listener.execute(f"LISTEN {WAKE_CHANNEL}")
+            ledger.subscribe_wakes(on_wake)
+            deadline = datetime.now(UTC).timestamp() + 5
+            # the subscriber's own LISTEN lands asynchronously; wake until it hears one
+            while not arrived.is_set() and datetime.now(UTC).timestamp() < deadline:
+                assert ledger.wake_repository(REPOSITORY, "push", "d-9") is True
+                arrived.wait(0.2)
+            assert heard and heard[0] == REPOSITORY
+            # and the raw channel carries the repository, nothing more
+            notice = next(listener.notifies(timeout=2))
+            assert (notice.channel, notice.payload) == (WAKE_CHANNEL, REPOSITORY)
+        # a product that is not woken notifies nobody
+        heard.clear()
+        arrived.clear()
+        assert ledger.wake_repository("ghost/none", "push") is False
+        assert not arrived.wait(0.5) and heard == []  # nothing arrives
+    finally:
+        ledger.close()
 
 
 # --- Postgres-only behavior ---

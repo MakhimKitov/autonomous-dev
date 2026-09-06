@@ -24,7 +24,11 @@ within a heartbeat — the runner kills it, wherever it runs. A process's own
 shutdown (SIGTERM) is the same fence with a local flag, and no ledger write.
 Where a burst runs is a seam (E4): the scheduler holds one `Runner` for the
 process — `run` for every spawn, `alive` for the reconciler's proof-of-life
-question — and never spells ``docker`` itself.
+question — and never spells ``docker`` itself. Webhooks are wake-ups (E5): a
+delivery the receiver verified becomes `wake_repository` — the product's
+observation lease cleared, so the next look polls it now — and every
+replica's loop sleeps on a `wake` flag the ledger's channel sets; polls stay
+the only truth, so a wake can never cost more than one extra poll.
 
 A ``Scheduler`` is one product's engine — its ledger reads are scoped to its
 repository, so two products in one ledger cannot see each other's tasks. The
@@ -69,7 +73,7 @@ from control_plane.review import (
     parse_findings,
 )
 from control_plane.runner import DEFAULT_IMAGE, Runner, open_runner
-from control_plane.secrets import SecretResolver
+from secret_refs import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
     ManifestError,
@@ -211,6 +215,9 @@ class Scheduler:
         # the tick reads it, the heartbeat fences on it. A fleet shares one across
         # every scheduler it builds
         self.halt = halt if halt is not None else threading.Event()
+        # the loop's wake flag (E5): `_serve` sleeps on it; a webhook's wake — this
+        # process's endpoint or a peer's, through the ledger's channel — sets it
+        self.wake = threading.Event()
         # where this replica's bursts run (E4): the one runner the process has,
         # asked to `run` every burst and, by the reconciler, whether one is `alive`
         self.runner = runner if runner is not None else open_runner()
@@ -1032,6 +1039,7 @@ class Fleet:
         self.stores = stores
         self.build_scheduler = build_scheduler
         self.halt = threading.Event()  # the process's shutdown flag (E3), shared with every scheduler built
+        self.wake = threading.Event()  # the loop's wake flag (E5): a webhook's wake cuts the sleep
 
     def stopped(self) -> bool:
         """`standing_down` for this loop: the process's flag or the org's row."""

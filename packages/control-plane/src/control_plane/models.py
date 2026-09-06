@@ -308,7 +308,19 @@ EVENT_ROLE_UPDATED = "role_updated"  # `role set` (D5): payload names the role a
 # so the page it becomes needs no second read.
 EVENT_ORG_STOPPED = "org_stopped"
 EVENT_ORG_RESUMED = "org_resumed"
+# A product woken by a webhook (E5): the receiver's forward landed, the row's
+# observation lease was cleared, and the fleet will poll it now rather than at
+# the interval. Payload: `repository`, `kind` (the GitHub event name) and the
+# `delivery` id — the same id the receiver logged, so the two logs and this row
+# line up, and `created_at` → the task's first burst is the ready-to-claim
+# latency E6 measures. Webhooks are wake-ups; polls stay the truth (TO-BE §5).
+EVENT_PRODUCT_WOKEN = "product_woken"
 
 # The optional wake channel. A consumer may LISTEN on it to poll sooner; nothing
 # is allowed to depend on a notification arriving.
 EVENT_CHANNEL = "events"
+# The replicas' own wake channel (E5): `wake_repository` notifies it with the
+# repository as payload, and every replica's loop LISTENs, so a webhook that
+# reached one replica's endpoint cuts every replica's sleep. Same rule as above
+# — a lost notification costs latency (the next tick polls anyway), never truth.
+WAKE_CHANNEL = "wakes"

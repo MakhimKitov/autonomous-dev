@@ -1,0 +1,10 @@
+[project]
+name = "secret-refs"
+version = "0.1.0"
+description = "SecretResolver (TO-BE §4, D4): secret refs — env:/file:/helper: — resolved at use. Stdlib only, the leaf both the control plane and the webhook receiver share; must never grow a dependency."
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
