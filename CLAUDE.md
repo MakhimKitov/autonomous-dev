@@ -52,7 +52,8 @@ uv run control-plane resume                        # lift it; the loops pick up 
 WAKE_BIND=0.0.0.0:8081 uv run control-plane run …  # the internal wake endpoint (+ GET /healthz)
 WEBHOOK_APPS="<app id>=env:DEV_WEBHOOK_SECRET" WAKE_URL=http://localhost:8081 uv run webhook-receiver serve
 
-# The platform as images + compose (E5): stores + migrate + 2 replicas + receiver
+# The platform as images + compose (E5/E6): stores + migrate + 2 replicas + receiver (+ the dev-agent image)
+# DEPLOYMENT.md is the runbook: PLATFORM_DATA/PLATFORM_SECRETS pinned in docker/.env, .env.receiver for the receiver
 docker compose -f docker/compose.yaml --profile platform up -d --build --wait
 ```
 
@@ -370,6 +371,23 @@ host's socket mounted; the receiver's, slim) and the compose `platform` profile
 (migrate + 2 replicas + receiver over the stores) are the T0 deployment shape;
 `examples/k8s/` is the reference cluster shape, kubeconform-validated, with the
 caveat that bursts on a cluster are Stage G.
+
+**The gate (E6) and what it changed.** `DEPLOYMENT.md` — the operator's side and the
+rehearsal record. Four things the rehearsal forced: **a wake settles** — GitHub's
+read side lags its own webhook (a `ready` label listed 0.75 s after it landed), so
+`wake_repository` *reserves* the observation lease (`claimed_by = NULL, claimed_until
+= now() + WAKE_SETTLE_S`, 2 s; a wake inside a pending window joins it) and the
+woken loop sleeps the settle before its tick — without it the woken poll missed the
+label and the claim came at the interval (65 s; with it 6.1 s). **The receiver's
+environment is its own file** (`.env.receiver`), never `.env` — compose had handed
+the public process every platform credential. **`PLATFORM_SECRETS`**: the App keys
+are a same-path read-only mount like `PLATFORM_DATA`, and `.env` key paths are
+absolute — a relative path resolves nowhere in the box. **Transport failures on
+GitHub calls are `GitHubApiError`/`GitHubAuthError`** (`_call`, `_check`): a DNS
+blip surfaced as a raw `requests.ConnectionError` and took a replica down; the loop
+already retries those errors next tick. Replicas and receiver restart
+`unless-stopped`; the dev-agent image is a build-only compose service
+(`replicas: 0`) so `up --build` produces all three.
 
 ### Task identity
 

@@ -47,6 +47,7 @@ from control_plane.models import (
     EVENT_PRODUCT_RESUMED,
     EVENT_PRODUCT_UPDATED,
     EVENT_PRODUCT_WOKEN,
+    WAKE_SETTLE_S,
     EVENT_ROLE_UPDATED,
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
@@ -298,7 +299,9 @@ class Ledger(Protocol):
     def update_repository(self, repository: str, changes: dict, actor: str, reason: str = "") -> None: ...
     def touch_repository_burst(self, repository: str, at: str) -> None: ...
     def claim_observation(self, repository: str, replica: str, lease_s: float) -> bool: ...
-    def wake_repository(self, repository: str, kind: str, delivery: str | None = None) -> bool: ...
+    def wake_repository(
+        self, repository: str, kind: str, delivery: str | None = None, *, settle_s: float = WAKE_SETTLE_S
+    ) -> bool: ...
     def subscribe_wakes(self, on_wake: Callable[[str], None]) -> None: ...
     def org_stop(self) -> OrgStop | None: ...
     def stop_org(self, actor: str, reason: str) -> None: ...
@@ -1007,17 +1010,27 @@ class SqliteLedger:
 
     # --- wakes (E5) ---
 
-    def wake_repository(self, repository: str, kind: str, delivery: str | None = None) -> bool:
-        """A webhook said this product changed: clear its observation lease so the
-        next replica to look polls it now, and announce it. The lease is a rate,
-        not a correctness wall (E2 — observe is idempotent by CAS), so clearing
-        a live one costs at most one extra poll, which is the whole price of a
-        forged or replayed delivery. False for a product that is not active —
-        paused products are not observed, woken or not — and nothing is written."""
+    def wake_repository(
+        self, repository: str, kind: str, delivery: str | None = None, *, settle_s: float = WAKE_SETTLE_S
+    ) -> bool:
+        """A webhook said this product changed: take the observation lease from
+        whoever holds it and reserve it — nobody's, until `settle_s` from now —
+        so the next look happens once the change has settled (E6: GitHub's read
+        side lags its webhook), then is anyone's; and announce it. The lease is
+        a rate, not a correctness wall (E2 — observe is idempotent by CAS), so
+        taking a live one costs at most one extra poll, which is the whole price
+        of a forged or replayed delivery. A wake inside a pending window joins it
+        rather than pushing it, so a burst of deliveries is one look, not a chase.
+        False for a product that is not active — paused products are not
+        observed, woken or not — and nothing is written."""
+        now = utc_now()
         cursor = self._conn.execute(
-            "UPDATE repositories SET claimed_by = NULL, claimed_until = NULL "
+            "UPDATE repositories SET claimed_until = CASE"
+            "        WHEN claimed_by IS NULL AND claimed_until > :now THEN claimed_until"
+            "        ELSE :settled END,"
+            "    claimed_by = NULL "
             "WHERE repository = :repository AND state = :active",
-            {"repository": repository, "active": ProductState.ACTIVE},
+            {"now": now, "settled": _after(now, settle_s), "repository": repository, "active": ProductState.ACTIVE},
         )
         if cursor.rowcount == 0:
             self._conn.rollback()

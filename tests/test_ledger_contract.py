@@ -19,6 +19,7 @@ out why it has to be: the comparison, not the spelling, is what a caller sees.
 
 import os
 import sqlite3
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -1085,19 +1086,19 @@ def test_roles_and_kinds_round_trip_as_their_string_values(ledger):
 # --- wakes (E5): a webhook clears the observation lease and says so ---
 
 
-def test_a_wake_clears_the_observation_lease_and_announces_itself(ledger):
+def test_a_wake_takes_the_observation_lease_and_announces_itself(ledger):
     """The receiver's forward becomes one write: the product's live observation
-    lease is cleared — the next replica to look polls it now instead of at the
-    interval — and a `product_woken` event names the repository, the GitHub
-    event and the delivery id the receiver logged. The lease is a rate, so
-    clearing a live one is exactly one extra poll: the whole price of a wake."""
+    lease is taken from its holder — the next look is a poll now-ish instead of
+    at the interval — and a `product_woken` event names the repository, the
+    GitHub event and the delivery id the receiver logged. The lease is a rate,
+    so taking a live one is exactly one extra poll: the whole price of a wake."""
     assert ledger.claim_observation(REPOSITORY, REPLICA, 60) is True
     assert ledger.claim_observation(REPOSITORY, PEER, 60) is False  # live
     events_before = len(ledger.events())
 
-    assert ledger.wake_repository(REPOSITORY, "issues", "d-1") is True
+    assert ledger.wake_repository(REPOSITORY, "issues", "d-1", settle_s=0) is True
     row = ledger.get_repository(REPOSITORY)
-    assert (row.claimed_by, row.claimed_until) == (None, None)
+    assert row.claimed_by is None  # nobody's — the holder's minute is over
     assert ledger.claim_observation(REPOSITORY, PEER, 60) is True  # anyone's, now
 
     (woken,) = ledger.events()[events_before:]
@@ -1105,8 +1106,30 @@ def test_a_wake_clears_the_observation_lease_and_announces_itself(ledger):
     assert woken.payload == {"repository": REPOSITORY, "kind": "issues", "delivery": "d-1"}
 
     # a wake with no delivery id — a hand-made one — is still whole
-    assert ledger.wake_repository(REPOSITORY, "manual") is True
+    assert ledger.wake_repository(REPOSITORY, "manual", settle_s=0) is True
     assert ledger.events()[-1].payload["delivery"] is None
+
+
+def test_a_wake_settles_before_anyone_looks(ledger):
+    """E6: GitHub's webhook for a write arrives before GitHub's own reads show
+    it, so a wake reserves the observation — nobody's, for the settle window —
+    and only then frees it. A poll inside the window would spend the lease on
+    the old answer for a whole interval, which is what the rehearsal saw. A
+    second wake inside a pending window joins it: three deliveries in a second
+    are one look, not a chase; a wake onto a *held* lease starts a fresh one."""
+    assert ledger.wake_repository(REPOSITORY, "issues", "d-1", settle_s=0.6) is True
+    reserved = ledger.get_repository(REPOSITORY)
+    assert reserved.claimed_by is None and reserved.claimed_until is not None
+    assert ledger.claim_observation(REPOSITORY, REPLICA, 60) is False  # settling — hands off
+    assert ledger.wake_repository(REPOSITORY, "issues", "d-2", settle_s=60) is True  # joins d-1's window
+    assert ledger.get_repository(REPOSITORY).claimed_until == reserved.claimed_until
+    time.sleep(0.7)
+    assert ledger.claim_observation(REPOSITORY, REPLICA, 60) is True  # settled: anyone's
+    assert ledger.wake_repository(REPOSITORY, "push", "d-3", settle_s=0.3) is True  # a held lease: taken, settling anew
+    assert ledger.claim_observation(REPOSITORY, PEER, 60) is False
+    time.sleep(0.4)
+    assert ledger.claim_observation(REPOSITORY, PEER, 60) is True
+    assert [e.payload["delivery"] for e in ledger.events() if e.kind == "product_woken"] == ["d-1", "d-2", "d-3"]
 
 
 def test_a_wake_for_a_product_not_observed_writes_nothing(ledger):

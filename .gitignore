@@ -13,6 +13,7 @@ wheels/
 .env
 .env.*
 !.env.example
+!.env.receiver.example
 .pytest_cache/
 
 # Credentials — the GitHub App private key lives here, never in git

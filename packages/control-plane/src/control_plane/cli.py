@@ -45,6 +45,7 @@ from control_plane.github_auth import (
 from control_plane.migrate import MigrationError, migrate, status
 from control_plane.models import (
     ORG_TARGET,
+    WAKE_SETTLE_S,
     ProductState,
     RepositoryRecord,
     RoleRecord,
@@ -842,8 +843,13 @@ def _serve(engine, interval: int, once: bool) -> int:
             break
         # the sleep: the interval, or sooner — a wake (E5: a webhook reached this
         # replica's endpoint or a peer's) or a shutdown sets the flag
-        engine.wake.wait(interval)
-        engine.wake.clear()
+        if engine.wake.wait(interval):
+            engine.wake.clear()
+            # a wake settles before it is looked at (E6): GitHub delivered the
+            # webhook before its read side shows the write, and a poll now would
+            # spend the observation lease on the old answer for a whole interval.
+            # The ledger reserved the observation for as long; `halt` cuts this too.
+            engine.halt.wait(WAKE_SETTLE_S)
         if engine.halt.is_set():
             log.info("shutting down")
             break

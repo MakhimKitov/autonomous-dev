@@ -35,7 +35,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from control_plane.migrate import migrate
-from control_plane.models import RepositoryRecord
+from control_plane.models import WAKE_SETTLE_S, RepositoryRecord
 from control_plane.postgres import PostgresLedger
 from control_plane.store import LEDGER_DSN_ENV
 from psycopg.conninfo import make_conninfo
@@ -48,7 +48,7 @@ REPOSITORY = "owner/product"
 APP_ID = "424242"
 SECRET = "drill-webhook-secret"
 INTERVAL = 30  # the loop's sleep and the observation lease: far longer than the test, so polls are ours
-PROMPT_S = 3.0  # how soon after a wake the poll must have happened
+PROMPT_S = WAKE_SETTLE_S + 3.0  # how soon after a wake the poll must have happened: the settle (E6), then a tick
 
 
 @pytest.fixture()
@@ -176,7 +176,7 @@ def test_a_signed_delivery_is_one_poll_and_forgeries_and_replays_are_none(fresh_
         assert (status, verdict["outcome"]) == (202, "forwarded"), verdict
         wait_for(lambda: len(polls()) == 2, timeout=PROMPT_S,
                  what=lambda: f"the woken poll within {PROMPT_S}s\n{a.dump()}\n{b.dump()}\n{receiver.log()}")
-        assert polls()[1] - sent < PROMPT_S
+        assert WAKE_SETTLE_S * 0.9 < polls()[1] - sent < PROMPT_S  # after the settle (E6), well before the interval
         (woken,) = woken_events()
         assert woken.payload == {"repository": REPOSITORY, "kind": "issues", "delivery": "d-real-1"}
 

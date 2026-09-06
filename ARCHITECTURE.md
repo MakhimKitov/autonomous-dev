@@ -372,6 +372,22 @@ the ephemeral container.
 > replicas and the receiver on one Postgres. The platform now ships as images
 > (control-plane, webhook-receiver) with a compose `platform` profile — the T0
 > deployment on a Docker host — and reference k8s manifests, validated in CI.
+>
+> **As built (E6, the gate):** the laptop retired — the whole platform ran as
+> containers on a Docker host (the laptop itself, for the rehearsal) behind a
+> public HTTPS route, and the checklist held: ready → claim in **6.1 s** through
+> the webhook path; a replica SIGKILLed mid-burst left an orphan container the
+> survivor watched (`runner.alive`) and never doubled, then marked killed and
+> retried — the retry adopting the orphan's PR by branch prefix; the org STOP
+> row held for hours with a `ready` issue pending; GitHub's own redelivery and
+> a forgery through the route were zero polls and zero writes; the single-node
+> pair stayed byte-for-byte. The gate paid for itself four times: a wake that
+> fires before GitHub's read side is consistent now **settles** (`WAKE_SETTLE_S`
+> — the first measurement was 65 s, a poll that missed the label and held the
+> lease); the receiver gets its own environment file, never `.env`; the App keys
+> live under a same-path `PLATFORM_SECRETS` mount; and a transport failure on a
+> GitHub call is a `GitHubApiError`, not a dead replica. `DEPLOYMENT.md` is the
+> operator's runbook and the rehearsal's record.
 
 - **Control DB — Postgres.** The queryable index the scheduler reasons over: `issue ↔
   session_id ↔ branch`, the burst ledger (when/where/cost/tokens), lifecycle status,

@@ -132,10 +132,13 @@ def test_the_sleep_is_cut_short_by_the_flag():
     assert engine.ticks == 1
 
 
-def test_a_wake_cuts_the_sleep_and_the_next_tick_follows(tmp_path):
+def test_a_wake_cuts_the_sleep_and_the_next_tick_follows_after_the_settle(monkeypatch):
     """E5: a webhook's wake sets the flag during the interval; the loop ticks
-    now instead of `--interval` later, and then sleeps again — the flag is
-    consumed, not left set (or the loop would spin)."""
+    soon instead of `--interval` later, and then sleeps again — the flag is
+    consumed, not left set (or the loop would spin). E6: "soon" is the settle
+    later, not now — GitHub's reads lag its webhook — and a shutdown during the
+    settle is not made to wait it out."""
+    monkeypatch.setattr(cli, "WAKE_SETTLE_S", 0.5)
     engine = Engine()
     ticked_at = []
 
@@ -149,4 +152,13 @@ def test_a_wake_cuts_the_sleep_and_the_next_tick_follows(tmp_path):
     started = time.monotonic()
     assert cli._serve(engine, interval=30, once=False) == 0
     assert engine.ticks == 2
-    assert 0.05 < ticked_at[1] - started < 5.0  # the second tick came with the wake, not the interval
+    assert 0.55 < ticked_at[1] - started < 5.0  # with the wake plus the settle, not at the interval
+
+    # a shutdown that lands during the settle ends the loop at once
+    monkeypatch.setattr(cli, "WAKE_SETTLE_S", 30)
+    engine = Engine()
+    threading.Timer(0.1, engine.wake.set).start()
+    threading.Timer(0.2, engine.shut_down).start()
+    started = time.monotonic()
+    assert cli._serve(engine, interval=30, once=False) == 0
+    assert engine.ticks == 1 and time.monotonic() - started < 5.0

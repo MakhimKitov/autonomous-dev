@@ -1,6 +1,7 @@
 """The scheduler's GitHub surface, against a faked requests transport."""
 
 import pytest
+import requests
 from control_plane.github_api import (
     COPILOT_REVIEWER,
     GitHubApi,
@@ -72,6 +73,20 @@ def test_errors_raise_with_context():
     api, _ = _api({("POST", "/repos/owner/product/issues/7/comments"): FakeResponse(403, text="forbidden")})
     with pytest.raises(GitHubApiError, match="commenting on #7.*403"):
         api.comment(7, "hello")
+
+
+def test_no_response_at_all_is_the_same_error_as_a_bad_one():
+    """E6: a name-resolution blip surfaced as a raw requests.ConnectionError out
+    of a tick and took a replica down. No response is a GitHubApiError like any
+    other — the loop logs it and retries next tick."""
+
+    def transport(method, url, **kwargs):
+        raise requests.ConnectionError("Failed to resolve 'api.github.com'")
+
+    api = GitHubApi("owner/product", "ghs_test", request=transport)
+    with pytest.raises(GitHubApiError, match="listing ready issues: ConnectionError: .*resolve") as caught:
+        api.list_ready_issues()
+    assert isinstance(caught.value.__cause__, requests.ConnectionError)
 
 
 def test_open_pr_matched_by_branch_prefix():
