@@ -443,8 +443,11 @@ instruments (`TO-BE.md` §12).
   `org_stopped` (payload carries the reason too: it is a page) and
   `org_resumed` — in the same shape. `product_woken` (E5) is the webhook's
   trace: `repository`, `kind` (the GitHub event) and the receiver's `delivery`
-  id, written in the statement that clears the product's observation lease —
-  its `created_at` against the task's first burst is the ready-to-claim latency.
+  id, written in the statement that takes the product's observation lease and
+  reserves it for the settle (`WAKE_SETTLE_S`, E6: `claimed_by = NULL,
+  claimed_until = now() + settle` — a wake inside a pending window joins it) —
+  its `created_at` against the task row's `created_at` is the ready-to-claim
+  latency (6.1 s at the gate).
   `capacity_exhausted`, `subscription_expiring` and `task_blocked` arrive with
   the stages that raise them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`

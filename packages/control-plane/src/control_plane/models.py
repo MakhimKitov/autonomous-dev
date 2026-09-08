@@ -324,3 +324,13 @@ EVENT_CHANNEL = "events"
 # reached one replica's endpoint cuts every replica's sleep. Same rule as above
 # — a lost notification costs latency (the next tick polls anyway), never truth.
 WAKE_CHANNEL = "wakes"
+
+# How long a wake settles before anyone looks (E6). GitHub delivers the webhook
+# for a write before its own read side shows that write: the gate rehearsal saw
+# a `ready` label listed 0.75 s after it landed, and the poll the wake fired at
+# 0.6 s missed it — then held the observation lease for a whole interval, so the
+# wake had made the claim *later*, not sooner. A wake therefore reserves the
+# product's observation for these seconds (nobody polls a state that is still
+# settling) and the woken loops sleep as long before their tick. Measured lag
+# with margin, not a knob; a wake that lands inside a pending window joins it.
+WAKE_SETTLE_S = 2.0

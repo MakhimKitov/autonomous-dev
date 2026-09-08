@@ -64,7 +64,8 @@ def test_a_wake_is_one_ledger_write_and_one_nudge(rig):
     assert (status, body) == (202, {"woken": True})
     assert engine.wake.is_set()  # the loop's sleep is over
     row = ledger.get_repository(REPOSITORY)
-    assert (row.claimed_by, row.claimed_until) == (None, None)  # the next look polls now
+    assert row.claimed_by is None  # taken from its holder — the next look, after the settle, polls
+    assert ledger.claim_observation(REPOSITORY, "host-b:1", 60) is False  # settling (E6): hands off for now
     (woken,) = ledger.events()[events_before:]
     assert woken.kind == "product_woken"
     assert woken.payload == {"repository": REPOSITORY, "kind": "issues", "delivery": "d-1"}

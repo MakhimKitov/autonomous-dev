@@ -272,14 +272,27 @@ decides nothing else. Three parts, one wall between them (TO-BE §5):
   delivery. So a webhook that reached one replica has every replica looking within
   a second, and the observation lease still makes exactly one of them poll. A lost
   notification costs latency (the interval), never truth.
+- **A wake settles before anyone looks (E6).** GitHub delivers the webhook for a
+  write before its own read side shows the write: the gate rehearsal saw `?labels=
+  ready` list an issue 0.75 s after the label landed, and the poll the wake fired
+  at 0.6 s missed it — then held the observation lease for the whole interval, so
+  the wake had made the claim *later* (65 s). So `wake_repository` does not clear
+  the lease but **reserves** it — `claimed_by = NULL, claimed_until = now() +
+  WAKE_SETTLE_S` (2 s): nobody's, and nobody may take it until the window passes —
+  and the woken loops sleep the same `WAKE_SETTLE_S` before their tick. A wake that
+  lands inside a pending window joins it rather than pushing it, so the platform's
+  own label edits (three deliveries in a second) are one look, not a chase; a wake
+  onto a *held* lease takes it and settles anew. Measured lag with margin, not a
+  knob. Rehearsed: ready → claim in 6.1 s.
 
 `tests/test_wakes.py` runs the done-when as processes on Postgres: two replicas (one
 with an endpoint, one hearing wakes only through the channel) and the real receiver;
-a signed delivery is one poll within seconds and one `product_woken` event; the
-same delivery replayed and two forgeries (wrong secret, unknown App) are zero polls
-and zero events, each named in the receiver's log by delivery id; a second signed
-delivery is exactly one more poll. `product_woken.created_at` → the task's first
-burst is the ready-to-claim latency E6 measures.
+a signed delivery is one poll after the settle and within seconds, and one
+`product_woken` event; the same delivery replayed and two forgeries (wrong secret,
+unknown App) are zero polls and zero events, each named in the receiver's log by
+delivery id; a second signed delivery is exactly one more poll.
+`product_woken.created_at` → the task row's `created_at` is the ready-to-claim
+latency E6 measured (`DEPLOYMENT.md`, the record).
 
 ## The fleet (C4)
 

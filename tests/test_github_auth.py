@@ -4,6 +4,7 @@ import json
 
 import jwt as pyjwt
 import pytest
+import requests
 from control_plane.github_auth import (
     BURST_PERMISSIONS,
     ROLE_PREFIXES,
@@ -118,6 +119,24 @@ def test_discovery_single_installation():
         return FakeResponse([{"id": 42, "app_slug": "auto-dev"}])
 
     assert discover_installation(CREDS, http_get=get) == ("42", "auto-dev")
+
+
+def test_no_response_from_github_is_an_auth_error_not_a_crash():
+    """E6: the App's own calls (listing installations, minting a token) run at
+    the top of every tick — a transport failure there must be the error the
+    loop already handles, not a raw requests exception out of the process."""
+
+    def get(url, **kwargs):
+        raise requests.ConnectionError("Failed to resolve 'api.github.com'")
+
+    with pytest.raises(GitHubAuthError, match="listing installations failed: ConnectionError"):
+        discover_installation(CREDS, http_get=get)
+
+    def post(url, **kwargs):
+        raise requests.ReadTimeout("read timed out")
+
+    with pytest.raises(GitHubAuthError, match="minting installation token failed: ReadTimeout"):
+        mint_installation_token(CREDS, http_get=lambda url, **kw: FakeResponse([{"id": 1, "app_slug": "a"}]), http_post=post)
 
 
 def test_discovery_requires_pin_when_multiple():

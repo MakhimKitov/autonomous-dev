@@ -122,17 +122,23 @@ class GitHubApi:
         ok: tuple[int, ...] = (),
         token: str | None = None,
     ) -> Any:
-        response = self._request(
-            method,
-            f"{GITHUB_API}/repos/{self.repo}{path}",
-            headers={
-                "Authorization": f"Bearer {token or self._token()}",
-                "Accept": "application/vnd.github+json",
-            },
-            params=params,
-            json=json,
-            timeout=30,
-        )
+        try:
+            response = self._request(
+                method,
+                f"{GITHUB_API}/repos/{self.repo}{path}",
+                headers={
+                    "Authorization": f"Bearer {token or self._token()}",
+                    "Accept": "application/vnd.github+json",
+                },
+                params=params,
+                json=json,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            # no response at all — DNS, a dropped link, a timeout. The same
+            # failure as a bad status to every caller: the tick skips or retries,
+            # the replica lives (E6: a name-resolution blip took a replica down)
+            raise GitHubApiError(f"{what}: {exc.__class__.__name__}: {str(exc)[:300]}") from exc
         if response.status_code >= 300 and response.status_code not in ok:
             raise GitHubApiError(f"{what}: HTTP {response.status_code} {response.text[:300]}")
         try:

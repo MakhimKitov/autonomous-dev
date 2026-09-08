@@ -14,10 +14,15 @@
 #
 # The `platform` profile (E5) adds the platform itself on top of the two stores —
 # the migration, two control-plane replicas and the webhook receiver — as the
-# images CI builds. It is the T0 deployment shape (TO-BE §6: a Docker host is
-# first-class; k8s arrives with the runners in Stage G) and E6's rehearsal rig:
+# images CI builds, plus the dev-agent image the replicas run bursts in. It is
+# the T0 deployment shape (TO-BE §6: a Docker host is first-class; k8s arrives
+# with the runners in Stage G), rehearsed at E6 — DEPLOYMENT.md is the runbook:
 #
-#   export PLATFORM_DATA=/srv/autonomous-dev/data     # absolute; see control-plane below
+#   # docker/.env (compose's interpolation file — pin the two paths there, not in
+#   # the shell: an `up` from a shell without them recreates the replicas onto the defaults)
+#   PLATFORM_DATA=/srv/autonomous-dev/data        # absolute; see control-plane below
+#   PLATFORM_SECRETS=/srv/autonomous-dev/secrets  # the App keys .env's *_PRIVATE_KEY_PATH name
+#
 #   docker compose -f docker/compose.yaml --profile platform up -d --build --wait
 #
 # Off by default, so `up` without the profile is still just the stores.
@@ -93,6 +98,11 @@ services:
     profiles: [platform]
     deploy:
       replicas: 2 # two stateless peers over one ledger (E2); the service name resolves to both
+    # a replica that dies comes back as a new replica — the ledger's leases make
+    # that safe (E1/E2), and a fleet that stays down is the one failure the
+    # design cannot absorb. E6's rehearsal lost both without this: one to the
+    # kill drill, one to a network blip
+    restart: unless-stopped
     env_file:
       - path: ../.env # the App refs and switches — the same file a laptop run reads
         required: false
@@ -107,6 +117,11 @@ services:
       # dir is mounted at the same absolute path inside the replica as on the host
       - /var/run/docker.sock:/var/run/docker.sock
       - ${PLATFORM_DATA:-/srv/autonomous-dev/data}:${PLATFORM_DATA:-/srv/autonomous-dev/data}
+      # the App private keys: .env names them by path (*_PRIVATE_KEY_PATH, file:
+      # refs), and a path has to mean the same file on the host and in the replica
+      # — same-path again, read-only. Never under PLATFORM_DATA: bursts are handed
+      # mounts out of that tree.
+      - ${PLATFORM_SECRETS:-/srv/autonomous-dev/secrets}:${PLATFORM_SECRETS:-/srv/autonomous-dev/secrets}:ro
     command: ["run", "--data-dir", "${PLATFORM_DATA:-/srv/autonomous-dev/data}", "--interval", "${SCHEDULER_POLL_INTERVAL_S:-60}"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2)"]
@@ -127,8 +142,13 @@ services:
       context: ..
       dockerfile: docker/webhook-receiver/Dockerfile
     profiles: [platform]
+    restart: unless-stopped
     env_file:
-      - path: ../.env # WEBHOOK_APPS and whatever env: refs it names
+      # its OWN file, never ../.env: what a public process can leak is what it was
+      # handed, so the receiver is handed exactly the App ids, their webhook-secret
+      # refs and the values those refs name (.env.receiver.example) — no platform
+      # credential is in its environment to begin with
+      - path: ../.env.receiver
         required: false
     environment:
       WAKE_URL: http://control-plane:8081
@@ -143,6 +163,18 @@ services:
     depends_on:
       control-plane:
         condition: service_started
+
+  dev-agent:
+    # Built, never run: bursts are `docker run` by the replicas against the host's
+    # daemon (DockerRunner), so this image only has to *exist* there — zero replicas
+    # makes `up --build` build it next to the other two and start nothing.
+    image: autonomous-dev/dev-agent:latest
+    build:
+      context: ..
+      dockerfile: docker/dev-agent/Dockerfile
+    profiles: [platform]
+    deploy:
+      replicas: 0
 
 volumes:
   postgres-data:

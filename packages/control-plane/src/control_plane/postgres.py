@@ -63,6 +63,7 @@ from control_plane.models import (
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
     WAKE_CHANNEL,
+    WAKE_SETTLE_S,
     AuditRecord,
     BurstRecord,
     Event,
@@ -628,15 +629,23 @@ class PostgresLedger:
 
     # --- wakes (E5) ---
 
-    def wake_repository(self, repository: str, kind: str, delivery: str | None = None) -> bool:
-        """A webhook said this product changed: clear its observation lease so the
-        next replica to look polls it now, announce it, and notify the replicas'
-        wake channel so they look now rather than at the interval. One
-        statement — the lease, the event and both notifications — and nothing
-        at all for a product that is not active."""
+    def wake_repository(
+        self, repository: str, kind: str, delivery: str | None = None, *, settle_s: float = WAKE_SETTLE_S
+    ) -> bool:
+        """A webhook said this product changed: take its observation lease and
+        reserve it — nobody's, until `settle_s` from now, so the look happens
+        once GitHub's read side has caught up with its webhook (E6) — announce
+        it, and notify the replicas' wake channel so they look then rather than
+        at the interval. One statement — the lease, the event and both
+        notifications — and nothing at all for a product that is not active. A
+        wake inside a pending window joins it (the SQLite ledger's docstring
+        says why)."""
         cursor = self._execute(
             "WITH woken AS ("
-            "    UPDATE repositories SET claimed_by = NULL, claimed_until = NULL"
+            "    UPDATE repositories SET"
+            "        claimed_until = CASE WHEN claimed_by IS NULL AND claimed_until > now() THEN claimed_until"
+            "                             ELSE now() + make_interval(secs => %(settle_s)s) END,"
+            "        claimed_by = NULL"
             "    WHERE repository = %(repository)s AND state = %(active)s"
             "    RETURNING repository"
             "), announced AS ("
@@ -646,7 +655,8 @@ class PostgresLedger:
             "    FROM woken RETURNING id"
             ") SELECT pg_notify(%(channel)s, id::text), pg_notify(%(wakes)s, %(repository)s) FROM announced",
             {"repository": repository, "active": ProductState.ACTIVE, "kind": EVENT_PRODUCT_WOKEN,
-             "event": kind, "delivery": delivery, "channel": EVENT_CHANNEL, "wakes": WAKE_CHANNEL},
+             "event": kind, "delivery": delivery, "channel": EVENT_CHANNEL, "wakes": WAKE_CHANNEL,
+             "settle_s": float(settle_s)},
         )
         return bool(cursor.fetchall())
 

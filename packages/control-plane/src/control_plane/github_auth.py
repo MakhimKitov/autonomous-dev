@@ -114,7 +114,14 @@ def make_app_jwt(creds: AppCredentials, now: int | None = None) -> str:
     return jwt.encode(payload, creds.private_key, algorithm="RS256")
 
 
-def _check(response: Any, what: str) -> Any:
+def _check(send: Callable[[], Any], what: str) -> Any:
+    """Make the call and read it: a transport failure (no response — DNS, a
+    dropped link, a timeout) and a bad status are the same GitHubAuthError to
+    the caller, which retries next tick instead of dying (E6)."""
+    try:
+        response = send()
+    except requests.RequestException as exc:
+        raise GitHubAuthError(f"{what} failed: {exc.__class__.__name__}: {str(exc)[:300]}") from exc
     if response.status_code >= 300:
         raise GitHubAuthError(f"{what} failed: HTTP {response.status_code} {response.text[:300]}")
     return response.json()
@@ -126,7 +133,7 @@ def discover_installation(
     """(installation_id, app_slug). Requires exactly one installation unless pinned."""
     headers = {"Authorization": f"Bearer {make_app_jwt(creds)}"}
     installations = _check(
-        http_get(f"{GITHUB_API}/app/installations", headers=headers, timeout=30),
+        lambda: http_get(f"{GITHUB_API}/app/installations", headers=headers, timeout=30),
         "listing installations",
     )
     if not installations:
@@ -161,7 +168,7 @@ def mint_installation_token(
     if permissions is not None:
         body["permissions"] = permissions
     data = _check(
-        http_post(
+        lambda: http_post(
             f"{GITHUB_API}/app/installations/{installation_id}/access_tokens",
             headers=headers,
             json=body or None,
