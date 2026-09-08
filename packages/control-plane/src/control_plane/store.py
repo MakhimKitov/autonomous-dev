@@ -49,6 +49,10 @@ from control_plane.models import (
     EVENT_PRODUCT_WOKEN,
     WAKE_SETTLE_S,
     EVENT_ROLE_UPDATED,
+    EVENT_SUBSCRIPTION_EXPIRED,
+    EVENT_SUBSCRIPTION_REGISTERED,
+    EVENT_SUBSCRIPTION_REVOKED,
+    EVENT_SUBSCRIPTION_UPDATED,
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
     TASK_TRANSITION_COLUMNS,
@@ -59,6 +63,8 @@ from control_plane.models import (
     ProductState,
     RepositoryRecord,
     RoleRecord,
+    SubscriptionRecord,
+    SubscriptionStatus,
     TaskRecord,
     Violation,
     utc_iso,
@@ -66,6 +72,8 @@ from control_plane.models import (
 )
 from control_plane.roles import RoleError
 from control_plane.roles import check_settable as check_role_settable
+from control_plane.subscriptions import SubscriptionError, check_cap, check_ref
+from control_plane.subscriptions import check_settable as check_subscription_settable
 
 log = structlog.get_logger()
 
@@ -183,6 +191,49 @@ def _registry_transition(state: str, reason: str) -> tuple[str, str]:
     if state == ProductState.ACTIVE:
         return "product.resume", EVENT_PRODUCT_RESUMED
     raise RegistryError(f"a product is active or paused — {state!r} is neither")
+
+
+def _pool_transition(status: str, reason: str) -> tuple[str, str]:
+    """The shared gate for the pool's endings (F1), the twin of
+    `_registry_transition`: the audit action and event kind for a status, and
+    the one rule — revoking a member's contribution says why. There is no
+    transition *to* `active`: registration is the only way in, and coming back
+    after an ending is renewal (F4), which re-materializes at the same ref."""
+    if status == SubscriptionStatus.REVOKED:
+        if not reason.strip():
+            raise SubscriptionError("revoking a subscription requires a reason — it lands in the audit row")
+        return "subscription.revoke", EVENT_SUBSCRIPTION_REVOKED
+    if status == SubscriptionStatus.EXPIRED:
+        return "subscription.expire", EVENT_SUBSCRIPTION_EXPIRED
+    raise SubscriptionError(
+        f"a subscription ends as revoked or expired — {status!r} is neither"
+    )
+
+
+def _pool_refusal(existing: SubscriptionRecord | None, subscription_id: str, status: str) -> str:
+    """The CAS refused and nothing was written, so read the row to say why."""
+    if existing is None:
+        return f"{subscription_id} is not a registered subscription"
+    return f"{subscription_id} is already {status}"
+
+
+def _already_contributed(subscription_id: str, *, check: bool) -> str:
+    """Why a pool write bounced: the member already contributes, or the schema's
+    own wall caught a row the grammar should have stopped.
+
+    The driver's message is deliberately not passed through. Postgres puts the
+    *failing row* in a CHECK violation's DETAIL — which, for this table, is the
+    value someone tried to store as a ref — and this string reaches a terminal
+    and a log. What no column may hold, no error message may repeat."""
+    if check:
+        return (
+            "the schema refused this row — `secret_ref` is env:NAME, file:PATH or helper:NAME, "
+            "and `cap_tokens` is positive"
+        )
+    return (
+        f"{subscription_id} already contributes a subscription — `subscription set` changes "
+        f"its cap, ref or expiry; `subscription revoke` retires it"
+    )
 
 
 def _check_stop_reason(reason: str) -> None:
@@ -310,6 +361,15 @@ class Ledger(Protocol):
     def list_roles(self) -> list[RoleRecord]: ...
     def get_role(self, role: str) -> RoleRecord | None: ...
     def update_role(self, role: str, changes: dict, actor: str, reason: str = "") -> None: ...
+    def register_subscription(self, sub: SubscriptionRecord, actor: str, reason: str = "") -> None: ...
+    def get_subscription(self, subscription_id: str) -> SubscriptionRecord | None: ...
+    def list_subscriptions(self) -> list[SubscriptionRecord]: ...
+    def set_subscription_status(
+        self, subscription_id: str, status: str, actor: str, reason: str = ""
+    ) -> None: ...
+    def update_subscription(
+        self, subscription_id: str, changes: dict, actor: str, reason: str = ""
+    ) -> None: ...
     def upsert_task(self, task: TaskRecord) -> None: ...
     def create_task(self, task: TaskRecord) -> bool: ...
     def transition_task(
@@ -447,6 +507,24 @@ CREATE TRIGGER IF NOT EXISTS roles_pipeline_guard_delete
 BEGIN
     SELECT RAISE(ABORT, 'seeded pipeline role cannot be deleted');
 END;
+-- subscriptions — the ref-only pool (F1), the SQLite twin of migration 0017.
+-- `secret_ref` carries the ingestion wall in the schema itself: the three
+-- schemes the resolver speaks, each followed by a name. SQLite has no regex, so
+-- the twin of Postgres's `~ '^(env|file|helper):.'` is spelled in GLOB — `?*` is
+-- "one character, then anything", and GLOB is the case-sensitive one (LIKE would
+-- take `ENV:` too, and then the two backends would not mean the same thing).
+CREATE TABLE IF NOT EXISTS subscriptions (
+    subscription_id TEXT PRIMARY KEY,
+    member TEXT NOT NULL,
+    secret_ref TEXT NOT NULL CHECK (
+        secret_ref GLOB 'env:?*' OR secret_ref GLOB 'file:?*' OR secret_ref GLOB 'helper:?*'
+    ),
+    cap_tokens INTEGER NOT NULL CHECK (cap_tokens > 0),
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'revoked')),
+    backoff_until TEXT,
+    registered_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     actor TEXT NOT NULL,
@@ -696,6 +774,81 @@ class SqliteLedger:
         else:
             rows = self._conn.execute(f"{select} WHERE target = ? ORDER BY id", (target,)).fetchall()
         return [AuditRecord(**dict(row)) for row in rows]
+
+    # --- the subscription pool (F1) ---
+    #
+    # The registry's discipline on the pool: every verb is one statement with
+    # its audit row and its announcement, and what it stores is a ref. Nothing
+    # here can hold a token — `check_ref` refuses a value, and the table's own
+    # CHECK refuses one that got past the check.
+
+    @staticmethod
+    def _load_subscription(row: sqlite3.Row) -> SubscriptionRecord:
+        return SubscriptionRecord(**dict(row))
+
+    def register_subscription(self, sub: SubscriptionRecord, actor: str, reason: str = "") -> None:
+        data = asdict(sub)
+        check_ref(data["secret_ref"])
+        check_cap(data["cap_tokens"])
+        cols = ", ".join(data)
+        placeholders = ", ".join(f":{k}" for k in data)
+        try:
+            self._conn.execute(f"INSERT INTO subscriptions ({cols}) VALUES ({placeholders})", data)
+        except sqlite3.IntegrityError as exc:
+            self._conn.rollback()
+            check = "CHECK" in str(exc).upper()
+            # `from None`: a chained cause prints too, and a CHECK violation's text
+            # is about the row that was refused
+            raise SubscriptionError(_already_contributed(sub.subscription_id, check=check)) from None
+        self._audit_and_announce(actor, "subscription.register", sub.subscription_id, reason,
+                                 EVENT_SUBSCRIPTION_REGISTERED, subject="subscription")
+        self._conn.commit()
+
+    def get_subscription(self, subscription_id: str) -> SubscriptionRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM subscriptions WHERE subscription_id = ?", (subscription_id,)
+        ).fetchone()
+        return self._load_subscription(row) if row else None
+
+    def list_subscriptions(self) -> list[SubscriptionRecord]:
+        rows = self._conn.execute("SELECT * FROM subscriptions ORDER BY subscription_id").fetchall()
+        return [self._load_subscription(row) for row in rows]
+
+    def set_subscription_status(self, subscription_id: str, status: str, actor: str, reason: str = "") -> None:
+        action, kind = _pool_transition(status, reason)
+        cursor = self._conn.execute(
+            "UPDATE subscriptions SET status = ? WHERE subscription_id = ? AND status <> ?",
+            (status, subscription_id, status),
+        )
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise SubscriptionError(_pool_refusal(self.get_subscription(subscription_id), subscription_id, status))
+        self._audit_and_announce(actor, action, subscription_id, reason, kind, subject="subscription")
+        self._conn.commit()
+
+    def update_subscription(self, subscription_id: str, changes: dict, actor: str, reason: str = "") -> None:
+        check_subscription_settable(changes)
+        if "secret_ref" in changes:
+            check_ref(changes["secret_ref"])
+        if "cap_tokens" in changes:
+            check_cap(changes["cap_tokens"])
+        # column names come from SUBSCRIPTION_SET_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = :{column}" for column in changes)
+        try:
+            cursor = self._conn.execute(
+                f"UPDATE subscriptions SET {assignments} WHERE subscription_id = :subscription_id",
+                {**changes, "subscription_id": subscription_id},
+            )
+        except sqlite3.IntegrityError:  # the table's own wall, behind the grammar
+            self._conn.rollback()
+            raise SubscriptionError(_already_contributed(subscription_id, check=True)) from None
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise SubscriptionError(f"{subscription_id} is not a registered subscription")
+        self._audit_and_announce(actor, "subscription.set", subscription_id, reason,
+                                 EVENT_SUBSCRIPTION_UPDATED, extra={"changed": sorted(changes)},
+                                 subject="subscription")
+        self._conn.commit()
 
     # --- roles (D5) ---
     #

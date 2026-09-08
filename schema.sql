@@ -39,10 +39,11 @@
 -- walls (A4), the session tree (A5), composite task identity (A6), the
 -- tasks→repositories foreign key with the registry that can create a row (C1),
 -- the task lease columns with the claim statements that use them (E1), the
--- `org_state` STOP row (E3). Outstanding: `bursts.pinned` with the golden-replay
--- harness that needs it at G4 (#45), and `bursts.subscription_id` with the pool
--- at F (#38–41). Both are additions to a *live* table, which is why they wait
--- for the stage that needs them rather than landing speculatively here.
+-- `org_state` STOP row (E3), the subscription pool's walls with the verbs that
+-- write it (F1). Outstanding: `bursts.pinned` with the golden-replay
+-- harness that needs it at G4 (#45), and `bursts.subscription_id` with the pick
+-- that stamps it at F2 (#39). Both are additions to a *live* table, which is why
+-- they wait for the stage that needs them rather than landing speculatively here.
 
 -- repositories — one row per registered product; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
@@ -90,14 +91,18 @@ CREATE TABLE roles (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
--- subscriptions — the ref-only pool (TO-BE §4). Usage is derived from bursts;
+-- subscriptions — the ref-only pool (TO-BE §4, F1). Usage is derived from bursts;
 -- backoff_until is the pool's only mutable state, set by CAS on rate limiting,
--- cleared by time. Empty until F1 (#38).
+-- cleared by time. The `secret_ref` CHECK is the pool's central claim made
+-- structural: the column holds one of the resolver's three schemes followed by a
+-- name, so a token value cannot become a row — and what no column holds, no
+-- dump, log line or archive can leak. Rows are created by the pool verbs only,
+-- each mutation writing its audit row and outbox event in the same statement.
 CREATE TABLE subscriptions (
-    subscription_id text PRIMARY KEY,
+    subscription_id text PRIMARY KEY,          -- the member's handle, derived from it
     member          text NOT NULL,
-    secret_ref      text NOT NULL,             -- env:NAME / file:PATH — a name, never a value
-    cap_tokens      bigint NOT NULL,           -- per rolling window
+    secret_ref      text NOT NULL CONSTRAINT subscriptions_secret_ref_check CHECK (secret_ref ~ '^(env|file|helper):.'),
+    cap_tokens      bigint NOT NULL CONSTRAINT subscriptions_cap_tokens_check CHECK (cap_tokens > 0),
     expires_at      timestamptz NOT NULL,
     status          text NOT NULL CONSTRAINT subscriptions_status_check CHECK (status IN ('active', 'expired', 'revoked')),
     backoff_until   timestamptz,

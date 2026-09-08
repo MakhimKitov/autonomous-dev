@@ -17,6 +17,7 @@ would return it verbatim. *Querying* with one is inside the contract, and A7 fou
 out why it has to be: the comparison, not the spelling, is what a caller sees.
 """
 
+import json
 import os
 import sqlite3
 import time
@@ -36,6 +37,7 @@ from control_plane.models import (
     ProductState,
     RepositoryRecord,
     Role,
+    SubscriptionStatus,
     TaskRecord,
     TaskStatus,
     Violation,
@@ -43,6 +45,7 @@ from control_plane.models import (
     utc_now,
 )
 from control_plane.store import LEDGER_DSN_ENV, RegistryError, SqliteLedger, session_key
+from control_plane.subscriptions import SubscriptionError, declare
 from psycopg.conninfo import make_conninfo
 
 DSN = os.environ.get(LEDGER_DSN_ENV, "").strip()
@@ -79,7 +82,10 @@ def ledger(request, tmp_path):
             # memory_entries references bursts, so it comes along — TRUNCATE
             # refuses to leave a referencing table out (CASCADE would take
             # whatever else appeared later, which is not the same promise).
-            conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, audit")
+            conn.execute(
+                "TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, "
+                "subscriptions, audit"
+            )
             # the org row is a singleton, never truncated — a test's `stop` is lifted here (E3)
             conn.execute("UPDATE org_state SET stop_reason = NULL, stopped_by = NULL, stopped_at = NULL")
             # roles cannot be truncated (frozen pipeline rows, D5) — reset the
@@ -912,6 +918,133 @@ def test_set_changes_the_row_and_bumps_updated_at(ledger):
     assert after.updated_at > before.updated_at
     assert after.registered_at == before.registered_at
     assert after.state == before.state  # set never touches it
+
+
+# --- the subscription pool (F1) ---
+
+
+MEMBER = "maksim"
+REF = "env:MAKSIM_CLAUDE_TOKEN"
+
+
+def _subscription(member=MEMBER, ref=REF, cap=12_000_000, expires="2027-09-01"):
+    return declare(member, ref, cap, expires)
+
+
+def test_a_contribution_is_the_row_the_member_declared(ledger):
+    """What comes back is what was declared — the ref as a name, the cap as an
+    int, the expiry in the one spelling the ledger keeps, and nothing else set:
+    `backoff_until` is the rail's (F3), and it starts empty."""
+    ledger.register_subscription(_subscription(), actor="maksim", reason="opting in")
+
+    row = ledger.get_subscription(MEMBER)
+    assert row is not None
+    assert (row.subscription_id, row.member, row.secret_ref) == (MEMBER, MEMBER, REF)
+    assert (row.cap_tokens, row.status, row.backoff_until) == (12_000_000, "active", None)
+    assert row.expires_at == "2027-09-01T00:00:00+00:00" and row.registered_at
+    assert isinstance(row.cap_tokens, int)
+    assert ledger.get_subscription("nobody") is None
+
+
+def test_subscriptions_list_in_one_order(ledger):
+    for member in ("zoe", "ada"):
+        ledger.register_subscription(_subscription(member=member, ref=f"env:{member.upper()}"), "op")
+    assert [s.subscription_id for s in ledger.list_subscriptions()] == ["ada", "zoe"]
+
+
+def test_one_member_contributes_once(ledger):
+    ledger.register_subscription(_subscription(), actor="op")
+    with pytest.raises(SubscriptionError, match="already contributes"):
+        ledger.register_subscription(_subscription(cap=1), actor="op")
+    assert len(ledger.audit_trail(MEMBER)) == 1
+    assert ledger.get_subscription(MEMBER).cap_tokens == 12_000_000  # the first declaration stands
+
+
+def test_the_pool_refuses_a_value_where_a_ref_belongs(ledger):
+    """Both backends, one grammar — and the refusal never repeats what it was
+    given, because what it was given may be the token itself."""
+    token = "sk-ant-oat01-CONTRACT-SUITE-TOKEN"
+    row = _subscription()
+    row.secret_ref = token  # past `declare`, the way a bug or a console would
+    with pytest.raises(SubscriptionError) as refused:
+        ledger.register_subscription(row, actor="op")
+    assert token not in str(refused.value)
+    assert ledger.get_subscription(MEMBER) is None
+
+    ledger.register_subscription(_subscription(), actor="op")
+    with pytest.raises(SubscriptionError) as refused:
+        ledger.update_subscription(MEMBER, {"secret_ref": token}, "op")
+    assert token not in str(refused.value)
+    assert ledger.get_subscription(MEMBER).secret_ref == REF
+
+
+def test_every_pool_mutation_announces_itself(ledger):
+    """Mutation, audit row, outbox event — one write, each verb, the registry's
+    discipline on the pool. The payload names its audit row and the
+    subscription; it never names the ref, and could not name a value."""
+    ledger.register_subscription(_subscription(), actor="op", reason="opting in")
+    ledger.update_subscription(MEMBER, {"cap_tokens": 20_000_000}, "op", "bump")
+    ledger.set_subscription_status(MEMBER, SubscriptionStatus.REVOKED, "op", "left the team")
+
+    events = [e for e in ledger.events() if e.kind.startswith("subscription_")]
+    assert [e.kind for e in events] == [
+        "subscription_registered", "subscription_updated", "subscription_revoked",
+    ]
+    updated = events[1]
+    assert updated.payload["subscription"] == MEMBER and updated.payload["actor"] == "op"
+    assert updated.payload["changed"] == ["cap_tokens"]
+    audit_ids = {entry.id for entry in ledger.audit_trail()}
+    assert all(event.payload["audit_id"] in audit_ids for event in events)
+    assert [a.action for a in ledger.audit_trail(MEMBER)] == [
+        "subscription.register", "subscription.set", "subscription.revoke",
+    ]
+    assert REF not in json.dumps([e.payload for e in events])
+
+
+def test_an_ending_happens_once_and_registration_is_the_only_way_in(ledger):
+    """The endings are a CAS: a no-op leaves no audit row and no event. There is
+    no transition back to `active` — coming back is renewal (F4), and the row a
+    burst named stays where it is either way."""
+    ledger.register_subscription(_subscription(), "op")
+    ledger.set_subscription_status(MEMBER, SubscriptionStatus.REVOKED, "op", "rotating")
+    with pytest.raises(SubscriptionError, match="already revoked"):
+        ledger.set_subscription_status(MEMBER, SubscriptionStatus.REVOKED, "op", "again")
+    with pytest.raises(SubscriptionError, match="neither"):
+        ledger.set_subscription_status(MEMBER, SubscriptionStatus.ACTIVE, "op", "back please")
+    assert ledger.get_subscription(MEMBER).status == "revoked"
+    assert [a.action for a in ledger.audit_trail(MEMBER)] == [
+        "subscription.register", "subscription.revoke",
+    ]
+
+
+def test_revoking_needs_a_reason(ledger):
+    ledger.register_subscription(_subscription(), "op")
+    with pytest.raises(SubscriptionError, match="reason"):
+        ledger.set_subscription_status(MEMBER, SubscriptionStatus.REVOKED, "op", "  ")
+    assert ledger.get_subscription(MEMBER).status == "active"
+
+
+def test_the_uncontributed_cannot_be_mutated(ledger):
+    with pytest.raises(SubscriptionError, match="not a registered subscription"):
+        ledger.set_subscription_status("nobody", SubscriptionStatus.REVOKED, "op", "reason")
+    with pytest.raises(SubscriptionError, match="not a registered subscription"):
+        ledger.update_subscription("nobody", {"cap_tokens": 5}, "op")
+    assert ledger.list_subscriptions() == []
+
+
+def test_set_reaches_only_the_declaration(ledger):
+    ledger.register_subscription(_subscription(), "op")
+    for change in ({"status": "active"}, {"backoff_until": utc_now()}, {"member": "someone"}):
+        with pytest.raises(SubscriptionError, match="not settable"):
+            ledger.update_subscription(MEMBER, change, "op")
+    with pytest.raises(SubscriptionError, match="nothing to set"):
+        ledger.update_subscription(MEMBER, {}, "op")
+    with pytest.raises(SubscriptionError, match="must be positive"):
+        ledger.update_subscription(MEMBER, {"cap_tokens": 0}, "op")
+    assert asdict(ledger.get_subscription(MEMBER)) == asdict(_subscription()) | {
+        "registered_at": ledger.get_subscription(MEMBER).registered_at,
+        "status": "active",
+    }
 
 
 # --- the org STOP (E3) ---

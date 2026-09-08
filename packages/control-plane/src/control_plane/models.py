@@ -49,6 +49,17 @@ class ProductState(StrEnum):
     PAUSED = "paused"
 
 
+class SubscriptionStatus(StrEnum):
+    """A contributed subscription's standing (TO-BE §4 mechanism A). `active`
+    is the only eligible one; `expired` is reached by time or by an auth-failed
+    burst, `revoked` by the member's or an operator's word. Neither ending is a
+    deletion — the row stays, because the bursts it paid for still name it."""
+
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -135,13 +146,40 @@ class RoleRecord:
 
 
 @dataclass(slots=True)
+class SubscriptionRecord:
+    """One member's contributed capacity — a *ref*, never a token (TO-BE §4).
+
+    The pool's whole custody story is in `secret_ref`: the ledger holds a name
+    (`env:NAME`, `file:PATH`, `helper:NAME`), the member materializes the value
+    themselves, and it is resolved at spawn into a container that dies with it.
+    Deleting the secret at its source is therefore a revocation the platform
+    cannot override, and no ledger dump, log line or archive can carry a token
+    the ledger never held.
+
+    Usage is *derived*, never mirrored here: consumption is a rolling-window
+    aggregate over `bursts` (§12's ledger-as-metrics rule), so the only pool
+    state this row keeps beyond the declaration is `backoff_until` — set by CAS
+    when a burst reports rate limiting, cleared by time.
+    """
+
+    subscription_id: str  # the member's handle, normalized — derived, never invented
+    member: str  # who contributed it, as they are known to the team
+    secret_ref: str  # env:NAME / file:PATH / helper:NAME — a name, never a value
+    cap_tokens: int  # the member's ceiling, tokens per rolling window
+    expires_at: str  # the OAuth token's own year, as the member declared it
+    status: str = SubscriptionStatus.ACTIVE
+    backoff_until: str | None = None  # rate-limited until — CAS'd by the attempt rail (F3)
+    registered_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class AuditRecord:
     """One operator mutation, as the ledger recorded it — the read shape of the
     `audit` table (append-only by grant; TO-BE §2, "The audit log starts here")."""
 
     id: int
     actor: str
-    action: str  # 'product.register' | 'product.pause' | 'product.resume' | 'product.set' | 'role.set' | 'org.stop' | 'org.resume'
+    action: str  # 'product.*' | 'role.set' | 'subscription.*' | 'org.stop' | 'org.resume'
     target: str  # the product slug, the role name, or ORG_TARGET
     reason: str
     at: str
@@ -303,6 +341,13 @@ EVENT_PRODUCT_PAUSED = "product_paused"
 EVENT_PRODUCT_RESUMED = "product_resumed"
 EVENT_PRODUCT_UPDATED = "product_updated"
 EVENT_ROLE_UPDATED = "role_updated"  # `role set` (D5): payload names the role and the changed columns
+# The subscription pool's verbs (F1): register, revoke, set — same discipline as
+# the registry's, one kind per verb. The payload names the subscription and its
+# audit row; it never names the ref, and could not name a value.
+EVENT_SUBSCRIPTION_REGISTERED = "subscription_registered"
+EVENT_SUBSCRIPTION_REVOKED = "subscription_revoked"
+EVENT_SUBSCRIPTION_EXPIRED = "subscription_expired"
+EVENT_SUBSCRIPTION_UPDATED = "subscription_updated"
 # The org STOP (E3): `stop` and `resume`, same shape — the mutation, its audit row
 # and this announcement in one statement. `org_stopped` also carries the reason,
 # so the page it becomes needs no second read.

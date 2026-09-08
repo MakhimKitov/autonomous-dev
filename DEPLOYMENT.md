@@ -79,7 +79,23 @@ cp product list
 cp stop --reason "…"                                 # the org's STOP row: every replica stands down at its next tick
 cp resume
 cp role set dev --budget 4.0
+cp subscription list                                 # who is contributing capacity (F1)
 ```
+
+**A member contributing their subscription** is two steps, in this order,
+because the platform stores only the name of the second one:
+
+1. the member materializes the token where the *control plane's* processes can
+   read it — for this compose deployment that is a line in `.env` (both replicas
+   read it; the receiver's `.env.receiver` never sees it) or a file under
+   `PLATFORM_SECRETS`, which is already mounted read-only at the same path in
+   the box as on the host;
+2. `cp subscription register --member <handle> --ref env:<NAME> --cap <tokens per window> --expires <YYYY-MM-DD>`.
+
+The value never reaches the ledger, so nothing the platform writes can leak it —
+and deleting it at its source revokes the contribution whether or not anyone runs
+`subscription revoke`. Rotating a token is step 1 again at the same ref, with no
+verb at all; moving it is `subscription set --ref`.
 
 A new image rolls under STOP: `cp stop --reason "rolling"`, then
 `up -d --build --wait control-plane` (compose recreates both replicas), then

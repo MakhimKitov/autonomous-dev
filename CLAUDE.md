@@ -389,6 +389,46 @@ already retries those errors next tick. Replicas and receiver restart
 `unless-stopped`; the dev-agent image is a build-only compose service
 (`replicas: 0`) so `up --build` produces all three.
 
+### The subscription pool
+
+The platform's compute is the team's pooled subscription capacity (TO-BE §4
+mechanism A); the verbs are F1's:
+
+```bash
+uv run control-plane subscription register --member maksim \
+    --ref env:MAKSIM_CLAUDE_TOKEN --cap 12000000 --expires 2027-09-01
+uv run control-plane subscription list
+uv run control-plane subscription show maksim            # the row + its audit trail
+uv run control-plane subscription set maksim --cap 20000000 --ref file:/run/secrets/maksim
+uv run control-plane subscription revoke maksim --reason "..."   # the reason is required
+```
+
+**The platform never holds a token.** A member runs `claude setup-token`,
+materializes the value themselves — env var, file, whatever the adopter's tooling
+writes — and registers a *ref*: `env:NAME`, `file:PATH`, `helper:NAME`. Custody
+never moves, so deleting the secret at its source is a revocation the platform
+cannot override, and there is nothing for a ledger dump, a log line or an archive
+to leak. The wall is three deep and each layer is tested: `subscriptions.check_ref`
+refuses a value at the verb, both backends call it before their statement, and
+`subscriptions_secret_ref_check` (0017) refuses whatever reaches the table by any
+other path. Refusals are deliberately mute about their input — Postgres puts the
+failing row in a CHECK violation's DETAIL, so that message is never passed
+through. `tests/test_subscription_pool.py` runs the done-when: a token pushed at
+every entrance that takes a ref, then the ledger file, every audit row, every
+event payload, stdout, stderr and the log stream greppable for it and empty.
+
+**One member, one contribution**, and the id is derived from the handle
+(`--member Maksim` → `maksim`), so `subscription revoke maksim` is typeable by
+whoever registered it. Registering twice is a refusal that names the first row.
+The endings are CAS with the registry's discipline — `revoke` requires a reason,
+a no-op leaves no audit row and no event — and there is no transition back to
+`active`: a revoked or expired row stays (the bursts it paid for still name it),
+and coming back is renewal at F4. `set` touches the declaration only —
+`cap_tokens`, `expires_at`, `secret_ref`; `status` is `revoke`'s and
+`backoff_until` is the attempt rail's (F3). Usage is never mirrored into a
+counter: consumption is a rolling-window aggregate over `bursts`, which is what
+F2's eligibility and headroom pick read.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).
