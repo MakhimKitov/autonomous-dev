@@ -39,6 +39,7 @@ class Issue:
     title: str
     body: str
     labels: list[str]
+    state: str = "open"  # open | closed — a closed issue is a finished task (#93)
 
     @property
     def provenance(self) -> str:
@@ -80,6 +81,7 @@ def _issue_of(item: dict) -> Issue:
         title=item.get("title", ""),
         body=item.get("body") or "",
         labels=labels,
+        state=item.get("state", "open"),
     )
 
 

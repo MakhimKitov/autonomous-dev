@@ -53,7 +53,7 @@ import structlog
 
 from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.clone import CloneError
-from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Review
+from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Issue, Review
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import (
     BurstStatus,
@@ -378,7 +378,7 @@ class Scheduler:
 
     def observe(self) -> None:
         self._claim_ready_issues()
-        self._park_blocked_issues()
+        self._reconcile_active_issues()
         self._advance_awaiting_review()
 
     def _claim_ready_issues(self) -> None:
@@ -438,16 +438,43 @@ class Scheduler:
             issue_number=issue_number,
         )
 
-    def _park_blocked_issues(self) -> None:
-        """The agent set `blocked` (contract rule 9) — stop scheduling the task."""
+    def _reconcile_active_issues(self) -> None:
+        """One read of each active task's issue, two facts it can carry: the
+        agent set `blocked` (contract rule 9) — stop scheduling the task; or the
+        issue is closed — the task is finished (#93), whoever closed it.
+
+        The closed rule is for `claimed` tasks only. An `awaiting_review` task
+        has an open PR, and the PR is what ends it — a merge closes the issue
+        through `Closes #<n>`, and "pr merged" is the truer reason to record."""
         for task in self.stores.ledger.tasks_by_status(
             TaskStatus.CLAIMED, TaskStatus.AWAITING_REVIEW, repository=self.api.repo
         ):
             issue = self.api.get_issue(task.issue_number)
+            if task.status == TaskStatus.CLAIMED and self._finish_if_issue_closed(task, issue):
+                continue
             if "blocked" in issue.labels and self._move(
                 task, status=TaskStatus.BLOCKED, next_burst_kind=None, **self._released()
             ):
                 log.info("issue carries `blocked` — parked for a human", issue=task.task_id)
+
+    def _finish_if_issue_closed(self, task: TaskRecord, issue: Issue | None = None) -> bool:
+        """A closed issue ends its task (#93).
+
+        Some work needs no PR — the symptom was already fixed, the report is a
+        duplicate — and the burst says so by closing the issue with its
+        evidence, which the product's contract allows; a human can close it
+        mid-flight for the same reasons. Scoring that as "no PR, retry" spends
+        the remaining attempts re-reading a closed issue: the gate rehearsal
+        (#37) ran three bursts on discord-bot#16 for a task the first one
+        finished. True means the issue is closed, whether or not this replica
+        wrote the transition — either way the caller registers no failure."""
+        issue = self.api.get_issue(task.issue_number) if issue is None else issue
+        if issue.state != "closed":
+            return False
+        if self._move(task, status=TaskStatus.DONE, next_burst_kind=None, **self._released()):
+            self.api.remove_label(task.issue_number, "in-progress")
+            log.info("issue closed — task done", task=task.task_id, issue=task.issue_number)
+        return True
 
     def _advance_awaiting_review(self) -> None:
         for task in self.stores.ledger.tasks_by_status(
@@ -610,7 +637,11 @@ class Scheduler:
         if kind == WORK:
             pr = self.api.open_pr_with_branch_prefix(f"dev/{number}-")
             if pr is None:
-                # the work burst's contract is a PR; anything less is a failed attempt
+                # the work burst's contract is a PR; anything less is a failed
+                # attempt — unless the burst closed the issue instead, which
+                # finishes the task (#93) rather than failing an attempt of it
+                if self._finish_if_issue_closed(task):
+                    return
                 self._register_failure(task, f"burst {outcome.burst.burst_id} succeeded but opened no PR")
                 return
             task.pr_number = pr.number  # the re-review below reads it; the CAS writes it

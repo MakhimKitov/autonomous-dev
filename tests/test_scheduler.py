@@ -131,8 +131,8 @@ def rig(tmp_path, monkeypatch):
     return scheduler, api, stores, spawned, fake_execute
 
 
-def _issue(number=1, labels=("ready", "human")):
-    return Issue(number=number, title="add /coinflip", body="do it", labels=list(labels))
+def _issue(number=1, labels=("ready", "human"), state="open"):
+    return Issue(number=number, title="add /coinflip", body="do it", labels=list(labels), state=state)
 
 
 def _pr(number=2, state="open", merged=False, head_ref="dev/1-coinflip", head_sha="abc"):
@@ -225,6 +225,59 @@ def test_success_without_pr_is_a_failed_attempt(rig):
     scheduler.tick()
     task = stores.ledger.get_task(tid(1))
     assert task.status == TaskStatus.CLAIMED and task.attempts == 1
+
+
+def test_a_burst_that_closes_its_issue_is_done_not_a_failed_attempt(rig, monkeypatch):
+    """#93: some work needs no PR — the symptom was already fixed, the report is
+    a duplicate — and the burst says so by closing the issue with its evidence.
+    That is a finished task, not an attempt to retry until the rail trips."""
+    scheduler, api, stores, spawned, fake_execute = rig
+
+    def closes_the_issue(*args, **kwargs):
+        api.issues[1] = _issue(labels=("in-progress", "human"), state="closed")
+        return fake_execute(*args, **kwargs)
+
+    monkeypatch.setattr(sched_mod, "execute_burst", closes_the_issue)
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue(labels=("in-progress", "human"))
+    api.open_prs = []  # no PR — and none was needed
+    scheduler.tick()
+
+    task = stores.ledger.get_task(tid(1))
+    assert task.status == TaskStatus.DONE and task.attempts == 0
+    assert task.next_burst_kind is None and task.claimed_by is None  # nothing queued, lease released
+    assert ("remove", 1, "in-progress") in api.label_ops
+    assert api.comments == []  # no "parking this task after N failed attempts"
+
+    api.ready_issues = []
+    scheduler.tick()
+    assert len(spawned) == 1  # the task is over — no retry burst
+
+
+def test_a_closed_issue_ends_a_claimed_task_before_any_burst(rig):
+    """The general rule (#93): whoever closed the issue — a burst on an earlier
+    tick, or a human mid-flight — the next observation ends the task instead of
+    spawning against a closed issue."""
+    scheduler, api, stores, spawned, _ = rig
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED, attempts=1))
+    api.issues[1] = _issue(labels=("in-progress", "human"), state="closed")
+    scheduler.tick()
+
+    task = stores.ledger.get_task(tid(1))
+    assert task.status == TaskStatus.DONE and task.attempts == 1  # no attempt spent on it
+    assert spawned == [] and ("remove", 1, "in-progress") in api.label_ops
+
+
+def test_a_closed_issue_leaves_a_task_whose_pr_is_still_open_alone(rig):
+    """An `awaiting_review` task is ended by its PR, not by its issue: the issue
+    can close early (a `Closes #<n>` from another PR, a human tidying up) while
+    the reviewers still hold the ball."""
+    scheduler, api, stores, _, _ = rig
+    _awaiting(stores)
+    api.issues[1] = _issue(labels=("in-progress",), state="closed")
+    api.prs[2] = _pr()  # open, unmerged
+    scheduler.observe()
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.AWAITING_REVIEW
 
 
 def test_owner_changes_requested_triggers_review_round(rig):
