@@ -201,6 +201,16 @@ state, no audit row). A product's scheduler reads only its own tasks and bursts
 product for the tick, never the fleet. `--github owner/name` still pins one repo
 — dev mode when unregistered. SCHEDULER.md "The fleet" has the full contract.
 
+**Fair share, and one question per tick (H1)**: the fleet orders products by
+bursts-served-per-weight over `FAIR_SHARE_WINDOW_H` (24 h) — the numerator an
+aggregate over `bursts` (`bursts_per_product_since`), the denominator the row's
+`usage_share` — with C4's least-recently-served order as the tie-break, so equal
+weights still alternate. And the pool is asked *once for the fleet*, before any
+product's turn: an empty pool is empty for everybody, so the tick ends with one
+`capacity_exhausted` event and nothing claimed, instead of one event per product
+and a task's lease churned. The capacity is handed down to the burst that runs;
+the single-product loop, having no fleet, asks for itself.
+
 **Role-prefixed App credentials (D1)**: one App per pipeline role, addressed by
 env prefix over the same three names — the dev App reads `GITHUB_APP_ID` /
 `GITHUB_APP_PRIVATE_KEY_PATH` bare, the others behind `REVIEWER_`, `TESTER_`,

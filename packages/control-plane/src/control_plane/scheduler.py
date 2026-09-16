@@ -45,7 +45,7 @@ import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -604,12 +604,15 @@ class Scheduler:
             self._move(task, **self._released())  # unleased, still claimed, attempts untouched
             return None
 
-    def run_task_burst(self, task: TaskRecord) -> None:
+    def run_task_burst(self, task: TaskRecord, capacity: Capacity | None = None) -> None:
         number = task.issue_number
         kind = task.next_burst_kind or WORK
-        capacity = self._capacity(task)
+        # the fleet picks once for the whole tick (H1) and hands it down; the
+        # single-product loop has no fleet, so it asks here
         if capacity is None:
-            return
+            capacity = self._capacity(task)
+            if capacity is None:
+                return
         if kind == ASSESS:
             self._run_assess_burst(task, capacity)
             return
@@ -1143,6 +1146,35 @@ def _least_recently_served(row: RepositoryRecord) -> tuple[bool, str, str]:
     return (row.last_burst_at is not None, row.last_burst_at or "", row.repository)
 
 
+# The window fair share is measured over (H1). Long enough that a product cannot
+# be starved by a busy morning and short enough that a share changed today means
+# something this week: a day. Code, not a knob — the *weight* is the row's
+# (`usage_share`), and a second number saying "over how long" would let two
+# operators mean different things by the same share.
+FAIR_SHARE_WINDOW_H = 24.0
+
+
+def _since(hours: float) -> str:
+    """The start of a window, in the spelling every stored stamp has."""
+    return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+
+
+def _fair_share_order(row: RepositoryRecord, served: dict[str, int]) -> tuple[float, bool, str, str]:
+    """Whose turn it is: the product with the least served *per unit of weight*.
+
+    `usage_share` is the weight an operator declared (C1), so a product at 2.0
+    should see twice the bursts of one at 1.0 over the window, and the ratio
+    below is what makes that true without anyone maintaining a counter — the
+    numerator is an aggregate over `bursts`, the denominator is the row.
+
+    With equal weights this is least-served-first, and ties fall through to the
+    C4 order — least *recently* served, then the slug — so two products that have
+    had the same number of bursts still alternate rather than picking by name.
+    """
+    weight = row.usage_share if row.usage_share > 0 else 1.0
+    return (served.get(row.repository, 0) / weight, *_least_recently_served(row))
+
+
 class Fleet:
     """The registry-driven multiplexer (C4).
 
@@ -1209,7 +1241,21 @@ class Fleet:
                 sched.observation_turn()
             except (GitHubApiError, GitHubAuthError) as exc:
                 log.warning("observe failed — product skipped this tick", repo=row.repository, error=str(exc))
-        for row, sched in sorted(pairs, key=lambda pair: _least_recently_served(pair[0])):
+        # Who pays, asked once for the fleet (H1). The pool is the platform's, not
+        # a product's, so an empty one is an empty one for everybody: asking per
+        # product would spend the tick claiming a task, giving it back, and
+        # announcing the same exhaustion N times. Nothing is touched here — no
+        # lease, no attempt — and the tick ends where it would have gone idle.
+        try:
+            capacity = pick_capacity(self.stores.ledger)
+        except CapacityExhausted as exc:
+            log.warning("the pool has nothing to give — no product runs this tick", detail=str(exc))
+            self.stores.ledger.record_event(
+                EVENT_CAPACITY_EXHAUSTED, {"products": len(pairs), "detail": str(exc)}
+            )
+            return
+        served = self.stores.ledger.bursts_per_product_since(_since(FAIR_SHARE_WINDOW_H))
+        for row, sched in sorted(pairs, key=lambda pair: _fair_share_order(pair[0], served)):
             if self.stopped():  # `stop` may have landed during observation
                 return
             task = sched.pick_next()
@@ -1218,5 +1264,5 @@ class Fleet:
             # the turn is the unit of fairness, stamped when taken — a spawn
             # that then fails still spent this product's place in line
             self.stores.ledger.touch_repository_burst(row.repository, utc_now())
-            sched.run_task_burst(task)
+            sched.run_task_burst(task, capacity)
             return  # one burst per tick — the loop stays serial

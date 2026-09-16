@@ -795,6 +795,16 @@ class PostgresLedger:
             ).fetchone()
         return int(row["n"])
 
+    def bursts_per_product_since(self, since_iso: str) -> dict[str, int]:
+        """Fair share's numerator (H1) — see the SQLite backend."""
+        rows = self._execute(
+            "SELECT t.repository AS repository, COUNT(*) AS n "
+            "FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
+            "WHERE b.started_at >= %s GROUP BY t.repository",
+            (_to_datetime(since_iso),),
+        ).fetchall()
+        return {row["repository"]: int(row["n"]) for row in rows}
+
     def touch_repository_burst(self, repository: str, at: str) -> None:
         """Stamp the least-recently-served cursor (C4) — the fleet marks the
         product whose turn it just took. Operational state, not an operator

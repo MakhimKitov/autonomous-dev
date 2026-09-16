@@ -91,6 +91,19 @@ Notes:
   worker captures the session id from the init message and writes its result file in a
   `finally` (the task-17 lesson), so attempts × per-burst budget behaves as an installment
   plan — each retry continues where the last died, never a restart from zero.
+- **Whose turn it is, is a weight and not a clock** (H1). The fleet orders its
+  products by *bursts served per unit of weight* over a day — the numerator an
+  aggregate over `bursts`, the denominator the row's `usage_share` — so a product
+  at 2.0 sees twice the bursts of one at 1.0 without anyone maintaining a
+  counter. Equal weights make it least-served-first, and ties fall through to C4's
+  order (least *recently* served, then the slug), so two products with the same
+  history still alternate instead of one name always winning.
+- **The pool is asked once for the fleet, before any product's turn** (H1). It is
+  the platform's, not a product's, so an empty one is empty for everybody: the
+  fleet asks, and when nothing is eligible it says so once and ends the tick with
+  no task claimed, no lease moved and no turn spent. The single-product loop has
+  no fleet, so it asks for itself — where an exhausted pool still costs one task
+  its lease and nothing else.
 - **The pool is asked before anything is spent.** Admission has a second question
   since F2: *who pays for this burst?* `pick_capacity` reads the contributed
   subscriptions and one rolling-window aggregate over `bursts`, and hands back the
