@@ -47,6 +47,22 @@ DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
 # #6) prints nothing for 18 minutes and must not look dead.
 HEARTBEAT_POLL_S = 5.0
 
+# The ceiling on one Bash call inside a burst (H2, #104). A ceiling in code, not
+# a row: how long a single command may run is a platform-safety question, and a
+# product that needs longer says so per call rather than raising a floor for
+# everyone. The pair is the CLI's own — `BASH_DEFAULT_TIMEOUT_MS` is what a call
+# gets when the model asks for nothing, `BASH_MAX_TIMEOUT_MS` the most it may ask
+# for — so the enforcement is the engine's and this is the policy.
+#
+# Why these numbers: finding #6 measured 18 minutes lost to one stuck command,
+# with the burst's budget draining and the heartbeat happily renewing a lease on
+# work that had stopped. Two minutes covers the ordinary command; ten is the most
+# a deliberate one (a full test run, an image build) may ask for, and a call that
+# passes it comes back as a tool error the agent can react to — which is the
+# difference between a rail and a wall: the burst continues on its own terms.
+BASH_CALL_TIMEOUT_S = 120
+BASH_CALL_CEILING_S = 600
+
 # The runner's contract for the callback: True keeps going; False means the
 # lease is lost — a peer has taken the task — and the runner fences the burst by
 # killing its container. Work nobody holds a lease on must not keep pushing.
@@ -149,6 +165,11 @@ def burst_env(spec: BurstSpec) -> dict[str, str]:
             env[agentenv.CLAUDE_CODE_OAUTH_TOKEN] = oauth
         elif api_key:
             env[agentenv.ANTHROPIC_API_KEY] = api_key
+        # No single command may hang the burst (H2): the CLI's own per-call
+        # ceiling, set here because the policy is the platform's. Never on a
+        # `check`, which runs no tools at all.
+        env[agentenv.BASH_DEFAULT_TIMEOUT_MS] = str(int(BASH_CALL_TIMEOUT_S * 1000))
+        env[agentenv.BASH_MAX_TIMEOUT_MS] = str(int(BASH_CALL_CEILING_S * 1000))
         # The agent's own OTel (B2) — empty unless a collector is configured, and
         # never on a `check`, which is the no-network boot smoke.
         env.update(agent_telemetry_env(spec.task_id, spec.burst_id, spec.role, spec.kind))

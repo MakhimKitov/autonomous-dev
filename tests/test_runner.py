@@ -13,6 +13,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from control_plane import runner as runner_mod
 from control_plane import telemetry
 from control_plane.runner import SECCOMP_PROFILE, BurstSpec, DockerRunner, burst_env
 from dev_agent import env as agentenv
@@ -75,6 +76,20 @@ def test_api_key_is_the_fallback(monkeypatch):
     monkeypatch.delenv(agentenv.CLAUDE_CODE_OAUTH_TOKEN, raising=False)
     monkeypatch.setenv(agentenv.ANTHROPIC_API_KEY, "sk-test")
     assert burst_env(_spec())[agentenv.ANTHROPIC_API_KEY] == "sk-test"
+
+
+def test_no_single_command_may_hang_the_burst(monkeypatch):
+    """H2 (#104): the CLI's own per-call ceiling, set by the platform. Finding #6
+    measured 18 minutes lost to one stuck command — with the budget draining and
+    the heartbeat renewing a lease on work that had stopped."""
+    monkeypatch.setenv(agentenv.CLAUDE_CODE_OAUTH_TOKEN, "oat-test")
+    env = burst_env(_spec())
+    assert env[agentenv.BASH_DEFAULT_TIMEOUT_MS] == str(runner_mod.BASH_CALL_TIMEOUT_S * 1000)
+    assert env[agentenv.BASH_MAX_TIMEOUT_MS] == str(runner_mod.BASH_CALL_CEILING_S * 1000)
+    # the ceiling is above the default, or the model could never ask for longer
+    assert runner_mod.BASH_CALL_CEILING_S > runner_mod.BASH_CALL_TIMEOUT_S
+    # and a `check` runs no tools, so it is told nothing about them
+    assert agentenv.BASH_DEFAULT_TIMEOUT_MS not in burst_env(_spec(command="check"))
 
 
 def test_no_credentials_in_check_bursts(monkeypatch):

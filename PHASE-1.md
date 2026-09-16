@@ -18,7 +18,8 @@ the checkpoints below.
 | **E — deployment** | #32–#37 | leases + CAS · replica safety · STOP row · Runner protocol · webhook receiver · server | server + HTTPS route |
 | **F — subscription pool** | #38–#41 | ref-only verbs · headroom pick · backoff/retry · lifecycle + accounting | teammates' tokens |
 | **G — runners + isolation** | #42–#47 | 3-phase choreography · presigned URLs · JobsRunner · golden-replay harness · bake-off · egress + M4 | cluster · bake-off owner (§15) |
-| **H–K — later horizons** | #48–#51 | coarse placeholders for T1-remainder / T2 / T3 / T4 — decomposed when reached | — |
+| **H — T1 remainder** | #103–#107 | fair share × token availability · per-tool-call timeout · per-node clone caches · memory write path · fork rails | — |
+| **I–K — later horizons** | #49–#51 | coarse placeholders for T2 / T3 / T4 — decomposed when reached | — |
 
 ## The three gates
 
@@ -38,6 +39,11 @@ A → {B, C} → D → E → F → G; H–K after their wave prerequisites. The 
 to "laptop retired" is **A → C → D → E**; B lands any time after A; F needs only
 A + D plus willing teammates. Everything before D1 (#27) needs nobody's
 permission — stages A–C are deliberately laptop-only.
+
+Stage G's tail is where the org asks cluster: G3 needs a test cluster, G5 a
+bake-off owner, G6 a red team on the adopter's CNI. **Stage H does not wait for
+them** — H1–H5 depend on F and on G1/G2, both merged — which is why #48 was
+decomposed while G was still open.
 
 ## Conventions
 

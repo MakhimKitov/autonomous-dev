@@ -513,6 +513,17 @@ and coming back is renewal at F4. `set` touches the declaration only —
 counter: consumption is a rolling-window aggregate over `bursts`, which is what
 the pick reads.
 
+**No single command hangs a burst (H2)**: `burst_env` sets the CLI's own per-call
+ceiling — `BASH_DEFAULT_TIMEOUT_MS` (2 min, what a call gets when the model asks
+for nothing) and `BASH_MAX_TIMEOUT_MS` (10 min, the most it may ask for). A
+ceiling in code (`runner.py`), not a row: how long one command may run is a
+platform-safety question, and a product that needs longer says so per call rather
+than raising a floor for everyone. Enforcement is the engine's; a call that passes
+its ceiling comes back as a tool error the agent reacts to, which is the
+difference between a rail and a wall. Finding #6 is what this is for: 18 minutes
+lost to one stuck command, with the budget draining and the heartbeat renewing a
+lease on work that had stopped.
+
 ### Task identity
 
 A task id is derived, never typed: `{owner}/{repo}#{issue_number}` (`task_id_for`).
