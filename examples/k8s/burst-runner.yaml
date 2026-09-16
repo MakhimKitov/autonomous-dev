@@ -1,0 +1,50 @@
+# Where bursts run (G3, TO-BE §6). Two accounts and one asymmetry: the control
+# plane may create Jobs in this namespace, and the pods it creates may do
+# nothing at all.
+#
+# The control plane's Role is the whole list of verbs `JobsRunner` speaks —
+# create a Job, read the pod it makes, read that pod's log, delete the Job to
+# fence a burst. It is namespaced on purpose: a burst runner that could reach
+# another namespace would be a burst runner that could reach the platform.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bursts
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: burst-runner
+  namespace: bursts
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burst-runner
+  namespace: bursts
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burst-runner
+  namespace: bursts
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: burst-runner
+subjects:
+  - kind: ServiceAccount
+    name: burst-runner
+    namespace: bursts
+    # REPLACE_ME if the control plane runs in another namespace

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,9 @@ CLONE_REF = "BURST_CLONE_REF"  # branch or sha; empty means the default branch
 CLONE_TOKEN = "BURST_CLONE_TOKEN"  # contents:read, one repository — init's alone
 
 HTTP_TIMEOUT_S = 300.0  # a snapshot is megabytes; a stuck transfer must not outlive the rail
+
+# A ref is a branch or a commit, and git wants them checked out differently.
+_IS_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 class PhaseError(RuntimeError):
@@ -153,12 +157,27 @@ def _clone(environ: dict[str, str], clone_url: str) -> None:
     if token and clone_url.startswith("https://"):
         authenticated = clone_url.replace("https://", f"https://x-access-token:{token}@", 1)
     ref = environ.get(CLONE_REF, "").strip()
-    command = ["git", "clone", "--depth", "1"]
+    # The same two moves the control plane's own clone makes, in the same order:
+    # clone, then detach onto a commit if that is what the ref is. Not shallow —
+    # the tree a burst gets here has to be the tree it gets on the host path, and
+    # a dev burst reads history and pushes a branch out of it. What that costs
+    # per burst is the clone cache's problem (#105), not correctness's.
+    _run_git(["clone", authenticated, str(destination)], token, "the clone")
     if ref:
-        command += ["--branch", ref]
-    command += [authenticated, str(destination)]
+        if _IS_COMMIT.fullmatch(ref):
+            _run_git(["-C", str(destination), "checkout", "--detach", ref], token, "the checkout")
+        else:
+            _run_git(["-C", str(destination), "checkout", "-B", ref, f"origin/{ref}"], token, "the checkout")
+
+
+def _run_git(args: list[str], token: str, what: str) -> None:
+    """One git invocation, with nothing of it in the message if it fails.
+
+    `git` is told not to ask for anything interactively, so a token that does not
+    work fails the phase instead of hanging a pod until its deadline.
+    """
     result = subprocess.run(
-        command,
+        ["git", *args],
         capture_output=True,
         text=True,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true"},
@@ -167,7 +186,8 @@ def _clone(environ: dict[str, str], clone_url: str) -> None:
     if result.returncode != 0:
         # the token is in the command line, so the command is never echoed back
         detail = (result.stderr or "").replace(token, "***") if token else (result.stderr or "")
-        raise PhaseError(f"the clone failed (exit {result.returncode}): {detail.strip().splitlines()[-1:] or ['']}"[:400])
+        last = detail.strip().splitlines()[-1:] or [""]
+        raise PhaseError(f"{what} failed (exit {result.returncode}): {last[0]}"[:400])
 
 
 def harvest(environ: dict[str, str]) -> Artifacts:

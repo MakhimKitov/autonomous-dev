@@ -345,7 +345,8 @@ the ephemeral container.
 > heartbeat) -> int`, `alive(burst_id) -> bool` — joins `Ledger` and
 > `SessionArchive` as the third seam (TO-BE §6), with `DockerRunner` behind it
 > and its behavior untouched. The scheduler holds one runner per process,
-> chosen in one place (`open_runner`, nothing to choose until `JobsRunner`),
+> chosen in one place (`open_runner`, one presence toggle: `BURST_NAMESPACE`
+> makes it `JobsRunner`, G3),
 > and asks it to run every burst and whether an orphaned one is still alive;
 > `docker` is spelled nowhere outside `runner.py`. What the box is given is
 > decided once for every runner — `burst_env`: the one credential, the agent's

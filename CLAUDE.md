@@ -390,6 +390,53 @@ filesystem without `ARCHIVE_URL`. `DockerRunner` stays on the host phases (G1):
 it shares that filesystem, so its burst container is handed nothing at all, and
 the zero-standing-credentials property holds on both paths for the same reason.
 
+**Bursts as Jobs on a cluster (G3)**: `BURST_NAMESPACE` is the toggle — set, and
+`open_runner` returns `JobsRunner` (`jobs.py`) instead of `DockerRunner`; unset,
+nothing changes. One burst is one Job is one pod of three containers: **init**
+(the phases image) fills an `emptyDir` from its presigned GET and clones the
+product into a second one, **agent** (the dev-agent image, unchanged) runs
+against both, **harvest** waits for the exit code the agent writes to a third,
+tiny volume and ships what is on the session volume. A pod has no "after the
+main container" hook, which is why that sentinel exists and why it is *not* on
+the session volume — that one is archived and materialized into the next burst.
+The walls are absences: `automountServiceAccountToken: false` (a burst holds no
+k8s credential at all, so "a burst can't touch the cluster" is a fact about the
+pod), no storage credential (capabilities, G2), no GitHub credential in a
+reviewer's or tester's agent (the `contents:read` clone token is the init
+container's alone, `mint_clone_token`), `backoffLimit: 0` + `restartPolicy:
+Never` (a retry is the scheduler's decision, made with the result file in hand).
+`activeDeadlineSeconds` is `PHASE_URL_TTL_S` — how long a burst may run and how
+long its URLs are good for are one number, because two would drift into a pod
+outliving its capabilities. **kubectl, not a client library**, for the reason
+`DockerRunner` shells out to docker: the streaming half of `run` — the pump, the
+heartbeat on the clock, the fence — is subtle and already written, and against a
+subprocess it is literally the same `_pump`, so the two runners cannot drift on
+the guarantee that matters most.
+
+Three things the second substrate changed on this side of the seam.
+`BurstSpec.archive_as` — *where* a burst's snapshot goes is settled at spawn
+rather than asked for at `collect`, because a pod's PUT has to be minted before
+it starts; `collect(spec)` lost its argument. `BurstSpec.clone` /
+`clone_token` — a pod inherits no mount, so the burst is told what to fetch
+(`pinned_origin`: origin, and the branch or commit the platform's own clone is
+sitting on, so the tree in the pod is the tree `repo_mount` would have been), and
+`Runner.pod_side` is the one bit of substrate the caller reads, buying exactly
+that decision. And a G2 bug the second substrate exposed: the harvester's record
+key was derived from the *parent's* snapshot key, so two bursts resuming one
+parent would have filed their records in the same place — it is
+`artifacts_key(session_key(task_id, burst_id))` now, this burst's own, which is
+also what lets a reviewer report without archiving anything.
+
+`tests/test_runner_contract.py` runs on both runners, and getting a cluster to
+run it against is one command (`scripts/burst-cluster.sh`, a throwaway kind
+cluster + the archive + the phases image). The suite had to become
+substrate-neutral to do it: every test is now materialize → run → collect, and
+reads the volume only through what the burst *wrote*, because on a cluster the
+volume is inside the pod and there is no moment at which a test could look at
+it. `tests/test_jobs_runner.py` is what the contract cannot ask — the pod spec's
+walls, read off the manifest without a cluster, plus one live burst that goes
+looking for the service-account token and finds nothing.
+
 **Webhooks as wake-up, polls as truth (E5)**: three parts and one wall (TO-BE §5).
 `packages/webhook-receiver` is the platform's only public surface — verify
 `X-Hub-Signature-256` against the App's webhook secret (`WEBHOOK_APPS="<app id>=

@@ -4,11 +4,13 @@
 # `--data-dir`, which holds only this process's own scratch (volumes, logs, the
 # platform clone).
 #
-# Bursts still run through `DockerRunner` (the Jobs runner is Stage G), so the
-# image carries the docker *CLI* and expects the host's daemon socket mounted
-# at /var/run/docker.sock. That daemon reads bind-mount paths in *its* namespace,
-# so the data dir must be mounted at the same absolute path inside and out —
-# docker/compose.yaml's `platform` profile does exactly that.
+# Bursts run one of two ways and the image carries both clients, because which
+# one a deployment uses is one env variable (`BURST_NAMESPACE`) and not a second
+# image. `DockerRunner` needs the docker *CLI* and the host's daemon socket
+# mounted at /var/run/docker.sock — that daemon reads bind-mount paths in *its*
+# namespace, so the data dir must be mounted at the same absolute path inside and
+# out, which docker/compose.yaml's `platform` profile does. `JobsRunner` (G3)
+# needs `kubectl` and a kubeconfig or an in-cluster service account.
 #
 # Build (repo root): docker build -f docker/control-plane/Dockerfile -t autonomous-dev/control-plane:latest .
 
@@ -40,6 +42,16 @@ RUN arch="$(dpkg --print-architecture)" \
     && curl -fsSL "https://download.docker.com/linux/static/stable/${target}/docker-${DOCKER_CLI_VERSION}.tgz" \
        | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
     && docker --version
+
+# kubectl, for `JobsRunner` (G3). Pinned, and the client alone — the runner
+# speaks four verbs in one namespace and the account it speaks them with is the
+# cluster's to grant (examples/k8s/burst-runner.yaml).
+ARG KUBECTL_VERSION=v1.34.1
+RUN arch="$(dpkg --print-architecture)" \
+    && curl -fsSL -o /usr/local/bin/kubectl \
+       "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && kubectl version --client=true
 
 COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:${PATH}"
