@@ -38,6 +38,7 @@ from control_plane.bursts import PlatformStores
 from control_plane.cli import _serve
 from control_plane.github_api import Issue, PullRequest
 from control_plane.postgres import PostgresLedger
+from control_plane.runner import HostPhases
 from control_plane.scheduler import Fleet, Rails, Scheduler, default_replica
 from control_plane.store import LocalSessionArchive
 from control_plane.telemetry import init_telemetry
@@ -100,15 +101,18 @@ class ScriptedGitHub:
         return []
 
 
-class SleepingRunner:
+class SleepingRunner(HostPhases):
     """Docker's seat (a `Runner`, E4): a burst is `seconds` of wall clock with
     the heartbeat asked throughout; a False fences it, as `DockerRunner` would
     kill the container. Nothing is ever `alive` here — no containers exist, so
-    the reconciler judges by the lease alone."""
+    the reconciler judges by the lease alone. The bytes phases are the real ones
+    (G1): two replicas over one archive is exactly where a volume written twice
+    would show."""
 
-    def __init__(self, seconds: float, events: Events):
+    def __init__(self, seconds: float, events: Events, archive=None):
         self._seconds = seconds
         self._events = events
+        self.archive = archive
 
     def run(self, spec, log_path=None, heartbeat=None):
         def alive() -> bool:
@@ -168,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         archive=LocalSessionArchive(args.archive_dir or args.data_dir),
         ledger=PostgresLedger(args.dsn),
     )
-    runner = SleepingRunner(args.burst_s, events)  # docker's seat, through the seam
+    runner = SleepingRunner(args.burst_s, events, archive=stores.archive)  # docker's seat, through the seam
     rails = Rails(
         failure_cooldown_s=0,
         lease_s=args.lease_s,

@@ -1102,7 +1102,7 @@ def _run_fleet(
         )
         return 2
 
-    runner = open_runner()  # where this replica's bursts run (E4) — one for the process
+    runner = open_runner(stores.archive)  # where this replica's bursts run (E4) — one for the process
 
     def build_scheduler(row: RepositoryRecord) -> Scheduler:
         slug = row.repository
@@ -1276,7 +1276,7 @@ def _run_scheduler(args: argparse.Namespace) -> int:
         image=args.image,
         sync_clone=sync_clone,
         sync_clone_ref=sync_clone_ref,
-        runner=open_runner(),
+        runner=open_runner(stores.archive),
     )
     log.info(
         "scheduler starting",

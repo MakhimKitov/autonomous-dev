@@ -22,6 +22,7 @@ from control_plane.github_api import Issue, PullRequest, Review
 from control_plane.migrate import migrate
 from control_plane.models import BurstRecord, BurstStatus, RepositoryRecord, TaskStatus, task_id_for
 from control_plane.review import ReviewPolicy
+from control_plane.runner import HostPhases
 from control_plane.scheduler import Rails, Scheduler
 from control_plane.store import LEDGER_DSN_ENV, LocalSessionArchive, SqliteLedger
 from psycopg.conninfo import make_conninfo
@@ -124,13 +125,15 @@ class ProbingApi:
         return []
 
 
-class ProbingRunner:
+class ProbingRunner(HostPhases):
     """Docker's seat: the longest I/O of all, with the heartbeat asked inside it —
-    and the reconciler's `alive`, the other I/O a runner does."""
+    and the reconciler's `alive`, the other I/O a runner does. The bytes phases
+    (G1) are the real ones, so the volume I/O a tick does is probed too."""
 
-    def __init__(self, probe):
+    def __init__(self, probe, archive=None):
         self._probe = probe
         self.beats = 0
+        self.archive = archive
 
     def run(self, spec, log_path=None, heartbeat=None):
         self._probe.probe("runner.run")
@@ -178,7 +181,7 @@ def rig(request, tmp_path, monkeypatch, pg_dsn):
     probe = IdleOnEntry(raw)
     stores = PlatformStores(data_dir=tmp_path, archive=LocalSessionArchive(tmp_path), ledger=ledger)
     api = ProbingApi(probe)
-    runner = ProbingRunner(probe)
+    runner = ProbingRunner(probe, archive=stores.archive)
     repo = tmp_path / "repo"
     repo.mkdir()
 

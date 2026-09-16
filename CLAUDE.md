@@ -343,6 +343,19 @@ fence, `alive` and `burst_env` unchanged. The suite's fakes in docker's seat
 (`SleepingRunner`, `ProbingRunner`, …) are handed in through the seam
 (`Scheduler(runner=…)`, `execute_burst(runner=…)`), never monkeypatched in.
 
+**Three phases behind the runner (G1)**: a burst is `materialize` → `run` →
+`collect`, and all three are the `Runner`'s. The first and the third move bytes —
+the parent snapshot into the volume, the result file and violations feed back out
+— and *where* those bytes live is exactly what a substrate decides: a directory
+on this host (`HostPhases`, which `DockerRunner` and the suite's fakes inherit),
+an init container and a harvester talking to presigned URLs on a cluster (G2/G3).
+Turning what came back into ledger rows is **not** a phase: `fold_artifacts` runs
+in the control plane, because nothing that runs beside a burst holds ledger
+credentials. `open_runner(archive)` hands the runner the archive for the same
+reason the ledger and archive seams are chosen in one place.
+`tests/test_runner_contract.py` holds every runner to the phases as it already
+holds them to the exit code, the tee, the heartbeat and the fence.
+
 **Webhooks as wake-up, polls as truth (E5)**: three parts and one wall (TO-BE §5).
 `packages/webhook-receiver` is the platform's only public surface — verify
 `X-Hub-Signature-256` against the App's webhook secret (`WEBHOOK_APPS="<app id>=

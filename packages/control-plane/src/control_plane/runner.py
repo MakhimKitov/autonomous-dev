@@ -27,7 +27,14 @@ from typing import Protocol
 import structlog
 from dev_agent import env as agentenv
 
+from control_plane.store import SessionArchive
 from control_plane.telemetry import agent_telemetry_env
+from control_plane.volume import (
+    BurstArtifacts,
+    Snapshot,
+    collect_volume,
+    materialize_volume,
+)
 
 log = structlog.get_logger()
 
@@ -149,12 +156,53 @@ def burst_env(spec: BurstSpec) -> dict[str, str]:
     return env
 
 
+class HostPhases:
+    """`materialize` and `collect` on this machine's filesystem — the two bytes
+    phases as every runner that shares a filesystem with the control plane does
+    them (G1).
+
+    `DockerRunner` mounts the volume this writes; the suite's fakes in docker's
+    seat inherit the same two, because a fake that ran a burst has to leave the
+    same trail a real one does. A Job pod cannot inherit it: there the phases are
+    an init container and a harvester, talking to the archive through presigned
+    URLs minted at spawn (G2), which is exactly why they are phases of the
+    *runner* and not steps in `execute_burst`.
+
+    The archive is the runner's, not the burst's: nothing that runs beside a
+    burst is handed storage credentials, then or now.
+    """
+
+    archive: SessionArchive | None = None
+
+    def materialize(self, spec: BurstSpec, parent: Snapshot | None = None) -> None:
+        materialize_volume(spec.volume_dir, self.archive, parent)
+
+    def collect(self, spec: BurstSpec, *, archive_as: str | None = None) -> BurstArtifacts:
+        return collect_volume(spec.volume_dir, self.archive, archive_as)
+
+
 class Runner(Protocol):
     """Where bursts run — the seam `DockerRunner` sits behind (E4, TO-BE §6)
     and `JobsRunner` will (G3, #44); the suite's fakes take docker's seat
     through it.
 
-    Two questions, and what every answer holds wherever the burst runs:
+    Four questions since G1, and what every answer holds wherever the burst runs.
+    The first and the third are the bytes phases — one volume in, one volume out
+    — and they are the runner's because *where* those bytes live is: a directory
+    on this host, or an emptyDir a pod's init container fills from a presigned
+    URL. Between them nothing about the burst changes.
+
+    - ``materialize`` makes the burst's volume and fills it from ``parent`` —
+      the snapshot the ledger named as the leaf of the task's session tree, or
+      None for a burst that starts empty. A checksum mismatch raises rather
+      than handing the burst bytes nobody recorded.
+    - ``collect`` reads back what the burst left — its result file and its
+      violations feed — and archives the volume under ``archive_as``, or under
+      nothing when the caller passes None. Bytes only: turning them into ledger
+      rows is `fold_artifacts`, in the control plane, because a burst's
+      substrate holds no ledger credentials.
+
+    And the two E4 already had:
 
     - ``run`` starts the burst ``spec`` describes and returns its exit code —
       the burst's own, never a guess. Output streams to this process's stdout
@@ -175,22 +223,30 @@ class Runner(Protocol):
     bug by definition, the way the ledger's and the archive's suites put it.
     """
 
+    def materialize(self, spec: BurstSpec, parent: Snapshot | None = None) -> None: ...
+
     def run(
         self, spec: BurstSpec, log_path: Path | None = None, heartbeat: Heartbeat | None = None
     ) -> int: ...
 
+    def collect(self, spec: BurstSpec, *, archive_as: str | None = None) -> BurstArtifacts: ...
+
     def alive(self, burst_id: str) -> bool: ...
 
 
-class DockerRunner:
+class DockerRunner(HostPhases):
     """Bursts as containers on this host, through the ``docker`` CLI.
 
     The CLI is spoken in exactly three places — `build_command` (``docker run``),
     `kill` (``docker kill``, the fence) and `alive` (``docker ps``) — which is
     what lets the contract suite run this class with a shell in the daemon's
     seat: those three replaced, the pump, the tee, the clock and the fence are
-    the real thing.
+    the real thing. The bytes phases are `HostPhases`': same filesystem as the
+    control plane, so a directory is all they need.
     """
+
+    def __init__(self, archive: SessionArchive | None = None) -> None:
+        self.archive = archive
 
     def build_command(self, spec: BurstSpec) -> list[str]:
         cmd = [
@@ -263,14 +319,16 @@ class DockerRunner:
         return bool(out.stdout.strip())
 
 
-def open_runner() -> Runner:
+def open_runner(archive: SessionArchive | None = None) -> Runner:
     """The runner this deployment has — `open_ledger` / `open_archive`'s third.
 
     Docker is the only one as built, so nothing is chosen here yet; this is
     the place the choice is made when `JobsRunner` exists (G3, #44): one
-    toggle, here, and nothing downstream of it naming a substrate.
+    toggle, here, and nothing downstream of it naming a substrate. The archive
+    is handed in because the bytes phases are the runner's (G1) — a Job pod will
+    be handed presigned URLs instead (G2), and the caller will not know which.
     """
-    return DockerRunner()
+    return DockerRunner(archive)
 
 
 def _pump(

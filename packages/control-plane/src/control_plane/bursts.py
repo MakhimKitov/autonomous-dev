@@ -24,7 +24,7 @@ from control_plane.models import BurstRecord, BurstStatus, SubscriptionStatus, T
 from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_only
 from control_plane.roles import validate as validate_role
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, Heartbeat, Runner, open_runner
-from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
+from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger, session_key
 from control_plane.subscriptions import (
     MACHINE_CREDENTIAL,
     Capacity,
@@ -34,7 +34,7 @@ from control_plane.subscriptions import (
     rate_limited_until,
 )
 from control_plane.telemetry import burst_span
-from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
+from control_plane.volume import HarvestOutcome, Snapshot, fold_artifacts
 
 log = structlog.get_logger()
 
@@ -186,7 +186,7 @@ def execute_burst(
     May raise GitHubAuthError (before the container starts) — callers decide
     whether that aborts (CLI) or waits for the next tick (scheduler).
     """
-    runner = runner if runner is not None else open_runner()
+    runner = runner if runner is not None else open_runner(stores.archive)
     if capacity is None:
         capacity = pick_capacity(stores.ledger) if mode == "run" else MACHINE_CREDENTIAL
     profile = stores.ledger.get_role(role)
@@ -221,7 +221,7 @@ def execute_burst(
     # the volume cannot be seeded with the dev's transcripts and the resume is off,
     # from one decision rather than two flags.
     parent = None if fresh else stores.ledger.latest_archived_burst(task.task_id)
-    volume = prepare_volume(stores.data_dir / "volumes", burst_id, stores.archive, parent=parent)
+    volume = stores.data_dir / "volumes" / burst_id  # where this host keeps it; the runner fills it
     resume = None if fresh else task.session_id
 
     burst = BurstRecord(
@@ -291,6 +291,10 @@ def execute_burst(
             fenced = fenced or not alive
             return alive
 
+        # phase one (G1): the volume, filled from the parent node. The runner owns
+        # it because *where* those bytes live is the runner's — a directory here,
+        # an init container's emptyDir on a cluster.
+        runner.materialize(spec, Snapshot.of(parent))
         exit_code = runner.run(spec, log_path=log_path, heartbeat=beat if heartbeat is not None else None)
         burst.exit_code = exit_code
         if fenced:
@@ -307,9 +311,13 @@ def execute_burst(
         # that ran it (B5). Leafhood stays the dev's either way: the leaf query
         # filters on role, so a tester's snapshot can never be resumed. Reviewers
         # read and never execute, so there is nothing to prove — not archived.
-        outcome = harvest_volume(
-            volume, burst, stores.archive, stores.ledger, archive_session=(role in ("dev", "tester"))
+        # phase three: what the burst left comes back as bytes, and only here —
+        # in the control plane, with the credentials for it — does it become rows
+        artifacts = runner.collect(
+            spec,
+            archive_as=session_key(task.task_id, burst_id) if role in ("dev", "tester") else None,
         )
+        outcome = fold_artifacts(artifacts, burst, stores.ledger)
         if burst.model:
             span.set_attribute("burst.model", burst.model)  # resolved beats requested
         stores.ledger.finish_burst(burst)

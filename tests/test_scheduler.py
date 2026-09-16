@@ -23,6 +23,7 @@ from control_plane.models import (
     utc_now,
 )
 from control_plane.review import ReviewPolicy
+from control_plane.runner import HostPhases
 from control_plane.scheduler import Rails, Scheduler
 from control_plane.subscriptions import declare
 from control_plane.testing import E2EPolicy
@@ -33,9 +34,10 @@ REPOSITORY = "owner1/product"
 COPILOT_ON = ReviewPolicy(enabled=True, providers=("copilot",))
 
 
-class NoContainers:
+class NoContainers(HostPhases):
     """Docker's seat (a `Runner`, E4) for a suite that fakes `execute_burst`:
-    nothing ever runs here, so nothing is ever alive."""
+    nothing ever runs here, so nothing is ever alive — and the bytes phases (G1)
+    are never reached either, since no burst is spawned through them."""
 
     def run(self, spec, log_path=None, heartbeat=None):
         raise AssertionError("execute_burst is faked in this suite — the runner is never reached")

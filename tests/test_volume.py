@@ -1,10 +1,16 @@
-"""Volume choreography: materialize from the parent node, harvest into a new one.
+"""Volume choreography: materialize from the parent node, collect into a new one.
 
-Since A5 this is a tree walk. `prepare_volume` descends from the leaf the ledger
-names; `harvest_volume` writes a new leaf under this burst's own key; the edge
-between them is `resumed_from_burst_id`, recorded at spawn. The tests below are
-about that shape — the archive's own guarantees (write-once, checksums,
+Since A5 this is a tree walk. `materialize_volume` descends from the leaf the
+ledger names; `collect_volume` writes a new leaf under this burst's own key; the
+edge between them is `resumed_from_burst_id`, recorded at spawn. The tests below
+are about that shape — the archive's own guarantees (write-once, checksums,
 credential exclusion) belong to `test_archive_contract.py`.
+
+Since G1 the second half is two functions with a seam between them, and the seam
+is where a Job pod will be cut: `collect_volume` moves *bytes* and runs wherever
+the burst ran, `fold_artifacts` turns them into ledger rows and runs only in the
+control plane. `harvest` below is the two of them in the order `execute_burst`
+runs them; `test_collect_moves_bytes_and_folding_writes_rows` is the line itself.
 """
 
 import json
@@ -12,7 +18,7 @@ import json
 import pytest
 from control_plane.models import BurstRecord, BurstStatus
 from control_plane.store import ArchiveError, LocalSessionArchive, SqliteLedger, session_key
-from control_plane.volume import harvest_volume, prepare_volume
+from control_plane.volume import Snapshot, collect_volume, fold_artifacts, materialize_volume
 from dev_agent.env import BURST_RESULT_FILENAME, VIOLATIONS_FILENAME
 
 
@@ -25,6 +31,14 @@ def _burst(burst_id, task_id="42", **kwargs):
     return BurstRecord(burst_id=burst_id, task_id=task_id, **kwargs)
 
 
+def harvest(volume, burst, archive, ledger, archive_session=True):
+    """The two phases as `execute_burst` runs them: bytes out, then rows in."""
+    artifacts = collect_volume(
+        volume, archive, session_key(burst.task_id, burst.burst_id) if archive_session else None
+    )
+    return fold_artifacts(artifacts, burst, ledger)
+
+
 def _wrote(volume, text):
     (volume / "projects").mkdir(exist_ok=True)
     (volume / "projects" / "sess.jsonl").write_text(text, encoding="utf-8")
@@ -34,7 +48,7 @@ def test_a_first_burst_starts_empty(stores, tmp_path):
     """No parent, nothing to materialize — a task's first burst and an amnesiac
     burst are the same case, expressed the same way."""
     archive, _ = stores
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     assert volume.is_dir() and not any(volume.iterdir())
 
 
@@ -44,14 +58,14 @@ def test_harvest_writes_a_snapshot_per_burst_and_resume_materializes_the_leaf(st
     archive, ledger = stores
 
     first = _burst("b1")
-    volume1 = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume1 = materialize_volume(tmp_path / "volumes" / "b1", archive)
     _wrote(volume1, '{"turn":1}\n')
     (volume1 / BURST_RESULT_FILENAME).write_text(
         json.dumps({"session_id": "sess-1", "model": "claude-sonnet-5-20260203", "num_turns": 7}),
         encoding="utf-8",
     )
     ledger.record_burst(first)
-    outcome = harvest_volume(volume1, first, archive, ledger)
+    outcome = harvest(volume1, first, archive, ledger)
     ledger.finish_burst(_finished(first))
 
     assert outcome.session_key == session_key("42", "b1") == "sessions/42/b1/session.tar.gz"
@@ -63,12 +77,12 @@ def test_harvest_writes_a_snapshot_per_burst_and_resume_materializes_the_leaf(st
     assert leaf.burst_id == "b1"
 
     second = _burst("b2", resumed_from_burst_id=leaf.burst_id)
-    volume2 = prepare_volume(tmp_path / "volumes", "b2", archive, parent=leaf)
+    volume2 = materialize_volume(tmp_path / "volumes" / "b2", archive, Snapshot.of(leaf))
     assert (volume2 / "projects" / "sess.jsonl").read_text() == '{"turn":1}\n'
 
     _wrote(volume2, '{"turn":2}\n')
     ledger.record_burst(second)
-    harvest_volume(volume2, second, archive, ledger)
+    harvest(volume2, second, archive, ledger)
     ledger.finish_burst(_finished(second))
 
     # two snapshots, both still there: the first was not overwritten
@@ -85,17 +99,17 @@ def test_the_leaf_is_the_newest_archived_burst_not_the_newest_burst(stores, tmp_
     archive, ledger = stores
 
     dev = _burst("b1", started_at="2026-08-14T09:00:00+00:00")
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     _wrote(volume, '{"dev":1}\n')
     ledger.record_burst(dev)
-    harvest_volume(volume, dev, archive, ledger)
+    harvest(volume, dev, archive, ledger)
     ledger.finish_burst(_finished(dev))
 
     reviewer = _burst("b2", role="reviewer", kind="assess", started_at="2026-08-14T10:00:00+00:00")
-    reviewer_volume = prepare_volume(tmp_path / "volumes", "b2", archive)  # no parent: amnesiac
+    reviewer_volume = materialize_volume(tmp_path / "volumes" / "b2", archive)  # no parent: amnesiac
     _wrote(reviewer_volume, '{"reviewer":1}\n')
     ledger.record_burst(reviewer)
-    outcome = harvest_volume(reviewer_volume, reviewer, archive, ledger, archive_session=False)
+    outcome = harvest(reviewer_volume, reviewer, archive, ledger, archive_session=False)
     ledger.finish_burst(_finished(reviewer))
 
     assert outcome.session_key is None
@@ -103,18 +117,17 @@ def test_the_leaf_is_the_newest_archived_burst_not_the_newest_burst(stores, tmp_
     assert ledger.latest_archived_burst("42").burst_id == "b1"
 
     tester = _burst("b3", role="tester", kind="test", started_at="2026-08-14T11:00:00+00:00")
-    tester_volume = prepare_volume(tmp_path / "volumes", "b3", archive)  # never seeded
+    tester_volume = materialize_volume(tmp_path / "volumes" / "b3", archive)  # never seeded
     _wrote(tester_volume, '{"tester":1}\n')
     ledger.record_burst(tester)
-    harvest_volume(tester_volume, tester, archive, ledger)  # B5: archive_session=True
+    harvest(tester_volume, tester, archive, ledger)  # B5: archive_session=True
     ledger.finish_burst(_finished(tester))
 
     assert tester.session_key == session_key("42", "b3")  # evidence, under its own key
     assert ledger.latest_archived_burst("42").burst_id == "b1"  # and still not the leaf
 
     # and the next dev round resumes the dev — never the reviewer, never the tester
-    next_volume = prepare_volume(
-        tmp_path / "volumes", "b4", archive, parent=ledger.latest_archived_burst("42")
+    next_volume = materialize_volume(tmp_path / "volumes" / "b4", archive, Snapshot.of(ledger.latest_archived_burst("42"))
     )
     assert (next_volume / "projects" / "sess.jsonl").read_text() == '{"dev":1}\n'
 
@@ -124,12 +137,12 @@ def test_an_amnesiac_burst_cannot_read_the_devs_transcripts(stores, tmp_path):
     that resumes nothing but still holds the session (REVIEWERS.md)."""
     archive, ledger = stores
     dev = _burst("b1")
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     _wrote(volume, '{"dev":1}\n')
     ledger.record_burst(dev)
-    harvest_volume(volume, dev, archive, ledger)
+    harvest(volume, dev, archive, ledger)
 
-    reviewer_volume = prepare_volume(tmp_path / "volumes", "b2", archive, parent=None)
+    reviewer_volume = materialize_volume(tmp_path / "volumes" / "b2", archive)
     assert not any(reviewer_volume.iterdir())
 
 
@@ -138,18 +151,18 @@ def test_a_retry_re_materializes_the_same_parent(stores, tmp_path):
     than a chain — and neither write touches the parent's object."""
     archive, ledger = stores
     parent = _burst("b1")
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     _wrote(volume, '{"turn":1}\n')
     ledger.record_burst(parent)
-    harvest_volume(volume, parent, archive, ledger)
+    harvest(volume, parent, archive, ledger)
     ledger.finish_burst(_finished(parent))
 
     for child_id in ("b2", "b3"):
-        child_volume = prepare_volume(tmp_path / "volumes", child_id, archive, parent=parent)
+        child_volume = materialize_volume(tmp_path / "volumes" / child_id, archive, Snapshot.of(parent))
         assert (child_volume / "projects" / "sess.jsonl").read_text() == '{"turn":1}\n'
         child = _burst(child_id, resumed_from_burst_id=parent.burst_id)
         ledger.record_burst(child)
-        harvest_volume(child_volume, child, archive, ledger)
+        harvest(child_volume, child, archive, ledger)
         ledger.finish_burst(_finished(child))
 
     children = [
@@ -166,21 +179,21 @@ def test_a_snapshot_the_ledger_disagrees_with_never_reaches_a_volume(stores, tmp
     the next burst instead of seeding it with something else's bytes."""
     archive, ledger = stores
     parent = _burst("b1")
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     _wrote(volume, '{"turn":1}\n')
     ledger.record_burst(parent)
-    harvest_volume(volume, parent, archive, ledger)
+    harvest(volume, parent, archive, ledger)
 
     blob = tmp_path / "archive" / parent.session_key
     blob.write_bytes(blob.read_bytes() + b"tampered")
 
     with pytest.raises(ArchiveError, match="checksum mismatch"):
-        prepare_volume(tmp_path / "volumes", "b2", archive, parent=parent)
+        materialize_volume(tmp_path / "volumes" / "b2", archive, Snapshot.of(parent))
 
 
 def test_harvest_folds_the_result_and_the_violations_in(stores, tmp_path):
     archive, ledger = stores
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     (volume / BURST_RESULT_FILENAME).write_text(
         json.dumps(
             {
@@ -199,7 +212,7 @@ def test_harvest_folds_the_result_and_the_violations_in(stores, tmp_path):
     )
 
     burst = _burst("b1", model="claude-sonnet-5")
-    outcome = harvest_volume(volume, burst, archive, ledger)
+    outcome = harvest(volume, burst, archive, ledger)
 
     assert burst.session_id == "sess-1"
     assert burst.model == "claude-sonnet-5-20260203"  # resolved beats requested
@@ -211,11 +224,11 @@ def test_harvest_folds_the_result_and_the_violations_in(stores, tmp_path):
 
 def test_harvest_marks_error_bursts_failed(stores, tmp_path):
     archive, ledger = stores
-    volume = prepare_volume(tmp_path / "volumes", "b1", archive)
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
     (volume / BURST_RESULT_FILENAME).write_text(json.dumps({"is_error": True}), encoding="utf-8")
 
     burst = _burst("b1")
-    harvest_volume(volume, burst, archive, ledger)
+    harvest(volume, burst, archive, ledger)
     assert burst.status == BurstStatus.FAILED
 
 
