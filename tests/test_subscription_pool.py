@@ -26,13 +26,20 @@ from control_plane import cli
 from control_plane.models import SubscriptionStatus
 from control_plane.store import SqliteLedger
 from control_plane.subscriptions import (
+    MACHINE_CREDENTIAL,
+    CapacityExhausted,
     SubscriptionError,
+    candidates,
     check_cap,
     check_expiry,
     check_ref,
     check_settable,
+    declare,
+    eligible,
+    pick_capacity,
     subscription_id_for,
 )
+from secret_refs import SecretResolver
 
 # What a real `claude setup-token` value looks like enough to grep for. Nothing
 # in this repo should ever be able to store, print or log a string like it.
@@ -183,6 +190,89 @@ def _audit(tmp_path, target="maksim"):
         return ledger.audit_trail(target)
     finally:
         ledger.close()
+
+
+# --- the pick (F2): who pays for the next burst ---
+
+
+def _row(member="maksim", cap=1000, ref=None, **overrides):
+    row = declare(member, ref or f"env:{member.upper()}_TOKEN", cap, "2027-09-01")
+    for name, value in overrides.items():
+        setattr(row, name, value)
+    return row
+
+
+class FakePool:
+    """A ledger, for the pick: the two reads it makes and nothing else."""
+
+    def __init__(self, rows, usage=None):
+        self.rows = list(rows)
+        self.usage = dict(usage or {})
+        self.windows = []
+
+    def list_subscriptions(self):
+        return list(self.rows)
+
+    def subscription_usage(self, since):
+        self.windows.append(since)
+        return dict(self.usage)
+
+
+def test_eligibility_is_the_whole_predicate():
+    now = "2026-09-16T12:00:00+00:00"
+    assert eligible(_row(), 0, now) is True
+    assert eligible(_row(cap=100), 100, now) is False  # headroom 0 is not headroom
+    assert eligible(_row(cap=100), 140, now) is False  # and neither is an overshoot
+    assert eligible(_row(status="revoked"), 0, now) is False
+    assert eligible(_row(status="expired"), 0, now) is False
+    assert eligible(_row(expires_at="2026-09-16T11:59:00+00:00"), 0, now) is False
+    assert eligible(_row(backoff_until="2026-09-16T12:30:00+00:00"), 0, now) is False
+    assert eligible(_row(backoff_until="2026-09-16T11:30:00+00:00"), 0, now) is True  # it passed
+
+
+def test_the_order_is_most_headroom_first_and_stable():
+    rows = [_row("zoe", cap=1000), _row("ada", cap=1000), _row("bo", cap=5000)]
+    assert [r.subscription_id for r in candidates(rows, {})] == ["bo", "ada", "zoe"]
+    assert [r.subscription_id for r in candidates(rows, {"bo": 4_900})] == ["ada", "zoe", "bo"]
+    assert candidates([], {}) == []
+
+
+def test_an_empty_pool_is_the_machines_own_credential():
+    """Every deployment that has registered nobody — the whole MVP — keeps
+    behaving exactly as it did: the burst runs on whatever this machine holds."""
+    assert pick_capacity(FakePool([])) == MACHINE_CREDENTIAL
+    assert MACHINE_CREDENTIAL.subscription_id is None and MACHINE_CREDENTIAL.token is None
+
+
+def test_the_pick_resolves_the_ref_of_the_one_it_chose():
+    pool = FakePool([_row("ada", cap=1000), _row("bo", cap=5000)])
+    resolver = SecretResolver({"ADA_TOKEN": "ada-secret", "BO_TOKEN": "bo-secret"})
+    chosen = pick_capacity(pool, resolver, now="2026-09-16T12:00:00+00:00")
+    assert (chosen.subscription_id, chosen.token, chosen.headroom) == ("bo", "bo-secret", 5000)
+    # the window it asked usage over is the one the cap is declared against
+    assert pool.windows == ["2026-09-16T07:00:00+00:00"]
+
+
+def test_a_secret_that_is_gone_is_the_members_own_revocation():
+    """Deleting the value at its source is the lever the platform cannot
+    override (TO-BE §4): the row still says active, and the pick moves on to the
+    next member rather than crashing — or worse, quietly spending the
+    operator's own credential in that member's name."""
+    pool = FakePool([_row("ada", cap=1000), _row("bo", cap=5000)])
+    resolver = SecretResolver({"ADA_TOKEN": "ada-secret"})  # bo deleted theirs
+    chosen = pick_capacity(pool, resolver)
+    assert (chosen.subscription_id, chosen.token) == ("ada", "ada-secret")
+
+
+def test_nothing_eligible_is_capacity_exhausted_not_a_fallback():
+    spent = FakePool([_row("ada", cap=1000)], usage={"ada": 1000})
+    with pytest.raises(CapacityExhausted, match="no eligible subscription"):
+        pick_capacity(spent, SecretResolver({"ADA_TOKEN": "x"}))
+    revoked = FakePool([_row("ada", status="revoked")])
+    with pytest.raises(CapacityExhausted):
+        pick_capacity(revoked, SecretResolver({"ADA_TOKEN": "x"}))
+    with pytest.raises(CapacityExhausted, match="1 with a secret that is no longer there"):
+        pick_capacity(FakePool([_row("bo", cap=5000)]), SecretResolver({}))
 
 
 # --- the wall: a token cannot get in, and cannot get out ---

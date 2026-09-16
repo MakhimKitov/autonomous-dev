@@ -417,6 +417,22 @@ through. `tests/test_subscription_pool.py` runs the done-when: a token pushed at
 every entrance that takes a ref, then the ledger file, every audit row, every
 event payload, stdout, stderr and the log stream greppable for it and empty.
 
+**The pick, at admission (F2).** Before a burst is synced, minted or spawned, the
+scheduler asks the pool who pays: two reads — the rows, and one rolling-window
+aggregate over `bursts` (`subscription_usage`; `USAGE_WINDOW_H` = 5, the span a
+`cap_tokens` is declared against) — then the eligible subscription with the most
+headroom, ties broken on the id so every replica reads the same order. Eligible
+is a pure predicate in `subscriptions.py`: active ∧ unexpired ∧ not backing off ∧
+headroom > 0. The ref resolves at that moment and the token goes into the box
+(`BurstSpec.oauth_token`, preferred over the machine's own credential — a burst
+stamped with a member's subscription has to actually run on it); the ledger keeps
+only `bursts.subscription_id` (0018/0019). A ref that no longer resolves is the
+member's own revocation, so it is logged and skipped rather than fallen back
+from. Nothing eligible is **not a failed attempt** — the task keeps its attempts,
+gives back its lease and waits, and `capacity_exhausted` goes to the outbox. An
+empty pool is `MACHINE_CREDENTIAL`: the deployment behaves exactly as it did
+before F2, which is what every laptop run still does.
+
 **One member, one contribution**, and the id is derived from the handle
 (`--member Maksim` → `maksim`), so `subscription revoke maksim` is typeable by
 whoever registered it. Registering twice is a refusal that names the first row.
@@ -427,7 +443,7 @@ and coming back is renewal at F4. `set` touches the declaration only —
 `cap_tokens`, `expires_at`, `secret_ref`; `status` is `revoke`'s and
 `backoff_until` is the attempt rail's (F3). Usage is never mirrored into a
 counter: consumption is a rolling-window aggregate over `bursts`, which is what
-F2's eligibility and headroom pick read.
+the pick reads.
 
 ### Task identity
 

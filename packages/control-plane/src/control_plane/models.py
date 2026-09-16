@@ -145,6 +145,17 @@ class RoleRecord:
     updated_at: str = field(default_factory=utc_now)
 
 
+# The pool's rolling window (F2). A contributed subscription meters itself over a
+# rolling window, so the platform's headroom question — "how much of this
+# member's capacity is already spent?" — is asked over the same span: a
+# `cap_tokens` is tokens per THIS long. Code, not a knob: the cap is the number
+# an operator declares per member, and two numbers where one will do is how a
+# pool gets two ways to mean the same thing. A member's longer-horizon ceiling
+# is the member's business and reaches the platform as a rate-limited burst →
+# `backoff_until` (F3), which is a fact rather than an estimate.
+USAGE_WINDOW_H = 5.0
+
+
 @dataclass(slots=True)
 class SubscriptionRecord:
     """One member's contributed capacity — a *ref*, never a token (TO-BE §4).
@@ -276,6 +287,10 @@ class BurstRecord:
     session_id: str | None = None
     session_key: str | None = None  # this burst's snapshot in the archive
     session_checksum: str | None = None  # its sha256; the ledger is the authority
+    # Which contributed subscription paid for this burst (F2), stamped at spawn.
+    # NULL is the honest value for every burst that ran on the machine's own
+    # credential — the whole MVP, and any deployment with an empty pool.
+    subscription_id: str | None = None
 
 
 # What `finish_burst` writes — everything a burst learns by ending. Shared by both
@@ -348,6 +363,11 @@ EVENT_SUBSCRIPTION_REGISTERED = "subscription_registered"
 EVENT_SUBSCRIPTION_REVOKED = "subscription_revoked"
 EVENT_SUBSCRIPTION_EXPIRED = "subscription_expired"
 EVENT_SUBSCRIPTION_UPDATED = "subscription_updated"
+# The pool had nothing to give (F2): every contributed subscription is spent,
+# backing off, expired or revoked, so a task that was ready to run did not. The
+# payload carries the repository and how many rows were looked at — adopters
+# route it, because capacity is a people question (TO-BE §4), not a pager one.
+EVENT_CAPACITY_EXHAUSTED = "capacity_exhausted"
 # The org STOP (E3): `stop` and `resume`, same shape — the mutation, its audit row
 # and this announcement in one statement. `org_stopped` also carries the reason,
 # so the page it becomes needs no second read.

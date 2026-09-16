@@ -54,6 +54,23 @@ def test_subscription_token_preferred_and_exclusive(monkeypatch):
     assert agentenv.ANTHROPIC_API_KEY not in env
 
 
+def test_the_picked_subscription_pays_over_this_machines_credential(monkeypatch):
+    """F2: a burst stamped with a member's subscription has to actually run on
+    it. The pick's token wins over whatever this machine holds — including an
+    API key, which would otherwise switch billing to the API behind the pool's
+    back."""
+    monkeypatch.setenv(agentenv.CLAUDE_CODE_OAUTH_TOKEN, "the-machines-own")
+    monkeypatch.setenv(agentenv.ANTHROPIC_API_KEY, "sk-test")
+    env = burst_env(_spec(oauth_token="adas-token"))
+    assert env[agentenv.CLAUDE_CODE_OAUTH_TOKEN] == "adas-token"
+    assert agentenv.ANTHROPIC_API_KEY not in env
+
+    # an empty pool passes none, and the machine's own credential is used as before
+    assert burst_env(_spec())[agentenv.CLAUDE_CODE_OAUTH_TOKEN] == "the-machines-own"
+    # and a `check` burst still gets no credential at all, picked or not
+    assert agentenv.CLAUDE_CODE_OAUTH_TOKEN not in burst_env(_spec(command="check", oauth_token="adas-token"))
+
+
 def test_api_key_is_the_fallback(monkeypatch):
     monkeypatch.delenv(agentenv.CLAUDE_CODE_OAUTH_TOKEN, raising=False)
     monkeypatch.setenv(agentenv.ANTHROPIC_API_KEY, "sk-test")

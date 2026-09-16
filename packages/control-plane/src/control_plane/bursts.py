@@ -25,6 +25,7 @@ from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_
 from control_plane.roles import validate as validate_role
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, Heartbeat, Runner, open_runner
 from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
+from control_plane.subscriptions import MACHINE_CREDENTIAL, Capacity, pick_capacity
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
 
@@ -123,6 +124,7 @@ def execute_burst(
     extra_env: dict[str, str] | None = None,
     runner: Runner | None = None,
     heartbeat: Heartbeat | None = None,
+    capacity: Capacity | None = None,
 ) -> BurstOutcome:
     """Run one burst container against the task and fold the results back in.
 
@@ -145,7 +147,11 @@ def execute_burst(
     cannot tell a kill from a crash, so the answer is remembered here.
     ``runner`` is where the burst runs (E4): the deployment's (`open_runner`)
     unless the caller brings its own — the scheduler's one per process, the
-    suite's fakes in docker's seat.
+    suite's fakes in docker's seat. ``capacity`` is who pays (F2): the
+    scheduler picks before it admits the burst, so an exhausted pool idles
+    instead of failing an attempt; a caller that passes none — the hand-run
+    verb — picks here and lets `CapacityExhausted` reach it. The id is stamped
+    on the burst row; the token goes to the box and nowhere else.
 
     Task writes here are the E1 shapes: the row is created if the ledger has
     never seen it (never overwritten if it has), and the dev burst's session id
@@ -156,6 +162,8 @@ def execute_burst(
     whether that aborts (CLI) or waits for the next tick (scheduler).
     """
     runner = runner if runner is not None else open_runner()
+    if capacity is None:
+        capacity = pick_capacity(stores.ledger) if mode == "run" else MACHINE_CREDENTIAL
     profile = stores.ledger.get_role(role)
     if profile is None:
         raise RoleError(f"role {role!r} has no row in the ledger — the pipeline roles are seeded (TO-BE §4)")
@@ -200,6 +208,8 @@ def execute_burst(
         # recorded at spawn, before the container starts: the edge is a fact about
         # what this burst was given, not about what it managed to produce
         resumed_from_burst_id=parent.burst_id if parent is not None else None,
+        # who pays (F2) — the id, never the token; NULL is this machine's own
+        subscription_id=capacity.subscription_id,
     )
     # The task row goes in before the burst row that points at it. A4's
     # bursts.task_id foreign key is what makes the order load-bearing, but the
@@ -241,6 +251,7 @@ def execute_burst(
             git_user_email=git_email,
             codex_auth_dir=codex_auth,
             repo_read_only=repo_read_only(profile),  # code floor ∨ the row; never widened
+            oauth_token=capacity.token,  # the picked subscription's, or None for this machine's
             extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"

@@ -96,8 +96,9 @@ dependency, as the example above does.
 
 **Aggregate — derive, don't mirror.** Anything computable from history is a
 query, never a maintained counter: subscription usage is a rolling-window
-aggregate over `bursts`, product daily counts likewise (§12's
-ledger-as-metrics rule). The only aggregate *decision* — admission — runs under
+aggregate over `bursts` (`subscription_usage`, F2 — a burst still running counts
+as nothing, because what it spent is not known until it ends), product daily
+counts likewise (§12's ledger-as-metrics rule). The only aggregate *decision* — admission — runs under
 a short advisory lock fencing in-memory math and single-statement writes,
 never held across I/O. As built (E1, `PostgresLedger.claim_next`): one
 session-level `pg_try_advisory_lock` around two statements — the rail's
@@ -142,9 +143,10 @@ walls at A4, per-burst snapshots at A5, derived task identity at A6), C1 added
 `tasks.repository`'s foreign key along with the registry verbs that can create a
 `repositories` row, E1 the task claim columns with the statements that use them
 (0015), E3 the `org_state` STOP row with the two verbs over it (0016), F1 the
-subscription pool's walls with the verbs that write it (0017), and what remains
-arrives with the stage that needs it — `bursts.subscription_id` with the pick
-that stamps it at F2, `bursts.pinned` with the harness that pins fixtures at G4.
+subscription pool's walls with the verbs that write it (0017), F2
+`bursts.subscription_id` with the pick that stamps it (0018/0019), and what
+remains arrives with the stage that needs it — `bursts.pinned` with the harness
+that pins fixtures at G4.
 `schema.sql`'s header carries that list, and it is the shorter document to keep
 honest.
 
@@ -455,7 +457,11 @@ instruments (`TO-BE.md` §12).
   claimed_until = now() + settle` — a wake inside a pending window joins it) —
   its `created_at` against the task row's `created_at` is the ready-to-claim
   latency (6.1 s at the gate).
-  `capacity_exhausted`, `subscription_expiring` and `task_blocked` arrive with
+  `capacity_exhausted` (F2) is the first of a second shape: it announces that
+  *nothing* happened — a task was ready and every contributed subscription was
+  spent, backing off, expired, revoked or missing its secret — so there is no
+  row for it to ride with, and `record_event` writes it alone, with no audit row
+  because nobody acted. `subscription_expiring` and `task_blocked` arrive with
   the stages that raise them.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
   — at-least-once, ordered, replayable; each consumer keeps its own cursor, and

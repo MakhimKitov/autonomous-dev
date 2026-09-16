@@ -40,10 +40,10 @@
 -- tasks→repositories foreign key with the registry that can create a row (C1),
 -- the task lease columns with the claim statements that use them (E1), the
 -- `org_state` STOP row (E3), the subscription pool's walls with the verbs that
--- write it (F1). Outstanding: `bursts.pinned` with the golden-replay
--- harness that needs it at G4 (#45), and `bursts.subscription_id` with the pick
--- that stamps it at F2 (#39). Both are additions to a *live* table, which is why
--- they wait for the stage that needs them rather than landing speculatively here.
+-- write it (F1) and `bursts.subscription_id` with the pick that stamps it (F2). Outstanding: `bursts.pinned` with the golden-replay
+-- harness that needs it at G4 (#45). It is an addition to a *live* table, which
+-- is why it waits for the stage that needs it rather than landing speculatively
+-- here — `bursts.subscription_id` arrived that way at F2 (#39), in 0018/0019.
 
 -- repositories — one row per registered product; implements TO-BE §2's
 -- product model (product:repository is 1:1 by DR). Defaults are materialized,
@@ -168,6 +168,10 @@ CREATE TABLE bursts (
     session_id            text,
     session_key           text,   -- archive key of this burst's snapshot
     session_checksum      text,   -- sha256; the ledger is the checksum authority
+    -- which contributed subscription paid for this burst (F2), stamped at the
+    -- pick. NULL is the honest value for a burst that ran on the machine's own
+    -- credential — the whole MVP, and any deployment with an empty pool.
+    subscription_id       text CONSTRAINT bursts_subscription_fk REFERENCES subscriptions (subscription_id),
     started_at            timestamptz NOT NULL DEFAULT now(),
     finished_at           timestamptz,
     exit_code             integer,
@@ -181,6 +185,12 @@ CREATE TABLE bursts (
 
 -- bursts_started_since(): the rolling-window count behind the daily rail.
 CREATE INDEX bursts_started_at ON bursts (started_at);
+
+-- the pool's headroom question (F2): a subscription's bursts since a timestamp.
+-- Partial — every burst that ran on the machine's own credential is NULL here,
+-- and none of them is ever an answer.
+CREATE INDEX bursts_subscription_started_idx ON bursts (subscription_id, started_at)
+    WHERE subscription_id IS NOT NULL;
 
 -- latest_archived_burst(): the leaf of a task's session tree, materialized into
 -- the next burst's volume. Partial on exactly the query's predicate — archived,
