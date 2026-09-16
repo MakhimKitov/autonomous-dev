@@ -365,6 +365,7 @@ class Ledger(Protocol):
     def get_subscription(self, subscription_id: str) -> SubscriptionRecord | None: ...
     def list_subscriptions(self) -> list[SubscriptionRecord]: ...
     def subscription_usage(self, since: str) -> dict[str, int]: ...
+    def back_off_subscription(self, subscription_id: str, until: str) -> bool: ...
     def set_subscription_status(
         self, subscription_id: str, status: str, actor: str, reason: str = ""
     ) -> None: ...
@@ -831,6 +832,24 @@ class SqliteLedger:
             raise SubscriptionError(_pool_refusal(self.get_subscription(subscription_id), subscription_id, status))
         self._audit_and_announce(actor, action, subscription_id, reason, kind, subject="subscription")
         self._conn.commit()
+
+    def back_off_subscription(self, subscription_id: str, until: str) -> bool:
+        """Bench a rate-limited subscription until `until` (F3), by CAS.
+
+        The only pool state that is not a declaration, and the only one a *burst*
+        writes. It moves forward only: two bursts coming back limited within a
+        second must not shorten each other's answer, and a stale message must not
+        undo a longer backoff already standing. False means the row already says
+        the same or later — nothing was written, and nothing needed to be.
+
+        No audit row: the provider said no, no operator did anything."""
+        cursor = self._conn.execute(
+            "UPDATE subscriptions SET backoff_until = :until WHERE subscription_id = :id "
+            "AND (backoff_until IS NULL OR backoff_until < :until)",
+            {"until": utc_iso(until), "id": subscription_id},
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     def subscription_usage(self, since: str) -> dict[str, int]:
         """Tokens spent per subscription since `since` — the rolling-window

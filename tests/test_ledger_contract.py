@@ -1122,6 +1122,42 @@ def test_the_pick_follows_the_headroom_across_two_subscriptions(ledger):
     assert order() == []  # the pool has nothing to give until the window rolls
 
 
+def test_a_backoff_moves_forward_only(ledger):
+    """The pool's one burst-written column (F3). Two bursts coming back limited
+    within a second must not shorten each other's answer, and a stale message
+    must not undo a longer bench already standing."""
+    ledger.register_subscription(_subscription(), "op")
+    assert ledger.get_subscription(MEMBER).backoff_until is None
+
+    assert ledger.back_off_subscription(MEMBER, "2026-09-16T15:00:00+00:00") is True
+    assert ledger.get_subscription(MEMBER).backoff_until == "2026-09-16T15:00:00+00:00"
+    assert ledger.back_off_subscription(MEMBER, "2026-09-16T13:00:00+00:00") is False  # shorter
+    assert ledger.get_subscription(MEMBER).backoff_until == "2026-09-16T15:00:00+00:00"
+    assert ledger.back_off_subscription(MEMBER, "2026-09-16T18:00:00+00:00") is True  # longer
+    assert ledger.get_subscription(MEMBER).backoff_until == "2026-09-16T18:00:00+00:00"
+    assert ledger.back_off_subscription("nobody", "2026-09-16T18:00:00+00:00") is False
+
+    # benched is not ended, and it is nobody's audit trail: the provider said no
+    assert ledger.get_subscription(MEMBER).status == "active"
+    assert [a.action for a in ledger.audit_trail(MEMBER)] == ["subscription.register"]
+
+
+def test_a_benched_subscription_is_not_picked_until_its_time(ledger):
+    """F3's half of the done-when: the flip. The limited member's row is still
+    active and unspent — it is simply not eligible yet, so the next burst goes
+    to the other token, and after the bench passes they are back in the order."""
+    ledger.register_subscription(_subscription(), "op")
+    ledger.register_subscription(_subscription(member="ada", ref="env:ADA"), "op")
+
+    def order(now):
+        return [row.subscription_id for row in candidates(ledger.list_subscriptions(), {}, now)]
+
+    assert order("2026-09-16T12:00:00+00:00") == ["ada", MEMBER]
+    ledger.back_off_subscription("ada", "2026-09-16T15:00:00+00:00")
+    assert order("2026-09-16T12:00:00+00:00") == [MEMBER]
+    assert order("2026-09-16T15:00:01+00:00") == ["ada", MEMBER]
+
+
 # --- the org STOP (E3) ---
 #
 # One row for the whole ledger, seeded running (0016 on Postgres, _SCHEMA on

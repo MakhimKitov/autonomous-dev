@@ -433,6 +433,20 @@ gives back its lease and waits, and `capacity_exhausted` goes to the outbox. An
 empty pool is `MACHINE_CREDENTIAL`: the deployment behaves exactly as it did
 before F2, which is what every laptop run still does.
 
+**A spent token is not a failed task (F3).** What comes back from a rate-limited
+burst is text, not a status code — the SDK hands the control plane a result file
+— so `rate_limited_until` reads the provider's own words and, when the message
+carries a reset stamp, uses it verbatim (a stamp already past or more than a day
+out falls back to `RATE_LIMIT_BACKOFF_H` = 1). `execute_burst` then benches the
+subscription that paid, by a forward-only CAS on `backoff_until` — two bursts
+limited in the same second cannot shorten each other's answer — and reports it on
+the outcome. The scheduler's rail reads that and charges the task *nothing*: no
+attempt, no cooldown, no comment on the issue, the lease back. The next tick
+picks another member (the benched row is ineligible until its time) and resumes
+the session the limited burst had already written, because the session is the
+task's and not the token's. A misread costs one member an hour; a missed read is
+the ordinary failure it was before F3.
+
 **One member, one contribution**, and the id is derived from the handle
 (`--member Maksim` → `maksim`), so `subscription revoke maksim` is typeable by
 whoever registered it. Registering twice is a refusal that names the first row.

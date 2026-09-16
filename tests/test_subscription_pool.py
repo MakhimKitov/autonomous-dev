@@ -20,6 +20,7 @@ audit-first mutations, CAS endings, both backends — is `test_ledger_contract.p
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 from control_plane import cli
@@ -37,6 +38,7 @@ from control_plane.subscriptions import (
     declare,
     eligible,
     pick_capacity,
+    rate_limited_until,
     subscription_id_for,
 )
 from secret_refs import SecretResolver
@@ -273,6 +275,47 @@ def test_nothing_eligible_is_capacity_exhausted_not_a_fallback():
         pick_capacity(revoked, SecretResolver({"ADA_TOKEN": "x"}))
     with pytest.raises(CapacityExhausted, match="1 with a secret that is no longer there"):
         pick_capacity(FakePool([_row("bo", cap=5000)]), SecretResolver({}))
+
+
+# --- the rate limit (F3): reading "no" out of what came back ---
+
+
+def test_the_reset_time_the_provider_sent_is_the_backoff():
+    now = "2026-09-16T12:00:00+00:00"
+    reset = int(datetime(2026, 9, 16, 15, 30, tzinfo=UTC).timestamp())
+    assert rate_limited_until({"error": f"Claude AI usage limit reached|{reset}"}, now=now) == (
+        "2026-09-16T15:30:00+00:00"
+    )
+    # milliseconds are sent too, and mean the same instant
+    assert rate_limited_until({"error": f"usage limit reached|{reset * 1000}"}, now=now) == (
+        "2026-09-16T15:30:00+00:00"
+    )
+
+
+def test_a_limit_without_a_reset_time_is_an_hour():
+    now = "2026-09-16T12:00:00+00:00"
+    for said in ("API error: rate_limit_error", "Rate limit exceeded, try later", "429 Too Many Requests"):
+        assert rate_limited_until({"final_text": said}, now=now) == "2026-09-16T13:00:00+00:00"
+
+
+def test_a_reset_time_that_makes_no_sense_falls_back_to_the_hour():
+    """Already past, or a year out: a stale message must not bench nobody (the
+    next tick would hammer the same limit) and a misparse must not bench a
+    member for a year."""
+    now = "2026-09-16T12:00:00+00:00"
+    stale = int(datetime(2026, 9, 10, tzinfo=UTC).timestamp())
+    far = int(datetime(2027, 9, 10, tzinfo=UTC).timestamp())
+    for epoch in (stale, far):
+        assert rate_limited_until({"error": f"usage limit reached|{epoch}"}, now=now) == (
+            "2026-09-16T13:00:00+00:00"
+        )
+
+
+def test_everything_else_is_not_a_rate_limit():
+    assert rate_limited_until(None) is None
+    assert rate_limited_until({}) is None
+    assert rate_limited_until({"is_error": True, "error": "TypeError: nope"}) is None
+    assert rate_limited_until({"final_text": "I fixed the bug and opened a PR."}) is None
 
 
 # --- the wall: a token cannot get in, and cannot get out ---

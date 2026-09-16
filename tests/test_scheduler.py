@@ -90,7 +90,7 @@ class FakeApi:
         return []  # nothing silently dropped
 
 
-def _outcome(exit_code=0, is_error=False):
+def _outcome(exit_code=0, is_error=False, rate_limited_until=None):
     return BurstOutcome(
         burst=BurstRecord(burst_id="fake", task_id=tid(1), status=BurstStatus.SUCCEEDED),
         harvest=HarvestOutcome(
@@ -101,6 +101,7 @@ def _outcome(exit_code=0, is_error=False):
         ),
         exit_code=exit_code,
         log_path=Path("/dev/null"),
+        rate_limited_until=rate_limited_until,
     )
 
 
@@ -478,6 +479,51 @@ def test_a_burst_names_the_subscription_that_paid_for_it(rig, monkeypatch):
 
     assert spawned[0]["capacity"].subscription_id == "ada"
     assert spawned[0]["capacity"].token == "adas-secret"
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.AWAITING_REVIEW
+
+
+def test_a_spent_token_is_retried_on_another_without_spending_an_attempt(rig, monkeypatch):
+    """F3's done-when: a forced limit flips tokens and keeps the session.
+
+    The engine benches the subscription that came back limited (its own test);
+    what the rail must do is *not* charge the task — no attempt, no cooldown,
+    nothing said on the issue — and give the lease back, so the next tick admits
+    the same task on the other member's token and resumes the session the
+    limited burst had already written.
+    """
+    scheduler, api, stores, spawned, fake_execute = rig
+    monkeypatch.setenv("ADA_TOKEN", "adas-secret")
+    monkeypatch.setenv("BO_TOKEN", "bos-secret")
+    stores.ledger.register_subscription(declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), "op")
+    stores.ledger.register_subscription(declare("bo", "env:BO_TOKEN", 500_000, "2027-09-01"), "op")
+
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    benched = "2027-01-01T00:00:00+00:00"  # a bench that has not lifted yet
+    fake_execute.next_outcome = _outcome(exit_code=1, is_error=True, rate_limited_until=benched)
+
+    scheduler.tick()
+    stores.ledger.back_off_subscription("ada", benched)  # what execute_burst does for real
+    stores.ledger.transition_task(  # and the session the limited burst had written
+        tid(1), {"session_id": "sess-9"}, expected_status=TaskStatus.CLAIMED, expected_holder=None
+    )
+
+    task = stores.ledger.get_task(tid(1))
+    assert spawned[0]["capacity"].subscription_id == "ada"  # the bigger cap went first
+    assert (task.status, task.attempts) == (TaskStatus.CLAIMED, 0)  # no attempt charged
+    assert task.claimed_by is None and task.claimed_until is None
+    assert api.comments == []  # the task did not fail, so nobody is told it did
+
+    api.ready_issues = []
+    api.open_prs = [_pr()]
+    fake_execute.next_outcome = _outcome()
+    scheduler.tick()
+
+    assert spawned[1]["capacity"].subscription_id == "bo"  # flipped: ada is benched
+    assert spawned[1]["task"] == tid(1)
+    # the session the limited burst left is still the task's — the flip changed
+    # who pays, not what the work remembers (`execute_burst` resumes from it)
+    assert stores.ledger.get_task(tid(1)).session_id == "sess-9"
     assert stores.ledger.get_task(tid(1)).status == TaskStatus.AWAITING_REVIEW
 
 
