@@ -142,6 +142,30 @@ def test_an_ordinary_failure_benches_nobody(tmp_path, monkeypatch):
     assert stores.ledger.get_subscription("ada").backoff_until is None
 
 
+def test_a_refused_credential_expires_the_subscription(tmp_path, monkeypatch):
+    """F4: the token itself was refused — the year ran out, or the member
+    revoked it at the provider. The row says `expired` from now on, with an
+    audit row, because the platform changed a member's standing on its own
+    authority; the task is not blamed for it."""
+    stores, repo = _rig(tmp_path)
+    monkeypatch.setenv("ADA_TOKEN", "adas-secret")
+    stores.ledger.register_subscription(declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), "op")
+
+    outcome = execute_burst(
+        stores, _task(), repo, "fix",
+        runner=RateLimitedRunner(message="AuthenticationError: invalid api key"),
+    )
+    assert outcome.succeeded is False and outcome.rate_limited is False
+    row = stores.ledger.get_subscription("ada")
+    assert row.status == "expired" and row.backoff_until is None
+    assert [a.action for a in stores.ledger.audit_trail("ada")] == [
+        "subscription.register", "subscription.expire",
+    ]
+    assert [e.kind for e in stores.ledger.events() if e.kind.startswith("subscription_")] == [
+        "subscription_registered", "subscription_expired",
+    ]
+
+
 # --- E3: a burst the heartbeat fenced is `killed`, not `failed` ---
 
 

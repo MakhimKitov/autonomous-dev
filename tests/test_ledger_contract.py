@@ -1158,6 +1158,48 @@ def test_a_benched_subscription_is_not_picked_until_its_time(ledger):
     assert order("2026-09-16T15:00:01+00:00") == ["ada", MEMBER]
 
 
+def test_renewal_is_the_way_back_in(ledger):
+    """F4: `register` refuses a member who already contributes and `set` cannot
+    touch `status`, so a contribution that ended comes back exactly one way —
+    the member re-materializes the value, an operator moves the date."""
+    ledger.register_subscription(_subscription(), "op")
+    ledger.set_subscription_status(MEMBER, SubscriptionStatus.REVOKED, "op", "taking a break")
+    ledger.back_off_subscription(MEMBER, "2027-01-01T00:00:00+00:00")
+
+    ledger.renew_subscription(MEMBER, "2028-09-01T00:00:00+00:00", "op", "back, token re-materialized",
+                              secret_ref="file:/run/secrets/maksim")
+    row = ledger.get_subscription(MEMBER)
+    assert (row.status, row.expires_at, row.secret_ref) == (
+        "active", "2028-09-01T00:00:00+00:00", "file:/run/secrets/maksim",
+    )
+    assert row.backoff_until == "2027-01-01T00:00:00+00:00"  # a provider limit is not the year
+
+    assert [a.action for a in ledger.audit_trail(MEMBER)] == [
+        "subscription.register", "subscription.revoke", "subscription.renew",
+    ]
+    (renewed,) = [e for e in ledger.events() if e.kind == "subscription_renewed"]
+    assert renewed.payload["subscription"] == MEMBER
+    assert renewed.payload["expires_at"] == "2028-09-01T00:00:00+00:00"
+    with pytest.raises(SubscriptionError, match="not a registered subscription"):
+        ledger.renew_subscription("nobody", "2028-09-01T00:00:00+00:00", "op")
+
+
+def test_the_outbox_can_be_read_by_kind_and_since(ledger):
+    """What the daily notice remembers with (F4) — no column, no daemon: the
+    outbox is asked whether it already said this."""
+    ledger.record_event("subscription_expiring", {"subscription": MEMBER, "days_left": 3})
+    ledger.record_event("capacity_exhausted", {"repository": REPOSITORY})
+    ledger.record_event("subscription_expiring", {"subscription": "ada", "days_left": 1})
+
+    since = "2020-01-01T00:00:00+00:00"
+    said = ledger.events_of_kind_since("subscription_expiring", since)
+    assert [e.payload["subscription"] for e in said] == [MEMBER, "ada"]
+    assert all(e.kind == "subscription_expiring" for e in said)
+    assert [e.id for e in said] == sorted(e.id for e in said) and said[0].created_at
+    assert ledger.events_of_kind_since("subscription_expiring", utc_now()) == []
+    assert ledger.events_of_kind_since("nothing_of_the_sort", since) == []
+
+
 # --- the org STOP (E3) ---
 #
 # One row for the whole ledger, seeded running (0016 on Postgres, _SCHEMA on

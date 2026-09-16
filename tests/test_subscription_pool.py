@@ -37,10 +37,14 @@ from control_plane.subscriptions import (
     check_settable,
     declare,
     eligible,
+    announce_expiring,
+    auth_failed,
+    expiring_soon,
     pick_capacity,
     rate_limited_until,
     subscription_id_for,
 )
+from control_plane.models import Event
 from secret_refs import SecretResolver
 
 # What a real `claude setup-token` value looks like enough to grep for. Nothing
@@ -170,11 +174,26 @@ def test_revoke_is_final_and_says_why(tmp_path, capsys):
     assert [a.action for a in _audit(tmp_path)] == ["subscription.register", "subscription.revoke"]
 
 
+def test_renew_brings_a_contribution_back(tmp_path, capsys):
+    register(tmp_path)
+    run(tmp_path, "revoke", "maksim", "--reason", "taking a break")
+    assert run(tmp_path, "renew", "maksim", "--expires", "2028-09-01",
+               "--ref", "file:/run/secrets/maksim", "--reason", "back") == 0
+    row = stored(tmp_path)
+    assert (row.status, row.expires_at, row.secret_ref) == (
+        "active", "2028-09-01T00:00:00+00:00", "file:/run/secrets/maksim",
+    )
+    assert [a.action for a in _audit(tmp_path)][-1] == "subscription.renew"
+    assert run(tmp_path, "renew", "maksim", "--expires", "2020-01-01") == 2
+    assert "already past" in capsys.readouterr().err  # a renewal moves it forward
+
+
 def test_a_verb_against_nobody_is_a_refusal_not_a_row(tmp_path, capsys):
     assert run(tmp_path, "show", "ghost") == 2
     assert run(tmp_path, "revoke", "ghost", "--reason", "x") == 2
     assert run(tmp_path, "set", "ghost", "--cap", "5") == 2
-    assert capsys.readouterr().err.count("not a registered subscription") == 3
+    assert run(tmp_path, "renew", "ghost", "--expires", "2028-01-01") == 2
+    assert capsys.readouterr().err.count("not a registered subscription") == 4
     assert stored(tmp_path, "ghost") is None
 
 
@@ -316,6 +335,81 @@ def test_everything_else_is_not_a_rate_limit():
     assert rate_limited_until({}) is None
     assert rate_limited_until({"is_error": True, "error": "TypeError: nope"}) is None
     assert rate_limited_until({"final_text": "I fixed the bug and opened a PR."}) is None
+
+
+# --- the year runs out (F4) ---
+
+
+class NoticeLedger(FakePool):
+    """A ledger for the notice: the rows, the outbox read, and what it wrote."""
+
+    def __init__(self, rows, already=()):
+        super().__init__(rows)
+        self.written: list[tuple[str, dict]] = []
+        self.already = list(already)
+        self.asked: list[tuple[str, str]] = []
+
+    def events_of_kind_since(self, kind, since):
+        self.asked.append((kind, since))
+        return [
+            Event(id=i, kind=kind, payload={"subscription": name}, created_at=since)
+            for i, name in enumerate(self.already, start=1)
+        ]
+
+    def record_event(self, kind, payload):
+        self.written.append((kind, payload))
+
+
+def test_expiring_is_the_final_fortnight_and_nothing_else():
+    now = "2026-09-16T12:00:00+00:00"
+    rows = [
+        _row("ada", ref="env:A"), _row("bo", ref="env:B"), _row("cy", ref="env:C"), _row("di", ref="env:D"),
+    ]
+    rows[0].expires_at = "2026-09-20T12:00:00+00:00"   # 4 days
+    rows[1].expires_at = "2026-09-25T12:00:00+00:00"   # 9 days
+    rows[2].expires_at = "2026-11-01T12:00:00+00:00"   # far off
+    rows[3].expires_at = "2026-09-01T12:00:00+00:00"   # already past: expired, not expiring
+    assert [(row.subscription_id, days) for row, days in expiring_soon(rows, now)] == [
+        ("ada", 4), ("bo", 9),
+    ]
+    rows[0].status = "revoked"  # a contribution that has ended is nobody's reminder
+    assert [row.subscription_id for row, _ in expiring_soon(rows, now)] == ["bo"]
+
+
+def test_the_notice_is_said_once_a_day_per_member():
+    now = "2026-09-16T12:00:00+00:00"
+    row = _row("ada", ref="env:A")
+    row.expires_at = "2026-09-20T12:00:00+00:00"
+    ledger = NoticeLedger([row])
+
+    assert announce_expiring(ledger, now) == ["ada"]
+    kind, payload = ledger.written[0]
+    assert kind == "subscription_expiring"
+    assert payload == {
+        "subscription": "ada", "member": "ada",
+        "expires_at": "2026-09-20T12:00:00+00:00", "days_left": 4,
+    }
+    assert ledger.asked == [("subscription_expiring", "2026-09-15T12:00:00+00:00")]
+
+    said_already = NoticeLedger([row], already=["ada"])
+    assert announce_expiring(said_already, now) == [] and said_already.written == []
+
+
+def test_a_pool_with_nothing_expiring_reads_nothing():
+    """The common case costs one small read of rows the tick wants anyway — the
+    outbox is only asked when something is actually running out."""
+    ledger = NoticeLedger([_row("ada", ref="env:A")])  # expires in 2027
+    assert announce_expiring(ledger, "2026-09-16T12:00:00+00:00") == []
+    assert ledger.asked == [] and ledger.written == []
+
+
+def test_a_refused_credential_reads_as_an_ended_subscription():
+    assert auth_failed({"error": "AuthenticationError: invalid api key"}) is True
+    assert auth_failed({"final_text": "401 Unauthorized"}) is True
+    assert auth_failed({"error": "OAuth token has expired — please run /login"}) is True
+    assert auth_failed({"error": "TypeError: nope"}) is False
+    assert auth_failed({"error": "usage limit reached|1789610400"}) is False  # that is F3's
+    assert auth_failed(None) is False
 
 
 # --- the wall: a token cannot get in, and cannot get out ---

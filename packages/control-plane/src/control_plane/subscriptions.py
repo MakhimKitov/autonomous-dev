@@ -34,6 +34,8 @@ import structlog
 from secret_refs import SecretError, SecretResolver, parse_ref
 
 from control_plane.models import (
+    EVENT_SUBSCRIPTION_EXPIRING,
+    EXPIRY_NOTICE_DAYS,
     USAGE_WINDOW_H,
     SubscriptionRecord,
     SubscriptionStatus,
@@ -212,6 +214,92 @@ def _sane_backoff(until: datetime, now: datetime) -> str:
                     reset=until.isoformat())
         until = now + timedelta(hours=RATE_LIMIT_BACKOFF_H)
     return until.astimezone(UTC).isoformat()
+
+
+# --- the token's own year (F4): what an ended credential looks like ---
+
+# A token that no longer authenticates is not a rate limit and not a bad burst:
+# it is a subscription whose year ran out, or whose owner revoked it at the
+# provider. The row is marked `expired` by CAS, which takes it out of the pick
+# until someone renews — and unlike the bench, this one is worth an audit row,
+# because the platform changed a member's standing on its own authority.
+_AUTH_FAILURE_MARKERS = (
+    "authentication_error",
+    "invalid api key",
+    "invalid_api_key",
+    "oauth token has expired",
+    "oauth token is invalid",
+    "401 unauthorized",
+    "please run /login",
+)
+
+
+def auth_failed(result: dict | None) -> bool:
+    """Whether what came back says the credential itself was refused. Same
+    reading as the rate limit, same two ways to be wrong — a miss is the
+    ordinary failure rail, a false positive expires a member who then renews."""
+    if not result:
+        return False
+    text = " ".join(str(result.get(field) or "")[-_SCAN_CHARS:] for field in _RESULT_FIELDS).lower()
+    return any(marker in text for marker in _AUTH_FAILURE_MARKERS)
+
+
+def expiring_soon(
+    rows: list[SubscriptionRecord], now: str | None = None, *, within_days: int = EXPIRY_NOTICE_DAYS
+) -> list[tuple[SubscriptionRecord, int]]:
+    """The active contributions inside their final `within_days`, with the days
+    left — the notice's subject. A row already past its date is not here: it is
+    not expiring, it has expired, and the pick has stopped choosing it."""
+    moment = datetime.fromisoformat(utc_iso(now or utc_now()))
+    horizon = moment + timedelta(days=within_days)
+    soon = []
+    for row in rows:
+        if row.status != SubscriptionStatus.ACTIVE:
+            continue
+        expires = datetime.fromisoformat(utc_iso(row.expires_at))
+        if moment < expires <= horizon:
+            soon.append((row, (expires - moment).days))
+    return sorted(soon, key=lambda pair: (pair[1], pair[0].subscription_id))
+
+
+def announce_expiring(ledger, now: str | None = None) -> list[str]:
+    """Say, once a day, whose token is running out of year (F4).
+
+    Renewal is a person's errand — re-materialize at the same ref, then move the
+    row's date — so the notice has to reach a person and keep reaching them
+    until it is done. Once a day is that cadence, and the outbox itself is where
+    "already said today" is remembered: no column, no daemon, no scheduler of
+    its own. The common case costs one small read of rows the tick already
+    wants; the second read happens only when something is actually expiring.
+    """
+    moment = now or utc_now()
+    soon = expiring_soon(ledger.list_subscriptions(), moment)
+    if not soon:
+        return []
+    since = (datetime.fromisoformat(utc_iso(moment)) - timedelta(days=1)).astimezone(UTC).isoformat()
+    said = {
+        event.payload.get("subscription")
+        for event in ledger.events_of_kind_since(EVENT_SUBSCRIPTION_EXPIRING, since)
+    }
+    announced = []
+    for row, days_left in soon:
+        if row.subscription_id in said:
+            continue
+        ledger.record_event(
+            EVENT_SUBSCRIPTION_EXPIRING,
+            {
+                "subscription": row.subscription_id,
+                "member": row.member,
+                "expires_at": row.expires_at,
+                "days_left": days_left,
+            },
+        )
+        log.warning(
+            "a contributed subscription is running out of year — renewal is a person's errand",
+            subscription=row.subscription_id, member=row.member, days_left=days_left,
+        )
+        announced.append(row.subscription_id)
+    return announced
 
 
 # --- the pick (F2): who pays for the next burst ---

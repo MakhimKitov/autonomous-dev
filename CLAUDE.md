@@ -400,6 +400,7 @@ uv run control-plane subscription register --member maksim \
 uv run control-plane subscription list
 uv run control-plane subscription show maksim            # the row + its audit trail
 uv run control-plane subscription set maksim --cap 20000000 --ref file:/run/secrets/maksim
+uv run control-plane subscription renew maksim --expires 2028-09-01   # the way back from expired/revoked
 uv run control-plane subscription revoke maksim --reason "..."   # the reason is required
 ```
 
@@ -446,6 +447,22 @@ picks another member (the benched row is ineligible until its time) and resumes
 the session the limited burst had already written, because the session is the
 task's and not the token's. A misread costs one member an hour; a missed read is
 the ordinary failure it was before F3.
+
+**The year, and the way back (F4).** A `claude setup-token` lasts a year and
+renewing it is a person's errand, so the platform says so: one
+`subscription_expiring` event per subscription per day through the final
+`EXPIRY_NOTICE_DAYS` (14), emitted from the ordinary tick — no daemon, and no new
+column to remember it by, because the outbox itself is asked whether it already
+said this today (`events_of_kind_since`). A burst whose credential is *refused*
+— the year ran out, or the member revoked it at the provider — marks the row
+`expired` by CAS with an audit row, because there the platform changed a member's
+standing on its own authority. `subscription renew` is the one way back to
+`active` from either ending: the member re-materializes the value at the ref, an
+operator moves the date. It leaves `backoff_until` alone — a provider limit has
+nothing to do with the token's year. And `reporting.contribution` (0020) is what
+each member's subscription actually paid for, by week: bursts, tokens, products,
+with the row's own declaration beside them, and one row with a NULL week for a
+contribution not yet spent.
 
 **One member, one contribution**, and the id is derived from the handle
 (`--member Maksim` → `maksim`), so `subscription revoke maksim` is typeable by

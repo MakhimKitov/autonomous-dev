@@ -52,7 +52,9 @@ def views_dsn():
 @pytest.fixture
 def db(views_dsn):
     with psycopg.connect(views_dsn, autocommit=True, row_factory=dict_row) as conn:
-        conn.execute("TRUNCATE tasks, bursts, violations, events, memory_entries, repositories")
+        conn.execute(
+            "TRUNCATE tasks, bursts, violations, events, memory_entries, repositories, subscriptions"
+        )
         # the registry wall (C1): the suite's tasks have to name registered products
         conn.execute(
             "INSERT INTO repositories (repository, team, state, review_enabled, review_provider, "
@@ -72,13 +74,26 @@ def task(db, issue_number, status, *, repository=PRODUCT, attempts=0, review_rou
     return f"{repository}#{issue_number}"
 
 
-def burst(db, burst_id, task_id, *, kind="work", role="dev", status="succeeded", cost=None, turns=None):
+def burst(db, burst_id, task_id, *, kind="work", role="dev", status="succeeded", cost=None, turns=None,
+          subscription=None, tokens=None, started=None):
     db.execute(
-        "INSERT INTO bursts (burst_id, task_id, kind, role, status, finished_at, cost_usd, num_turns) "
-        "VALUES (%s, %s, %s, %s, %s, CASE WHEN %s = 'running' THEN NULL ELSE now() END, %s, %s)",
-        (burst_id, task_id, kind, role, status, status, cost, turns),
+        "INSERT INTO bursts (burst_id, task_id, kind, role, status, finished_at, cost_usd, num_turns, "
+        "                    subscription_id, input_tokens, output_tokens, started_at) "
+        "VALUES (%s, %s, %s, %s, %s, CASE WHEN %s = 'running' THEN NULL ELSE now() END, %s, %s, "
+        "        %s, %s, %s, coalesce(%s, now()))",
+        (burst_id, task_id, kind, role, status, status, cost, turns,
+         subscription, tokens, tokens, started),
     )
     return burst_id
+
+
+def subscription(db, member, *, cap=1_000_000, status="active", expires="2027-09-01"):
+    db.execute(
+        "INSERT INTO subscriptions (subscription_id, member, secret_ref, cap_tokens, expires_at, status) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (member, member, f"env:{member.upper()}_TOKEN", cap, expires, status),
+    )
+    return member
 
 
 def violation(db, task_id, burst_id, *, tool="Read", reason="path escapes the repository clone: /etc/os-release"):
@@ -304,6 +319,51 @@ def test_a_dashboard_role_reads_aggregates_and_not_rows(db, views_dsn):
         db.execute(f"DROP ROLE {role}")
 
 
+# ------------------------------------------------------------------ contribution
+
+
+def test_a_contribution_that_has_not_been_spent_is_still_a_contribution(db):
+    """The member opted in this morning: one row, `week` NULL and zeros — an
+    absent row would read as "not contributing"."""
+    subscription(db, "ada")
+    row = one(db, "SELECT * FROM reporting.contribution WHERE subscription_id = 'ada'")
+    assert (row["week"], row["bursts"], row["tokens"], row["products"]) == (None, 0, 0, 0)
+    assert (row["status"], row["cap_tokens"], row["last_burst_at"]) == ("active", 1_000_000, None)
+
+
+def test_a_week_of_contribution_is_bursts_tokens_and_products(db):
+    subscription(db, "ada")
+    subscription(db, "bo")
+    first = task(db, 200, "done")
+    other = task(db, 201, "done", repository=OTHER)
+    burst(db, "c1", first, subscription="ada", tokens=100)
+    burst(db, "c2", other, subscription="ada", tokens=250, status="failed")
+    burst(db, "c3", first, subscription="bo", tokens=10)
+    burst(db, "c4", first, tokens=9_999)  # the machine's own credential: nobody's contribution
+
+    ada = one(db, "SELECT * FROM reporting.contribution WHERE subscription_id = 'ada'")
+    assert (ada["bursts"], ada["bursts_succeeded"], ada["bursts_that_did_not_finish_clean"]) == (2, 1, 1)
+    assert ada["tokens"] == 700  # input + output, both sides of each burst
+    assert ada["products"] == 2 and ada["last_burst_at"] is not None
+    bo = one(db, "SELECT * FROM reporting.contribution WHERE subscription_id = 'bo'")
+    assert (bo["bursts"], bo["tokens"], bo["products"]) == (1, 20, 1)
+    # the unattributed burst belongs to no row at all
+    assert one(db, "SELECT count(*) AS n FROM reporting.contribution")["n"] == 2
+
+
+def test_contribution_splits_by_week(db):
+    subscription(db, "ada")
+    first = task(db, 210, "done")
+    burst(db, "w1", first, subscription="ada", tokens=100, started="2026-09-07T10:00:00+00:00")
+    burst(db, "w2", first, subscription="ada", tokens=50, started="2026-09-15T10:00:00+00:00")
+    rows = db.execute(
+        "SELECT week, bursts, tokens FROM reporting.contribution "
+        "WHERE subscription_id = 'ada' ORDER BY week"
+    ).fetchall()
+    assert [(row["bursts"], row["tokens"]) for row in rows] == [(1, 200), (1, 100)]
+    assert rows[0]["week"].isoformat().startswith("2026-09-07")  # Monday of that week
+
+
 def test_the_runtime_can_read_its_own_numbers(db):
     """`platform_app` gets USAGE and SELECT in 0010 — it may already read the base
     tables, so this grants nothing new; it just means the runtime doesn't have to
@@ -318,7 +378,8 @@ def test_no_view_can_be_written_through(db):
     """These are aggregates, so Postgres refuses on its own — but the refusal is
     what makes them safe to hand out, so it gets a test rather than an assumption."""
     task(db, 130, "done")
-    for view in ("reporting.reliability", "reporting.containment", "reporting.capability"):
+    for view in ("reporting.reliability", "reporting.containment", "reporting.capability",
+                 "reporting.contribution"):
         with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState):
             with db.transaction():
                 db.execute(f"DELETE FROM {view}")

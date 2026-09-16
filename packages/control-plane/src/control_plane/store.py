@@ -51,6 +51,7 @@ from control_plane.models import (
     EVENT_ROLE_UPDATED,
     EVENT_SUBSCRIPTION_EXPIRED,
     EVENT_SUBSCRIPTION_REGISTERED,
+    EVENT_SUBSCRIPTION_RENEWED,
     EVENT_SUBSCRIPTION_REVOKED,
     EVENT_SUBSCRIPTION_UPDATED,
     EVENT_VIOLATION_RECORDED,
@@ -366,6 +367,10 @@ class Ledger(Protocol):
     def list_subscriptions(self) -> list[SubscriptionRecord]: ...
     def subscription_usage(self, since: str) -> dict[str, int]: ...
     def back_off_subscription(self, subscription_id: str, until: str) -> bool: ...
+    def renew_subscription(
+        self, subscription_id: str, expires_at: str, actor: str,
+        reason: str = "", secret_ref: str | None = None,
+    ) -> None: ...
     def set_subscription_status(
         self, subscription_id: str, status: str, actor: str, reason: str = ""
     ) -> None: ...
@@ -405,6 +410,7 @@ class Ledger(Protocol):
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
     def events(self, after_id: int = 0) -> list[Event]: ...
     def record_event(self, kind: str, payload: dict) -> None: ...
+    def events_of_kind_since(self, kind: str, since: str) -> list[Event]: ...
     def close(self) -> None: ...
 
 
@@ -833,6 +839,41 @@ class SqliteLedger:
         self._audit_and_announce(actor, action, subscription_id, reason, kind, subject="subscription")
         self._conn.commit()
 
+    def renew_subscription(
+        self, subscription_id: str, expires_at: str, actor: str,
+        reason: str = "", secret_ref: str | None = None,
+    ) -> None:
+        """A contribution renewed (F4): a new year on the same ref — or a new ref
+        — and the row is eligible again.
+
+        The way back in, and the only one: `register` refuses a member who
+        already contributes, and `set` cannot touch `status`. A member whose
+        token expired, or who revoked and changed their mind, re-materializes
+        the value where the ref points and an operator moves the date; the row
+        goes `active` from wherever it was, including `revoked`. `backoff_until`
+        is deliberately untouched — a provider limit has nothing to do with the
+        token's year, and clearing it here would hand back capacity the provider
+        has not."""
+        values = {"expires_at": utc_iso(expires_at), "status": SubscriptionStatus.ACTIVE}
+        if secret_ref is not None:
+            values["secret_ref"] = check_ref(secret_ref)
+        assignments = ", ".join(f"{column} = :{column}" for column in values)
+        try:
+            cursor = self._conn.execute(
+                f"UPDATE subscriptions SET {assignments} WHERE subscription_id = :subscription_id",
+                {**values, "subscription_id": subscription_id},
+            )
+        except sqlite3.IntegrityError:  # the table's own wall, behind the grammar
+            self._conn.rollback()
+            raise SubscriptionError(_already_contributed(subscription_id, check=True)) from None
+        if cursor.rowcount == 0:
+            self._conn.rollback()
+            raise SubscriptionError(f"{subscription_id} is not a registered subscription")
+        self._audit_and_announce(actor, "subscription.renew", subscription_id, reason,
+                                 EVENT_SUBSCRIPTION_RENEWED, extra={"expires_at": values["expires_at"]},
+                                 subject="subscription")
+        self._conn.commit()
+
     def back_off_subscription(self, subscription_id: str, until: str) -> bool:
         """Bench a rate-limited subscription until `until` (F3), by CAS.
 
@@ -1239,6 +1280,23 @@ class SqliteLedger:
         )
         self._conn.commit()
         return True
+
+    def events_of_kind_since(self, kind: str, since: str) -> list[Event]:
+        """The events of one kind written since `since` — the outbox read from
+        the inside (F4). What it is for: an announcement that must not repeat
+        (`subscription_expiring`, once per subscription per day) has nowhere to
+        remember that it was made, and inventing a column for it would be a
+        second copy of what the outbox already says."""
+        rows = self._conn.execute(
+            "SELECT id, kind, payload, created_at FROM events "
+            "WHERE kind = ? AND created_at > ? ORDER BY id",
+            (kind, utc_iso(since)),
+        ).fetchall()
+        return [
+            Event(id=row["id"], kind=row["kind"], payload=json.loads(row["payload"]),
+                  created_at=row["created_at"])
+            for row in rows
+        ]
 
     def record_event(self, kind: str, payload: dict) -> None:
         """An event that announces *no* mutation — the outbox's other shape (F2).

@@ -155,6 +155,14 @@ class RoleRecord:
 # `backoff_until` (F3), which is a fact rather than an estimate.
 USAGE_WINDOW_H = 5.0
 
+# How long before a contributed token dies the platform starts saying so (F4).
+# A `claude setup-token` lasts a year, and renewing it is a person's errand —
+# re-materialize at the same ref, then move the row's date — so the notice has to
+# reach a human with time to run it, and keep reaching them: one
+# `subscription_expiring` event per subscription per day through the final
+# fortnight, until the date moves or the token dies.
+EXPIRY_NOTICE_DAYS = 14
+
 
 @dataclass(slots=True)
 class SubscriptionRecord:
@@ -368,6 +376,11 @@ EVENT_SUBSCRIPTION_UPDATED = "subscription_updated"
 # payload carries the repository and how many rows were looked at — adopters
 # route it, because capacity is a people question (TO-BE §4), not a pager one.
 EVENT_CAPACITY_EXHAUSTED = "capacity_exhausted"
+# A contributed token is running out of year (F4) — one per subscription per day
+# through the final `EXPIRY_NOTICE_DAYS`. Renewal is a person's errand, so this
+# is addressed to a person: the payload names the member and the days left.
+EVENT_SUBSCRIPTION_EXPIRING = "subscription_expiring"
+EVENT_SUBSCRIPTION_RENEWED = "subscription_renewed"
 # The org STOP (E3): `stop` and `resume`, same shape — the mutation, its audit row
 # and this announcement in one statement. `org_stopped` also carries the reason,
 # so the page it becomes needs no second read.
