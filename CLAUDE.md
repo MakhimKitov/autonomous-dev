@@ -341,7 +341,7 @@ work with nothing restarted.
 **The runner is a protocol (E4)**: `Runner` in `runner.py` — `run(spec,
 log_path, heartbeat) -> int` and `alive(burst_id) -> bool` — is the third seam
 beside `Ledger` and `SessionArchive` (TO-BE §6); `DockerRunner` sits behind it
-with its behavior untouched, `JobsRunner` arrives at G3 (#44). The scheduler
+with its behavior untouched, and `JobsRunner` beside it since G3. The scheduler
 holds one runner per process (`open_runner()`, chosen in `cli.py` like the two
 stores) and asks it to `run` every burst and, in `reconcile_running`, whether an
 orphaned burst is still `alive` — the old `docker ps` in the scheduler is gone;

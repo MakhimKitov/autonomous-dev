@@ -10,8 +10,8 @@ Three files, two boundaries:
 - **`control-plane.yaml`** — the replicas (`Deployment`, 2 stateless peers over
   one ledger) and the *internal* wake `Service` on 8081. Cluster network only;
   no `Ingress`. `automountServiceAccountToken: false` — a replica has no
-  business with the k8s API (that arrives with `JobsRunner`, G3, in its own
-  scoped account).
+  business with the k8s API — `JobsRunner` does, and it has its own scoped
+  account in `burst-runner.yaml`.
 - **`webhook-receiver.yaml`** — the one public surface: `Deployment`, `Service`,
   the `Ingress` that is E6's HTTPS route, and a `NetworkPolicy` that lets the
   receiver talk to exactly one thing — the control plane's wake port — and be
