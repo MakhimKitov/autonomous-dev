@@ -66,9 +66,15 @@ HEARTBEAT_POLL_S = 5.0
 # Why these numbers: finding #6 measured 18 minutes lost to one stuck command,
 # with the burst's budget draining and the heartbeat happily renewing a lease on
 # work that had stopped. Two minutes covers the ordinary command; ten is the most
-# a deliberate one (a full test run, an image build) may ask for, and a call that
-# passes it comes back as a tool error the agent can react to — which is the
-# difference between a rail and a wall: the burst continues on its own terms.
+# a deliberate one (a full test run, an image build) may ask for.
+#
+# What the engine does at the ceiling, measured on a live burst (#104): it does
+# not kill the command, it *backgrounds* it and hands control back. The agent is
+# free at two minutes, which is the whole of finding #6; the process itself keeps
+# running until the burst's container ends, which is what makes the wall-clock
+# rail — `activeDeadlineSeconds` on a Job, the container's life under docker —
+# the thing that actually bounds it. A rail, not a wall: the burst continues on
+# its own terms rather than being stopped.
 BASH_CALL_TIMEOUT_S = 120
 BASH_CALL_CEILING_S = 600
 

@@ -575,11 +575,14 @@ ceiling — `BASH_DEFAULT_TIMEOUT_MS` (2 min, what a call gets when the model as
 for nothing) and `BASH_MAX_TIMEOUT_MS` (10 min, the most it may ask for). A
 ceiling in code (`runner.py`), not a row: how long one command may run is a
 platform-safety question, and a product that needs longer says so per call rather
-than raising a floor for everyone. Enforcement is the engine's; a call that passes
-its ceiling comes back as a tool error the agent reacts to, which is the
-difference between a rail and a wall. Finding #6 is what this is for: 18 minutes
-lost to one stuck command, with the budget draining and the heartbeat renewing a
-lease on work that had stopped.
+than raising a floor for everyone. Enforcement is the engine's, and what it does at the
+ceiling was measured on a live burst (#104): it **backgrounds** the call and
+hands control back rather than killing it. The agent is free at two minutes,
+which is the whole of finding #6 — 18 minutes lost to one stuck command, with
+the budget draining and the heartbeat renewing a lease on work that had stopped
+— while the process itself runs until the burst's container ends, so the thing
+that bounds it is the wall-clock rail (`activeDeadlineSeconds` on a Job). A rail,
+not a wall: the burst continues on its own terms.
 
 ### Task identity
 
