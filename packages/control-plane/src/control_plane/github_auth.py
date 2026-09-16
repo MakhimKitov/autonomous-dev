@@ -49,6 +49,13 @@ BURST_PERMISSIONS: dict[str, dict[str, str]] = {
     "dev": {"contents": "write", "issues": "write", "pull_requests": "write"},
 }
 
+# What an init container is given to fetch the product with, when the burst runs
+# somewhere that inherits no mount (G3). It is not a role's grant: every role's
+# working tree is read the same way, and the container that holds this token is
+# dead before the agent's first turn. A reviewer or tester *agent* still holds
+# nothing — that wall is which container the token reaches, not which scope it has.
+CLONE_PERMISSIONS: dict[str, str] = {"contents": "read"}
+
 # requests-compatible callables, injectable for tests
 HttpGet = Callable[..., Any]
 HttpPost = Callable[..., Any]

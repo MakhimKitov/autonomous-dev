@@ -13,8 +13,10 @@ from pathlib import Path
 
 import structlog
 
+from control_plane.clone import pinned_origin
 from control_plane.github_auth import (
     BURST_PERMISSIONS,
+    CLONE_PERMISSIONS,
     AppCredentials,
     GitHubAuthError,
     bot_git_identity,
@@ -129,6 +131,31 @@ def mint_burst_token(task: TaskRecord, role: str) -> tuple[str, str, str] | None
     return minted.token, git_name, git_email
 
 
+def mint_clone_token(task: TaskRecord) -> str | None:
+    """`contents:read` on the task's repository, for an init container alone.
+
+    Only a runner whose phases run beside the burst asks for this (`pod_side`,
+    G3): a pod inherits no mount, so something in it has to fetch the working
+    tree, and that something is not the agent. The scope is the smallest one
+    that can clone, and the container holding it is gone before the agent's
+    first turn — which is how a reviewer or tester burst gets a tree while still
+    holding no GitHub credential of its own (TO-BE §6).
+
+    None when the App isn't configured: a public repository clones without one,
+    and a private one fails in the pod, loudly, with the repository named.
+    """
+    creds = AppCredentials.from_env()
+    if creds is None:
+        return None
+    minted = mint_installation_token(
+        creds,
+        repositories=[task.repository.split("/", 1)[1]],
+        permissions=CLONE_PERMISSIONS,
+    )
+    log.info("clone token minted", scoped_to=task.repository, expires=minted.expires_at)
+    return minted.token
+
+
 def execute_burst(
     stores: PlatformStores,
     task: TaskRecord,
@@ -215,6 +242,13 @@ def execute_burst(
         if scoped is not None:
             github_token, git_name, git_email = scoped
 
+    # Where this burst's snapshot goes — decided here, before the spec, because a
+    # runner whose phases run beside the burst has to mint the PUT for that key at
+    # spawn. dev: the session tree's next node. tester: evidence — the transcript is
+    # the record of what the sandbox *did*, and it must outlive the machine that ran
+    # it (B5). Leafhood stays the dev's either way: the leaf query filters on role,
+    # so a tester's snapshot can never be resumed. Reviewers read and never execute,
+    # so there is nothing to prove — not archived.
     burst_id = burst_id or uuid.uuid4().hex[:12]
     # The node this burst descends from: the leaf of the task's session tree, or
     # nothing. fresh = amnesiac (the reviewer), which is exactly "no parent" — so
@@ -277,6 +311,15 @@ def execute_burst(
             codex_auth_dir=codex_auth,
             repo_read_only=repo_read_only(profile),  # code floor ∨ the row; never widened
             oauth_token=capacity.token,  # the picked subscription's, or None for this machine's
+            archive_as=session_key(task.task_id, burst_id) if role in ("dev", "tester") else None,
+            # a pod inherits no mount, so the burst is told what to fetch and
+            # given a credential scoped to fetching it — and neither is asked for
+            # on a substrate that shares a filesystem with the control plane
+            clone=pinned_origin(repo) if runner.pod_side else None,
+            # minted for a `check` burst too: the mode decides what the *agent*
+            # holds, and the init container is not the agent — a boot smoke still
+            # needs the working tree it is smoking against
+            clone_token=mint_clone_token(task) if runner.pod_side else None,
             extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"
@@ -306,17 +349,9 @@ def execute_burst(
         burst.finished_at = utc_now()
         span.set_attribute("burst.exit_code", exit_code)
 
-        # dev: the session tree's next node. tester: evidence — the transcript is
-        # the record of what the sandbox *did*, and it must outlive the machine
-        # that ran it (B5). Leafhood stays the dev's either way: the leaf query
-        # filters on role, so a tester's snapshot can never be resumed. Reviewers
-        # read and never execute, so there is nothing to prove — not archived.
         # phase three: what the burst left comes back as bytes, and only here —
         # in the control plane, with the credentials for it — does it become rows
-        artifacts = runner.collect(
-            spec,
-            archive_as=session_key(task.task_id, burst_id) if role in ("dev", "tester") else None,
-        )
+        artifacts = runner.collect(spec)
         outcome = fold_artifacts(artifacts, burst, stores.ledger)
         if burst.model:
             span.set_attribute("burst.model", burst.model)  # resolved beats requested

@@ -285,8 +285,8 @@ the ledger and the archive (TO-BE §6): `Runner` in `runner.py`, two methods, an
   this burst still running where this runner can see? Under docker that is
   `docker ps` by the name every container carries; the scheduler no longer
   spells `docker` anywhere — it holds one runner per process (`open_runner`,
-  the third of the `open_ledger`/`open_archive` kind: nothing to choose until
-  `JobsRunner` exists, G3, but one place to choose it) and hands it to
+  the third of the `open_ledger`/`open_archive` kind — one presence toggle,
+  `BURST_NAMESPACE`, and `JobsRunner` instead of `DockerRunner`, G3) and hands it to
   `execute_burst` and to `reconcile_running` alike.
 - **`burst_env(spec)`** is the box's contract, factored out of the docker
   command: the environment every runner hands the container verbatim — the

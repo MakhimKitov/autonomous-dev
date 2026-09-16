@@ -39,6 +39,7 @@ from session_volume import BURST_RESULT_FILENAME, VIOLATIONS_FILENAME, tar_witho
 
 KEY = "sessions/owner/product#42/b1/session.tar.gz"
 PARENT_KEY = "sessions/owner/product#42/b0/session.tar.gz"
+RECORD_KEY = "sessions/owner/product#42/b1/artifacts.json"
 
 
 class Served:
@@ -332,7 +333,9 @@ def test_a_local_directory_has_no_urls_to_hand_out(tmp_path):
     control plane's own filesystem without an object store."""
     archive = LocalSessionArchive(tmp_path / "archive")
     with pytest.raises(ArchiveError, match="ARCHIVE_URL"):
-        mint_phase_env(archive, volume_dir="/volume", parent=None, session_key=KEY)
+        mint_phase_env(
+            archive, volume_dir="/volume", record_key=RECORD_KEY, parent=None, session_key=KEY
+        )
 
 
 def test_minting_hands_out_one_capability_per_object(tmp_path):
@@ -340,6 +343,7 @@ def test_minting_hands_out_one_capability_per_object(tmp_path):
     minted = mint_phase_env(
         archive,
         volume_dir="/volume",
+        record_key=RECORD_KEY,
         parent=Snapshot(PARENT_KEY, "a" * 64),
         session_key=KEY,
         clone=("https://github.com/owner/product.git", "main", "/clone", "ghs-token"),
@@ -350,7 +354,7 @@ def test_minting_hands_out_one_capability_per_object(tmp_path):
     assert minted.init[CLONE_TOKEN] == "ghs-token"
 
     assert minted.harvest[SESSION_KEY] == KEY and KEY in minted.harvest[SESSION_PUT_URL]
-    assert artifacts_key(KEY) in minted.harvest[ARTIFACTS_PUT_URL]
+    assert minted.record == RECORD_KEY and RECORD_KEY in minted.harvest[ARTIFACTS_PUT_URL]
     # the clone token is init's alone — the harvester has no use for it and no copy
     assert CLONE_TOKEN not in minted.harvest
     # and neither environment carries a credential for the store itself
@@ -360,16 +364,23 @@ def test_minting_hands_out_one_capability_per_object(tmp_path):
 def test_a_reviewer_gets_no_put_for_a_snapshot(tmp_path):
     archive = Presigning(tmp_path / "archive")
     minted = mint_phase_env(
-        archive, volume_dir="/volume", parent=Snapshot(PARENT_KEY, "a" * 64), session_key=None
+        archive,
+        volume_dir="/volume",
+        record_key=RECORD_KEY,
+        parent=Snapshot(PARENT_KEY, "a" * 64),
+        session_key=None,
     )
     assert SESSION_PUT_URL not in minted.harvest and SESSION_KEY not in minted.harvest
-    assert ARTIFACTS_PUT_URL in minted.harvest  # the result still has to come home
+    # the result still has to come home, and under *this* burst's prefix — a
+    # reviewer archives nothing, and two bursts off one parent must not collide
+    assert ARTIFACTS_PUT_URL in minted.harvest
+    assert RECORD_KEY in minted.harvest[ARTIFACTS_PUT_URL]
 
 
-def test_a_burst_with_nothing_to_read_or_write_is_refused(tmp_path):
+def test_a_burst_with_nowhere_to_report_is_refused(tmp_path):
     archive = LocalSessionArchive(tmp_path / "archive")
     with pytest.raises(ArchiveError, match="nowhere to report"):
-        mint_phase_env(archive, volume_dir="/volume", parent=None, session_key=None)
+        mint_phase_env(archive, volume_dir="/volume", record_key="", parent=None, session_key=None)
 
 
 def test_the_artifacts_key_sits_beside_the_snapshot():

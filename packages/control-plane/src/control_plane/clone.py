@@ -67,3 +67,24 @@ def prepare_clone(
         _git(["checkout", "--quiet", "-B", branch, default_ref], cwd=clone)
     _git(["clean", "-fdq"], cwd=clone)  # ignored files survive (warm .venv)
     return clone
+
+
+def pinned_origin(clone: Path) -> tuple[str, str]:
+    """``(url, ref)`` — where this clone came from, and what it is sitting on.
+
+    What a runner whose phases run beside the burst needs (G3): a pod inherits no
+    mount, so it fetches the working tree itself, and `prepare_clone` has already
+    decided what that tree is. The ref answers in the same two shapes this
+    function's neighbour produces — the branch name when the clone is on a branch
+    (the dev's, synced to origin's default), the commit when it is detached (a
+    reviewer's, at the PR head) — so the pod's checkout is the same checkout for
+    the same reason, not a second policy.
+
+    The origin is the plain URL: the token never enters this clone's config (it
+    travels per invocation), so what comes back here is safe to hand on.
+    """
+    url = _git(["remote", "get-url", "origin"], cwd=clone, capture=True)
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=clone, capture=True)
+    if branch and branch != "HEAD":
+        return url, branch
+    return url, _git(["rev-parse", "HEAD"], cwd=clone, capture=True)

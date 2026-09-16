@@ -227,8 +227,10 @@ class Scheduler:
         # process's endpoint or a peer's, through the ledger's channel — sets it
         self.wake = threading.Event()
         # where this replica's bursts run (E4): the one runner the process has,
-        # asked to `run` every burst and, by the reconciler, whether one is `alive`
-        self.runner = runner if runner is not None else open_runner()
+        # asked to `run` every burst and, by the reconciler, whether one is `alive`.
+        # The archive goes with it because the bytes phases are the runner's (G1) —
+        # a Job runner mints its pod's URLs from it (G3) and refuses without one
+        self.runner = runner if runner is not None else open_runner(self.stores.archive)
         self.current_burst_id: str | None = None  # the one live burst, if any
 
     # --- the tick ---

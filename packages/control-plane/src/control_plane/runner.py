@@ -1,11 +1,11 @@
 """Where bursts run. One container = one burst, then it dies (§6).
 
 `Runner` is the seam (E4, TO-BE §6) — the third protocol beside `Ledger` and
-`SessionArchive`: `DockerRunner` behind it as built, `JobsRunner` when the
-cluster arrives (G3, #44). What the box is given is decided here once, for every
-runner: `BurstSpec` is the burst, `burst_env` the environment the box gets. The
-env contract's names come from ``dev_agent.env`` (single source of truth; the
-dependency points control-plane → dev-agent only).
+`SessionArchive`: `DockerRunner` here, `JobsRunner` in `jobs.py` (G3). What the
+box is given is decided here once, for every runner: `BurstSpec` is the burst,
+`burst_env` the environment the box gets. The env contract's names come from
+``dev_agent.env`` (single source of truth; the dependency points control-plane →
+dev-agent only).
 
 Phase 0's `DockerRunner` shells out to the ``docker`` CLI — no daemon-API
 dependency.
@@ -40,6 +40,15 @@ log = structlog.get_logger()
 
 DEFAULT_IMAGE = "autonomous-dev/dev-agent:latest"
 
+# The one variable that decides where bursts run (`open_runner`). Named here
+# rather than in `jobs`, because the toggle belongs to the seam, not to one side
+# of it — the way ARCHIVE_URL belongs to `open_archive` and not to boto3.
+NAMESPACE_ENV = "BURST_NAMESPACE"
+
+
+class RunnerError(RuntimeError):
+    """This deployment cannot run bursts as configured."""
+
 # How often a running burst's heartbeat is asked while the container is up (E1).
 # The callback is cheap and decides for itself whether this beat renews the lease
 # in the ledger; the runner only guarantees it is asked at least this often,
@@ -57,9 +66,15 @@ HEARTBEAT_POLL_S = 5.0
 # Why these numbers: finding #6 measured 18 minutes lost to one stuck command,
 # with the burst's budget draining and the heartbeat happily renewing a lease on
 # work that had stopped. Two minutes covers the ordinary command; ten is the most
-# a deliberate one (a full test run, an image build) may ask for, and a call that
-# passes it comes back as a tool error the agent can react to — which is the
-# difference between a rail and a wall: the burst continues on its own terms.
+# a deliberate one (a full test run, an image build) may ask for.
+#
+# What the engine does at the ceiling, measured on a live burst (#104): it does
+# not kill the command, it *backgrounds* it and hands control back. The agent is
+# free at two minutes, which is the whole of finding #6; the process itself keeps
+# running until the burst's container ends, which is what makes the wall-clock
+# rail — `activeDeadlineSeconds` on a Job, the container's life under docker —
+# the thing that actually bounds it. A rail, not a wall: the burst continues on
+# its own terms rather than being stopped.
 BASH_CALL_TIMEOUT_S = 120
 BASH_CALL_CEILING_S = 600
 
@@ -114,6 +129,22 @@ class BurstSpec:
     # whatever credential this machine holds — the MVP's shape. Never logged,
     # never archived, never written to a row: the ledger keeps the id.
     oauth_token: str | None = None
+    # Where this burst's snapshot goes, or None for a burst whose volume is not
+    # archived (the reviewer, B5). Decided at spawn rather than asked for at
+    # `collect`, because a runner whose phases run beside the burst (G3) has to
+    # mint the PUT for that key *before* the pod starts — and a key that is
+    # settled at spawn is the same key on both substrates.
+    archive_as: str | None = None
+    # What a pod-side init container has to fetch to make the working tree the
+    # host path mounts: ``(url, ref)`` — origin and the exact commit the
+    # platform's own clone is pinned to, so the tree in the pod is the tree
+    # `repo_mount` would have been. Ignored by runners that share a filesystem
+    # with the control plane.
+    clone: tuple[str, str] | None = None
+    # The credential for that clone: `contents:read` on the one repository,
+    # handed to the init container and to no other (TO-BE §6). It is a second
+    # token on purpose — a reviewer or tester agent still holds none.
+    clone_token: str | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -194,18 +225,22 @@ class HostPhases:
     """
 
     archive: SessionArchive | None = None
+    # The bytes phases run here, in the control plane's own process, on the
+    # control plane's own filesystem. `JobsRunner` says False and the difference
+    # is visible to the caller exactly once: a burst whose phases run beside it
+    # has to be *told* what to clone, because there is no mount to inherit.
+    pod_side = False
 
     def materialize(self, spec: BurstSpec, parent: Snapshot | None = None) -> None:
         materialize_volume(spec.volume_dir, self.archive, parent)
 
-    def collect(self, spec: BurstSpec, *, archive_as: str | None = None) -> BurstArtifacts:
-        return collect_volume(spec.volume_dir, self.archive, archive_as)
+    def collect(self, spec: BurstSpec) -> BurstArtifacts:
+        return collect_volume(spec.volume_dir, self.archive, spec.archive_as)
 
 
 class Runner(Protocol):
-    """Where bursts run — the seam `DockerRunner` sits behind (E4, TO-BE §6)
-    and `JobsRunner` will (G3, #44); the suite's fakes take docker's seat
-    through it.
+    """Where bursts run — the seam `DockerRunner` and `JobsRunner` sit behind
+    (E4/G3, TO-BE §6); the suite's fakes take docker's seat through it.
 
     Four questions since G1, and what every answer holds wherever the burst runs.
     The first and the third are the bytes phases — one volume in, one volume out
@@ -218,8 +253,8 @@ class Runner(Protocol):
       None for a burst that starts empty. A checksum mismatch raises rather
       than handing the burst bytes nobody recorded.
     - ``collect`` reads back what the burst left — its result file and its
-      violations feed — and archives the volume under ``archive_as``, or under
-      nothing when the caller passes None. Bytes only: turning them into ledger
+      violations feed — and archives the volume under ``spec.archive_as``, or
+      under nothing when that is None. Bytes only: turning them into ledger
       rows is `fold_artifacts`, in the control plane, because a burst's
       substrate holds no ledger credentials.
 
@@ -239,10 +274,19 @@ class Runner(Protocol):
       (the heartbeat failed, the work did not); False for a burst that has
       ended or that this runner never ran.
 
+    ``pod_side`` says which of the two shapes this runner is: False when the
+    phases run in the control plane's own process (a mount away from the
+    burst), True when they run beside the burst and everything they need has to
+    be *given* to them. It is the one thing about a substrate the caller has to
+    know, and it buys exactly one decision — whether the burst is told what to
+    clone (`execute_burst`), since a pod inherits no mount.
+
     `tests/test_runner_contract.py` is the contract, one suite parameterized over
     every runner there is — a test that passes on one and fails on another is a
     bug by definition, the way the ledger's and the archive's suites put it.
     """
+
+    pod_side: bool
 
     def materialize(self, spec: BurstSpec, parent: Snapshot | None = None) -> None: ...
 
@@ -250,7 +294,7 @@ class Runner(Protocol):
         self, spec: BurstSpec, log_path: Path | None = None, heartbeat: Heartbeat | None = None
     ) -> int: ...
 
-    def collect(self, spec: BurstSpec, *, archive_as: str | None = None) -> BurstArtifacts: ...
+    def collect(self, spec: BurstSpec) -> BurstArtifacts: ...
 
     def alive(self, burst_id: str) -> bool: ...
 
@@ -343,13 +387,25 @@ class DockerRunner(HostPhases):
 def open_runner(archive: SessionArchive | None = None) -> Runner:
     """The runner this deployment has — `open_ledger` / `open_archive`'s third.
 
-    Docker is the only one as built, so nothing is chosen here yet; this is
-    the place the choice is made when `JobsRunner` exists (G3, #44): one
-    toggle, here, and nothing downstream of it naming a substrate. The archive
-    is handed in because the bytes phases are the runner's (G1) — a Job pod will
-    be handed presigned URLs instead (G2), and the caller will not know which.
+    One presence toggle, like the other two: `BURST_NAMESPACE` set means this
+    deployment runs bursts as k8s Jobs in that namespace (G3), unset means
+    containers on this host's docker. Nothing downstream of this line names a
+    substrate. The archive is handed in because the bytes phases are the
+    runner's (G1): `DockerRunner` moves the bytes itself, `JobsRunner` mints
+    the URLs a pod moves them with (G2), and the caller cannot tell which.
     """
-    return DockerRunner(archive)
+    namespace = os.environ.get(NAMESPACE_ENV, "").strip()
+    if not namespace:
+        return DockerRunner(archive)
+    from control_plane.jobs import JobsRunner  # local: keeps kubectl off every CLI verb
+
+    if archive is None:
+        raise RunnerError(
+            f"{NAMESPACE_ENV} runs bursts on a cluster, where the phases reach the archive "
+            "through presigned URLs — so this deployment needs an archive to mint them from"
+        )
+    log.info("bursts run as k8s Jobs", namespace=namespace)
+    return JobsRunner(archive, namespace=namespace)
 
 
 def _pump(

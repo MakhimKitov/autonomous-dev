@@ -109,6 +109,47 @@ replica `event="product woken" … delivery=<id>` → every replica
 delivery id is the same one in GitHub's *Recent Deliveries* and in the
 `product_woken` event's payload, so the three can be lined up.
 
+## Bursts on a cluster (G3)
+
+`BURST_NAMESPACE` is the whole switch. Set it on the replicas and `open_runner`
+returns `JobsRunner`: one k8s Job per burst, three containers (init → agent →
+harvest), no docker socket anywhere. Leave it unset and nothing changes — the
+compose deployment above runs bursts on the host's docker, which is the T0 shape
+and stays supported.
+
+What the cluster has to have:
+
+- `examples/k8s/burst-runner.yaml` applied — the namespace and the account whose
+  grant is the four verbs the runner speaks. The control plane reaches the API
+  the way `kubectl` does: in-cluster it is that service account, off-cluster it
+  is the operator's kubeconfig.
+- `kubectl` on the control-plane image's PATH, and **`ARCHIVE_URL` set**. A pod
+  moves its own bytes through presigned URLs, so a deployment that runs bursts on
+  a cluster needs an object store; `open_runner` refuses at startup rather than
+  handing a pod a directory it cannot see.
+- the two images reachable from the nodes: the dev-agent image (what the burst
+  is) and the phases image (`BURST_PHASES_IMAGE`, default
+  `autonomous-dev/burst-phases:latest`). Both are pulled `IfNotPresent`, so a
+  node that already holds them never goes looking for a registry.
+- the archive reachable **from the pods, at the same address the control plane
+  signs with**. A presigned URL is signed over its Host header: one name, both
+  sides. In a cluster that is ordinary service DNS; on a laptop it is the host's
+  LAN address, which is what `scripts/burst-cluster.sh` builds.
+
+One command gets a throwaway one (kind + the archive + the phases image), and it
+is what the runner contract suite runs against:
+
+```bash
+./scripts/burst-cluster.sh                 # prints the three exports
+uv run pytest tests/test_runner_contract.py tests/test_jobs_runner.py
+./scripts/burst-cluster.sh --delete
+```
+
+Two rails are the Job's own. `activeDeadlineSeconds` is the wall-clock ceiling
+and is the same number the pod's capabilities expire on — a burst cannot outlive
+its own URLs. `backoffLimit: 0` means k8s never retries: a retry is the
+scheduler's decision, made with the result file in hand.
+
 ## The rehearsal (gate E6, #37)
 
 Manual, about thirty minutes, with the whole platform in containers and **no

@@ -341,7 +341,7 @@ work with nothing restarted.
 **The runner is a protocol (E4)**: `Runner` in `runner.py` — `run(spec,
 log_path, heartbeat) -> int` and `alive(burst_id) -> bool` — is the third seam
 beside `Ledger` and `SessionArchive` (TO-BE §6); `DockerRunner` sits behind it
-with its behavior untouched, `JobsRunner` arrives at G3 (#44). The scheduler
+with its behavior untouched, and `JobsRunner` beside it since G3. The scheduler
 holds one runner per process (`open_runner()`, chosen in `cli.py` like the two
 stores) and asks it to `run` every burst and, in `reconcile_running`, whether an
 orphaned burst is still `alive` — the old `docker ps` in the scheduler is gone;
@@ -389,6 +389,53 @@ deployment meets if it tries to run bursts off the control plane's own
 filesystem without `ARCHIVE_URL`. `DockerRunner` stays on the host phases (G1):
 it shares that filesystem, so its burst container is handed nothing at all, and
 the zero-standing-credentials property holds on both paths for the same reason.
+
+**Bursts as Jobs on a cluster (G3)**: `BURST_NAMESPACE` is the toggle — set, and
+`open_runner` returns `JobsRunner` (`jobs.py`) instead of `DockerRunner`; unset,
+nothing changes. One burst is one Job is one pod of three containers: **init**
+(the phases image) fills an `emptyDir` from its presigned GET and clones the
+product into a second one, **agent** (the dev-agent image, unchanged) runs
+against both, **harvest** waits for the exit code the agent writes to a third,
+tiny volume and ships what is on the session volume. A pod has no "after the
+main container" hook, which is why that sentinel exists and why it is *not* on
+the session volume — that one is archived and materialized into the next burst.
+The walls are absences: `automountServiceAccountToken: false` (a burst holds no
+k8s credential at all, so "a burst can't touch the cluster" is a fact about the
+pod), no storage credential (capabilities, G2), no GitHub credential in a
+reviewer's or tester's agent (the `contents:read` clone token is the init
+container's alone, `mint_clone_token`), `backoffLimit: 0` + `restartPolicy:
+Never` (a retry is the scheduler's decision, made with the result file in hand).
+`activeDeadlineSeconds` is `PHASE_URL_TTL_S` — how long a burst may run and how
+long its URLs are good for are one number, because two would drift into a pod
+outliving its capabilities. **kubectl, not a client library**, for the reason
+`DockerRunner` shells out to docker: the streaming half of `run` — the pump, the
+heartbeat on the clock, the fence — is subtle and already written, and against a
+subprocess it is literally the same `_pump`, so the two runners cannot drift on
+the guarantee that matters most.
+
+Three things the second substrate changed on this side of the seam.
+`BurstSpec.archive_as` — *where* a burst's snapshot goes is settled at spawn
+rather than asked for at `collect`, because a pod's PUT has to be minted before
+it starts; `collect(spec)` lost its argument. `BurstSpec.clone` /
+`clone_token` — a pod inherits no mount, so the burst is told what to fetch
+(`pinned_origin`: origin, and the branch or commit the platform's own clone is
+sitting on, so the tree in the pod is the tree `repo_mount` would have been), and
+`Runner.pod_side` is the one bit of substrate the caller reads, buying exactly
+that decision. And a G2 bug the second substrate exposed: the harvester's record
+key was derived from the *parent's* snapshot key, so two bursts resuming one
+parent would have filed their records in the same place — it is
+`artifacts_key(session_key(task_id, burst_id))` now, this burst's own, which is
+also what lets a reviewer report without archiving anything.
+
+`tests/test_runner_contract.py` runs on both runners, and getting a cluster to
+run it against is one command (`scripts/burst-cluster.sh`, a throwaway kind
+cluster + the archive + the phases image). The suite had to become
+substrate-neutral to do it: every test is now materialize → run → collect, and
+reads the volume only through what the burst *wrote*, because on a cluster the
+volume is inside the pod and there is no moment at which a test could look at
+it. `tests/test_jobs_runner.py` is what the contract cannot ask — the pod spec's
+walls, read off the manifest without a cluster, plus one live burst that goes
+looking for the service-account token and finds nothing.
 
 **Webhooks as wake-up, polls as truth (E5)**: three parts and one wall (TO-BE §5).
 `packages/webhook-receiver` is the platform's only public surface — verify
@@ -528,11 +575,14 @@ ceiling — `BASH_DEFAULT_TIMEOUT_MS` (2 min, what a call gets when the model as
 for nothing) and `BASH_MAX_TIMEOUT_MS` (10 min, the most it may ask for). A
 ceiling in code (`runner.py`), not a row: how long one command may run is a
 platform-safety question, and a product that needs longer says so per call rather
-than raising a floor for everyone. Enforcement is the engine's; a call that passes
-its ceiling comes back as a tool error the agent reacts to, which is the
-difference between a rail and a wall. Finding #6 is what this is for: 18 minutes
-lost to one stuck command, with the budget draining and the heartbeat renewing a
-lease on work that had stopped.
+than raising a floor for everyone. Enforcement is the engine's, and what it does at the
+ceiling was measured on a live burst (#104): it **backgrounds** the call and
+hands control back rather than killing it. The agent is free at two minutes,
+which is the whole of finding #6 — 18 minutes lost to one stuck command, with
+the budget draining and the heartbeat renewing a lease on work that had stopped
+— while the process itself runs until the burst's container ends, so the thing
+that bounds it is the wall-clock rail (`activeDeadlineSeconds` on a Job). A rail,
+not a wall: the burst continues on its own terms.
 
 ### Task identity
 

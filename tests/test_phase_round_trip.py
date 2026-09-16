@@ -103,6 +103,7 @@ def test_a_burst_goes_in_and_out_through_capabilities_alone(archive, tmp_path):
     minted = mint_phase_env(
         archive,
         volume_dir=str(volume),
+        record_key=artifacts_key(key),
         parent=Snapshot(parent_key, parent_checksum),
         session_key=key,
     )
@@ -149,7 +150,11 @@ def test_the_phases_hold_no_key_to_the_store(archive, tmp_path):
     is read back and searched. A capability names one object and expires; a
     credential would still be a credential tomorrow."""
     minted = mint_phase_env(
-        archive, volume_dir=str(tmp_path / "volume"), parent=None, session_key=session_key(TASK, "b2")
+        archive,
+        volume_dir=str(tmp_path / "volume"),
+        record_key=artifacts_key(session_key(TASK, "b2")),
+        parent=None,
+        session_key=session_key(TASK, "b2"),
     )
     handed = {**minted.init, **minted.harvest}
     for name, value in handed.items():
@@ -172,7 +177,14 @@ def test_an_expired_capability_stops_working(archive, tmp_path):
     volume = tmp_path / "volume"
     volume.mkdir()
     (volume / BURST_RESULT_FILENAME).write_text("{}", encoding="utf-8")
-    minted = mint_phase_env(archive, volume_dir=str(volume), parent=None, session_key=key, ttl_s=1)
+    minted = mint_phase_env(
+        archive,
+        volume_dir=str(volume),
+        record_key=artifacts_key(key),
+        parent=None,
+        session_key=key,
+        ttl_s=1,
+    )
 
     time.sleep(2)
     shipped = phase("harvest_main", minted.harvest)

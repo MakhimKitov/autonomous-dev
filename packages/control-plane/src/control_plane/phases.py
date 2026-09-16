@@ -22,8 +22,8 @@ are given is the whole security story:
 with the control plane, so its phases move bytes directly (`HostPhases`, G1) and
 hand the burst container nothing at all. The zero-standing-credentials property
 holds on both paths for the same reason — the burst is never given a key —
-by two different mechanisms, which is what `test_runner_contract.py` exists to
-keep honest when `JobsRunner` lands (G3).
+by two different mechanisms, which is what `test_runner_contract.py` keeps
+honest now that `JobsRunner` runs the same suite (G3).
 """
 
 from __future__ import annotations
@@ -51,10 +51,11 @@ from control_plane.volume import BurstArtifacts, Snapshot
 log = structlog.get_logger()
 
 # How long a minted capability lives. It has to outlast the slowest burst and
-# die well before the next one, and the honest number is the wall-clock rail —
-# `activeDeadlineSeconds` on the Job, once Stage H gives bursts one. Until then
-# this is that rail's stand-in, and it is deliberately a single constant: a knob
-# here would be a second way to say how long a burst may run.
+# die well before the next one, and the honest number is the wall-clock rail:
+# `jobs.BURST_DEADLINE_S` *is* this constant, and it is what a Job carries as
+# `activeDeadlineSeconds` (G3). One number, deliberately — a knob here would be a
+# second way to say how long a burst may run, and the drift between the two would
+# be a pod outliving its own capabilities or losing them mid-burst.
 PHASE_URL_TTL_S = 3 * 60 * 60
 
 # Where the harvester's record goes. One key per burst, beside its snapshot, so
@@ -63,7 +64,14 @@ ARTIFACTS_SUFFIX = "artifacts.json"
 
 
 def artifacts_key(session_key_of_burst: str) -> str:
-    """The record's key, derived from the snapshot's — never invented (A6)."""
+    """The record's key, derived from *this burst's* snapshot key — never
+    invented (A6), and never borrowed from another burst's.
+
+    The argument is what `session_key(task_id, burst_id)` returns for the burst
+    doing the reporting, whether or not its volume is archived: a reviewer
+    archives nothing and still has to report, and two bursts resuming one parent
+    must not file their records in the same place.
+    """
     return session_key_of_burst.rsplit("/", 1)[0] + "/" + ARTIFACTS_SUFFIX
 
 
@@ -78,12 +86,17 @@ class PhaseEnv:
 
     init: dict[str, str]
     harvest: dict[str, str]
+    # The key the harvester's PUT writes to, and the one the control plane reads
+    # back with `read_artifacts`. It is derived, never invented — but it is
+    # derived *here*, at spawn, so nothing downstream has to re-derive it.
+    record: str
 
 
 def mint_phase_env(
     archive: SessionArchive,
     *,
     volume_dir: str,
+    record_key: str,
     parent: Snapshot | None,
     session_key: str | None,
     clone: tuple[str, str, str, str] | None = None,
@@ -91,18 +104,16 @@ def mint_phase_env(
 ) -> PhaseEnv:
     """Mint one burst's capabilities and spell them as two environments.
 
-    `session_key` None is a burst whose volume is not archived — the reviewer
-    (B5) — and it gets no PUT for a snapshot, only the record's. `clone` is
-    `(url, ref, directory, token)` for the roles whose repository the init
-    container fetches; the token is the `contents:read` one and appears in no
-    other container's environment.
+    `record_key` is where the harvester reports — always this burst's own
+    (`artifacts_key(session_key(task_id, burst_id))`), because every burst
+    reports and only some archive. `session_key` None is a burst whose volume is
+    not archived — the reviewer (B5) — and it gets no PUT for a snapshot, only
+    the record's. `clone` is `(url, ref, directory, token)` for the roles whose
+    repository the init container fetches; the token is the `contents:read` one
+    and appears in no other container's environment.
     """
-    if session_key is None and parent is None:
-        record_key = None
-    else:
-        record_key = artifacts_key(session_key or parent.key)
-    if record_key is None:
-        raise ArchiveError("a burst with neither a parent nor a snapshot key has nowhere to report")
+    if not record_key:
+        raise ArchiveError("a burst with no record key has nowhere to report")
 
     init: dict[str, str] = {VOLUME_DIR: volume_dir}
     if parent is not None:
@@ -131,7 +142,7 @@ def mint_phase_env(
         ttl_s=int(ttl_s),
         clone=bool(clone),
     )
-    return PhaseEnv(init=init, harvest=harvest)
+    return PhaseEnv(init=init, harvest=harvest, record=record_key)
 
 
 def read_artifacts(archive: SessionArchive, record_key: str) -> BurstArtifacts:
