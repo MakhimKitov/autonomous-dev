@@ -50,7 +50,7 @@ primitives, pinned to fixed conventions.
 |---|---|
 | `pr-open` | issue has a linked open PR |
 | `needs-review` / `changes-requested` | PR review state |
-| `done` | issue closed (auto, via `Closes #<n>` on merge) |
+| `done` | issue closed — by the merge (`Closes #<n>`), or by whoever found the work already finished |
 
 ## Issue lifecycle
 
@@ -64,6 +64,8 @@ created (human|auto, no `ready`)
        ├─ changes requested → new burst (resume) → push → re-review
        ├─ approve + merge → issue auto-closes [done] (deploy later, via the Release PR)
        └─ secrets/prod/policy hit → dev agent sets `blocked` + comments → human
+  → or, before any PR: the work is already done (fixed, a duplicate) → dev agent
+       comments the evidence + closes the issue → [done], no PR, no retry
 ```
 
 ## Issue template (`.github/ISSUE_TEMPLATE/`)

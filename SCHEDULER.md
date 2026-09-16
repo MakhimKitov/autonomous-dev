@@ -34,7 +34,7 @@ Ledger-authoritative (`tasks.status`); labels stay reflective (`GITHUB-INTERFACE
 | `working` | the burst container is running |
 | `awaiting_review` | PR open; the ball is with Copilot / the owner |
 | `blocked` | needs a human — rail tripped, agent rule 9, or PR closed unmerged |
-| `done` | PR merged; issue auto-closed |
+| `done` | PR merged (issue auto-closed) — or the issue closed with no PR needed |
 
 ```
 issue `human`+`ready` ──claim──► claimed ──spawn──► working ──burst ok, PR open──► awaiting_review
@@ -46,6 +46,8 @@ issue `human`+`ready` ──claim──► claimed ──spawn──► working 
                                                                             merged ────┘
    blocked ◄── attempts/rounds = max · agent set `blocked` · PR closed unmerged        ▼
       └────────── human re-adds `ready` (attempts reset) ──────► claimed              done
+                                                                                       ▲
+                                    issue closed, no PR needed (already fixed) ────────┘
 ```
 
 Every row of this table is written as a **compare-and-set** (E1): the ledger
@@ -59,6 +61,7 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | — | issue `human`+`ready`, unclaimed | task row (insert-if-absent); labels `ready`→`in-progress` | `claimed` (work) |
 | `claimed` | leased by the claim statement: cooldown passed, ceiling ok | spawn burst (resume when a session exists); heartbeat renews the lease | `working` |
 | `working` | burst ok ∧ linked PR open | record `pr_number`; review round → re-request Copilot + owner | `awaiting_review` |
+| `working` | burst ok ∧ no PR ∧ **issue closed** | clear `in-progress` | `done` |
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
 | `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back (E3: killed via the heartbeat and the runner — STOP row, lost lease or shutdown; a crash is `killed` by the reconciler) | pre-burst state |
@@ -68,11 +71,19 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | `awaiting_review` | PR merged | clear `in-progress` | `done` |
 | `awaiting_review` | PR closed unmerged | comment; clear `in-progress` | `blocked` |
 | any active | issue carries `blocked` (agent rule 9) | stop scheduling the task | `blocked` |
+| `claimed` | issue closed (a burst finished it, or a human) | clear `in-progress` | `done` |
 | `blocked` | human re-adds `ready` | attempts/rounds reset | `claimed` |
 
 Notes:
-- **"Burst ok but no PR" is a failed attempt.** The work burst's contract is a PR; anything
-  less retries (with resume — the session remembers how far it got) until the rail trips.
+- **"Burst ok but no PR" is a failed attempt — unless the issue is closed.** The work
+  burst's contract is a PR; anything less retries (with resume — the session remembers how
+  far it got) until the rail trips. A *closed* issue is the exception: some work needs no
+  PR — the symptom was already fixed, the report is a duplicate — and the burst says so by
+  closing the issue with its evidence, which the product's contract allows. That is a
+  finished task. The observation pass reads the same fact for a `claimed` task, so a human
+  closing an issue mid-flight ends it too; an `awaiting_review` task is ended by its PR,
+  never by its issue. (#93: without this, the gate rehearsal spent three bursts on
+  discord-bot#16 re-reading a closed issue, then parked it as failed.)
   Resume survives *any* death, including the budget rail killing the stream mid-run: the
   worker captures the session id from the init message and writes its result file in a
   `finally` (the task-17 lesson), so attempts × per-burst budget behaves as an installment
