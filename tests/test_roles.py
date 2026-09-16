@@ -12,14 +12,17 @@ from control_plane import roles
 from control_plane.bursts import PlatformStores, execute_burst
 from control_plane.models import RoleRecord, TaskRecord
 from control_plane.roles import RoleError
+from control_plane.runner import HostPhases
 from control_plane.store import SqliteLedger
 
 
-class RecordingRunner:
-    """Stands in for docker: keeps the spec the engine built, exits 0."""
+class RecordingRunner(HostPhases):
+    """Stands in for docker: keeps the spec the engine built, exits 0. The bytes
+    phases are the real ones (G1) — the volume is what a role's mount governs."""
 
-    def __init__(self):
+    def __init__(self, archive=None):
         self.specs = []
+        self.archive = archive
 
     def run(self, spec, log_path=None, heartbeat=None):
         self.specs.append(spec)
@@ -31,7 +34,7 @@ def engine(tmp_path):
     stores = PlatformStores.open(tmp_path / "data")
     repo = tmp_path / "repo"
     repo.mkdir()
-    runner = RecordingRunner()
+    runner = RecordingRunner(archive=stores.archive)
     task = TaskRecord(task_id="owner/product#7", repository="owner/product", issue_number=7)
 
     def spawn(role="dev", prompt="fix the bug", **overrides):

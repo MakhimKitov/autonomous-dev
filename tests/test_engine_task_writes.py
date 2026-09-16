@@ -10,6 +10,7 @@ import json
 from datetime import UTC, datetime
 
 from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.runner import HostPhases
 from control_plane.models import BurstStatus, TaskRecord, TaskStatus, utc_now
 from control_plane.subscriptions import declare
 from dev_agent.env import BURST_RESULT_FILENAME
@@ -17,11 +18,16 @@ from dev_agent.env import BURST_RESULT_FILENAME
 REPOSITORY = "owner/product"
 
 
-class ResultRunner:
-    """Docker's seat: writes the worker's result file, exits 0."""
+class ResultRunner(HostPhases):
+    """Docker's seat: writes the worker's result file, exits 0.
 
-    def __init__(self, session_id="sess-9"):
+    The bytes phases are the real ones (`HostPhases`, G1) — a fake that ran a
+    burst has to leave the same trail a real one does, and the archive it writes
+    to is the rig's, handed in the way `open_runner` hands the deployment's."""
+
+    def __init__(self, session_id="sess-9", archive=None):
         self.session_id = session_id
+        self.archive = archive
 
     def run(self, spec, log_path=None, heartbeat=None):
         (spec.volume_dir / BURST_RESULT_FILENAME).write_text(
@@ -44,7 +50,7 @@ def _rig(tmp_path):
 def test_an_unseen_task_is_created_and_a_seen_one_is_left_as_it_is(tmp_path):
     stores, repo = _rig(tmp_path)
     assert stores.ledger.get_task(f"{REPOSITORY}#7") is None
-    execute_burst(stores, _task(), repo, "fix", runner=ResultRunner())
+    execute_burst(stores, _task(), repo, "fix", runner=ResultRunner(archive=stores.archive))
     created = stores.ledger.get_task(f"{REPOSITORY}#7")
     assert created.status == TaskStatus.OPEN  # the verb's shape: created, as handed in
 
@@ -54,7 +60,7 @@ def test_an_unseen_task_is_created_and_a_seen_one_is_left_as_it_is(tmp_path):
         _task(status=TaskStatus.WORKING, attempts=2, pr_number=4, claimed_by="r1", claimed_until="2099-01-01T00:00:00+00:00")
     )
     stale = _task(status=TaskStatus.WORKING, attempts=0, pr_number=None, claimed_by="r1")
-    execute_burst(stores, stale, repo, "fix", runner=ResultRunner("sess-10"))
+    execute_burst(stores, stale, repo, "fix", runner=ResultRunner("sess-10", archive=stores.archive))
     row = stores.ledger.get_task(f"{REPOSITORY}#7")
     assert (row.status, row.attempts, row.pr_number, row.claimed_by) == (TaskStatus.WORKING, 2, 4, "r1")
     assert row.session_id == "sess-10"  # the one column the engine owns landed
@@ -74,7 +80,7 @@ def test_the_dev_session_lands_by_cas_and_a_moved_task_is_left_alone(tmp_path):
             )
             return super().run(spec, log_path, heartbeat)
 
-    outcome = execute_burst(stores, task, repo, "fix", runner=PeerMovesItRunner())
+    outcome = execute_burst(stores, task, repo, "fix", runner=PeerMovesItRunner(archive=stores.archive))
     assert outcome.burst.session_id == "sess-9"  # the burst row knows its session
     row = stores.ledger.get_task(task.task_id)
     assert (row.status, row.session_id) == (TaskStatus.CLAIMED, None)  # the peer's row, untouched
@@ -82,7 +88,7 @@ def test_the_dev_session_lands_by_cas_and_a_moved_task_is_left_alone(tmp_path):
 
     # the reviewer's session is never the task's, CAS or not
     execute_burst(stores, _task(status=TaskStatus.CLAIMED), repo, "judge", role="reviewer", fresh=True,
-                  runner=ResultRunner("sess-reviewer"))
+                  runner=ResultRunner("sess-reviewer", archive=stores.archive))
     assert stores.ledger.get_task(task.task_id).session_id is None
 
 
@@ -93,8 +99,8 @@ class RateLimitedRunner(ResultRunner):
     """Docker's seat when the provider says no: the worker still writes its
     result — with the session id from the init message — and exits non-zero."""
 
-    def __init__(self, session_id="sess-9", message="Claude AI usage limit reached|%d"):
-        super().__init__(session_id)
+    def __init__(self, session_id="sess-9", message="Claude AI usage limit reached|%d", archive=None):
+        super().__init__(session_id, archive=archive)
         self.message = message
 
     def run(self, spec, log_path=None, heartbeat=None):
@@ -118,7 +124,7 @@ def test_a_rate_limited_burst_benches_the_subscription_that_paid(tmp_path, monke
     monkeypatch.setenv("ADA_TOKEN", "adas-secret")
     stores.ledger.register_subscription(declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), "op")
 
-    outcome = execute_burst(stores, _task(), repo, "fix", runner=RateLimitedRunner())
+    outcome = execute_burst(stores, _task(), repo, "fix", runner=RateLimitedRunner(archive=stores.archive))
 
     assert outcome.succeeded is False and outcome.rate_limited is True
     row = stores.ledger.get_subscription("ada")
@@ -136,7 +142,7 @@ def test_an_ordinary_failure_benches_nobody(tmp_path, monkeypatch):
 
     outcome = execute_burst(
         stores, _task(), repo, "fix",
-        runner=RateLimitedRunner(message="TypeError: the agent tripped over its own feet"),
+        runner=RateLimitedRunner(message="TypeError: the agent tripped over its own feet", archive=stores.archive),
     )
     assert outcome.succeeded is False and outcome.rate_limited is False
     assert stores.ledger.get_subscription("ada").backoff_until is None
@@ -153,7 +159,7 @@ def test_a_refused_credential_expires_the_subscription(tmp_path, monkeypatch):
 
     outcome = execute_burst(
         stores, _task(), repo, "fix",
-        runner=RateLimitedRunner(message="AuthenticationError: invalid api key"),
+        runner=RateLimitedRunner(message="AuthenticationError: invalid api key", archive=stores.archive),
     )
     assert outcome.succeeded is False and outcome.rate_limited is False
     row = stores.ledger.get_subscription("ada")
@@ -193,9 +199,9 @@ def test_a_fenced_burst_is_killed_and_a_crashed_one_failed(tmp_path):
     task = _task(status=TaskStatus.WORKING, claimed_by="r1")
     stores.ledger.upsert_task(task)
 
-    fenced = execute_burst(stores, task, repo, "fix", runner=FencedRunner(), heartbeat=lambda: False)
+    fenced = execute_burst(stores, task, repo, "fix", runner=FencedRunner(archive=stores.archive), heartbeat=lambda: False)
     assert (fenced.burst.status, fenced.exit_code, fenced.succeeded) == (BurstStatus.KILLED, 137, False)
     assert stores.ledger.get_burst(fenced.burst.burst_id).status == BurstStatus.KILLED
 
-    crashed = execute_burst(stores, task, repo, "fix", runner=CrashedRunner(), heartbeat=lambda: True)
+    crashed = execute_burst(stores, task, repo, "fix", runner=CrashedRunner(archive=stores.archive), heartbeat=lambda: True)
     assert (crashed.burst.status, crashed.exit_code, crashed.succeeded) == (BurstStatus.FAILED, 137, False)
