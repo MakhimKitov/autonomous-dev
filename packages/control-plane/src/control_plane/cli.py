@@ -941,7 +941,11 @@ def _run_burst(args: argparse.Namespace) -> int:
             fresh=args.fresh,
             with_github=True,  # the manual burst mirrors a dev burst
         )
-    except (GitHubAuthError, RoleError) as exc:
+    except (GitHubAuthError, RoleError, RegistryError, ArchiveError) as exc:
+        # RegistryError: the hand-run verb met the registry wall — on the service
+        # ledger a task names a registered product (#90). ArchiveError: the
+        # session node the ledger named is gone or does not match (#87). Both are
+        # refusals a person reads, not stacks they decipher.
         print(f"error: {exc}", file=sys.stderr)
         return 2
     trace.get_tracer_provider().shutdown()  # type: ignore[attr-defined]

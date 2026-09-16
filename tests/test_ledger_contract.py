@@ -1476,6 +1476,21 @@ def test_a_wake_notifies_the_wake_channel_and_subscribers_hear_it(pg_dsn):
 
 
 @needs_postgres
+def test_a_task_that_names_no_registered_product_is_refused_in_words(ledger, request):
+    """The registry wall (C1, 0012) is right; the traceback was not (#90). A
+    caller — the hand-run `burst` verb, a bug, a console later — meets the same
+    kind of refusal a registry verb gives, and psycopg's exception stays inside
+    the backend that speaks it."""
+    if request.node.callspec.params["ledger"] != "postgres":
+        pytest.skip("the wall is the service ledger's: SQLite has no foreign key here, by design")
+    with pytest.raises(RegistryError, match="is not a registered product"):
+        ledger.create_task(
+            TaskRecord(task_id="ghost/none#1", repository="ghost/none", issue_number=1)
+        )
+    assert ledger.get_task("ghost/none#1") is None
+
+
+@needs_postgres
 def test_a_dropped_connection_costs_a_reconnect_not_the_loop(pg_dsn):
     """A scheduler outlives database restarts; the next statement should just work."""
     from control_plane.postgres import PostgresLedger

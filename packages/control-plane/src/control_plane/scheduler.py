@@ -74,7 +74,7 @@ from control_plane.review import (
     parse_findings,
 )
 from control_plane.runner import DEFAULT_IMAGE, Runner, open_runner
-from control_plane.store import ArchiveError
+from control_plane.store import ArchiveError, RegistryError
 from control_plane.subscriptions import (
     Capacity,
     CapacityExhausted,
@@ -667,6 +667,13 @@ class Scheduler:
             log.error("session snapshot unusable", task=task.task_id, error=str(exc))
             self._register_failure(task, f"session snapshot unusable: {exc}")
             return
+        except RegistryError as exc:
+            # the ledger refused the task on the way in — the product left the
+            # registry between this tick's read and the spawn (#90). Same rule as
+            # every other refusal here: the attempt fails, the replica lives
+            log.error("the ledger refused the task", task=task.task_id, error=str(exc))
+            self._register_failure(task, str(exc))
+            return
         finally:
             self.current_burst_id = None
 
@@ -766,6 +773,13 @@ class Scheduler:
             # which resolves the same leaf — so this is an attempt, not a crash
             log.error("session snapshot unusable", task=task.task_id, error=str(exc))
             self._register_failure(task, f"session snapshot unusable: {exc}")
+            return
+        except RegistryError as exc:
+            # the ledger refused the task on the way in — the product left the
+            # registry between this tick's read and the spawn (#90). Same rule as
+            # every other refusal here: the attempt fails, the replica lives
+            log.error("the ledger refused the task", task=task.task_id, error=str(exc))
+            self._register_failure(task, str(exc))
             return
         finally:
             self.current_burst_id = None
@@ -885,6 +899,13 @@ class Scheduler:
             # which resolves the same leaf — so this is an attempt, not a crash
             log.error("session snapshot unusable", task=task.task_id, error=str(exc))
             self._register_failure(task, f"session snapshot unusable: {exc}")
+            return
+        except RegistryError as exc:
+            # the ledger refused the task on the way in — the product left the
+            # registry between this tick's read and the spawn (#90). Same rule as
+            # every other refusal here: the attempt fails, the replica lives
+            log.error("the ledger refused the task", task=task.task_id, error=str(exc))
+            self._register_failure(task, str(exc))
             return
         finally:
             self.current_burst_id = None

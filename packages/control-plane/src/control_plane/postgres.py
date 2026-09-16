@@ -561,9 +561,19 @@ class PostgresLedger:
         data = _bind(task, _TASK_TIMESTAMPS)
         columns = ", ".join(data)
         placeholders = ", ".join(f"%({column})s" for column in data)
-        cursor = self._execute(
-            f"INSERT INTO tasks ({columns}) VALUES ({placeholders}) ON CONFLICT DO NOTHING", data
-        )
+        try:
+            cursor = self._execute(
+                f"INSERT INTO tasks ({columns}) VALUES ({placeholders}) ON CONFLICT DO NOTHING", data
+            )
+        except psycopg.errors.ForeignKeyViolation:
+            # the registry wall (C1, 0012): a task names a registered product.
+            # The wall is right and the traceback was not — a caller gets the
+            # same refusal here it would get from a registry verb, and the
+            # backend's own exception stays in the backend (#90)
+            raise RegistryError(
+                f"{task.repository} is not a registered product — "
+                f"`control-plane product register {task.repository} --team …` first"
+            ) from None
         return cursor.rowcount == 1
 
     def transition_task(
