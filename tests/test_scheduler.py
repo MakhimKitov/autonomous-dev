@@ -23,6 +23,7 @@ from control_plane.models import (
     utc_now,
 )
 from control_plane.review import ReviewPolicy
+from control_plane.store import ArchiveError
 from control_plane.runner import HostPhases
 from control_plane.scheduler import Rails, Scheduler
 from control_plane.subscriptions import declare
@@ -527,6 +528,34 @@ def test_a_spent_token_is_retried_on_another_without_spending_an_attempt(rig, mo
     # who pays, not what the work remembers (`execute_burst` resumes from it)
     assert stores.ledger.get_task(tid(1)).session_id == "sess-9"
     assert stores.ledger.get_task(tid(1)).status == TaskStatus.AWAITING_REVIEW
+
+
+def test_an_unusable_session_snapshot_fails_the_attempt_and_not_the_replica(rig, monkeypatch):
+    """#87: the archive no longer holds the node the ledger named — pruned,
+    offline, or bytes that disagree with the recorded checksum. That used to
+    leave `execute_burst` with an uncaught `ArchiveError`, killing the replica;
+    its peer then resolved the same leaf and died the same way. It is an attempt
+    on the task, and the rails park it with the key in the comment."""
+    scheduler, api, stores, spawned, _ = rig
+
+    def gone(*args, **kwargs):
+        raise ArchiveError("no snapshot at sessions/owner1/product#1/b-old/session.tar.gz")
+
+    monkeypatch.setattr(sched_mod, "execute_burst", gone)
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+
+    scheduler.tick()  # no exception reaches the loop
+    task = stores.ledger.get_task(tid(1))
+    assert (task.status, task.attempts) == (TaskStatus.CLAIMED, 1)
+
+    api.ready_issues = []
+    scheduler.tick()  # the rail trips at max_attempts=2
+    task = stores.ledger.get_task(tid(1))
+    assert task.status == TaskStatus.BLOCKED
+    parked = [body for _, body in api.comments if "parking this task" in body]
+    assert parked and "session snapshot unusable" in parked[0]
+    assert "sessions/owner1/product#1/b-old/session.tar.gz" in parked[0]  # the key, for whoever looks
 
 
 def test_the_org_stop_freezes_the_tick(rig):
