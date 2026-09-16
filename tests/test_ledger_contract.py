@@ -925,6 +925,36 @@ def test_set_changes_the_row_and_bumps_updated_at(ledger):
     assert after.state == before.state  # set never touches it
 
 
+def test_bursts_per_product_is_one_answer_for_the_whole_fleet(ledger):
+    """Fair share's numerator (H1): one statement, every product at once — asking
+    per product would make N reads out of one and let the answers disagree with
+    each other mid-tick."""
+    ledger.register_repository(RepositoryRecord(repository="owner/second", team="bots"), "op")
+    ledger.upsert_task(_task(1))
+    ledger.upsert_task(
+        TaskRecord(task_id="owner/second#1", repository="owner/second", issue_number=1)
+    )
+    old = "2026-09-01T00:00:00+00:00"
+    now = "2026-09-16T12:00:00+00:00"
+    for burst_id, task_id, at in (
+        ("b1", tid(1), now), ("b2", tid(1), now), ("b3", "owner/second#1", now),
+        ("b4", tid(1), old),  # before the window: another day's fairness, not this one
+    ):
+        burst = BurstRecord(burst_id=burst_id, task_id=task_id, started_at=at)
+        ledger.record_burst(burst)
+        # finished, one at a time: a task has at most one *running* burst (A4)
+        burst.status = BurstStatus.SUCCEEDED
+        burst.finished_at = at
+        burst.exit_code = 0
+        ledger.finish_burst(burst)
+
+    assert ledger.bursts_per_product_since("2026-09-16T00:00:00+00:00") == {
+        REPOSITORY: 2, "owner/second": 1,
+    }
+    assert ledger.bursts_per_product_since("2026-01-01T00:00:00+00:00")[REPOSITORY] == 3
+    assert ledger.bursts_per_product_since("2027-01-01T00:00:00+00:00") == {}
+
+
 # --- the subscription pool (F1) ---
 
 

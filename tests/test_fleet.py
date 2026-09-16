@@ -10,9 +10,18 @@ import pytest
 from control_plane import cli
 from control_plane.bursts import PlatformStores
 from control_plane.github_api import GitHubApiError
-from control_plane.models import ProductState, RepositoryRecord, TaskRecord, task_id_for
+from control_plane.models import (
+    BurstRecord,
+    BurstStatus,
+    ProductState,
+    RepositoryRecord,
+    TaskRecord,
+    task_id_for,
+    utc_now,
+)
 from control_plane.review import ReviewPolicyError
 from control_plane.scheduler import Fleet
+from control_plane.subscriptions import declare
 
 A = "owner/alpha"
 B = "owner/beta"
@@ -67,8 +76,10 @@ class FakeScheduler:
             task_id=task_id_for(self.slug, 1), repository=self.slug, issue_number=1
         )
 
-    def run_task_burst(self, task):
+    def run_task_burst(self, task, capacity=None):
+        # the fleet picks who pays once per tick (H1) and hands it down
         self.journal.append(("burst", self.slug))
+        self.capacity = capacity
 
 
 @pytest.fixture()
@@ -187,6 +198,108 @@ def test_an_observe_failure_skips_the_product_not_the_fleet(rig):
 
     fleet.tick()
     assert bursts(journal) == [B]
+
+
+# --- fair share, and the pool (H1) ---
+
+
+def a_burst_of(stores, slug, burst_id, *, at=None):
+    """A burst that happened, as the ledger holds it — fair share's numerator is
+    an aggregate over these, never a counter anyone maintains."""
+    task_id = task_id_for(slug, 1)
+    stores.ledger.upsert_task(TaskRecord(task_id=task_id, repository=slug, issue_number=1))
+    stores.ledger.record_burst(BurstRecord(burst_id=burst_id, task_id=task_id, started_at=at or utc_now()))
+
+
+def test_the_turn_follows_the_weights_the_operator_declared(rig):
+    """H1's done-when: a product at twice the share is served twice as often.
+
+    The window's history is the input, so the test writes it: with B already
+    served twice and A once, A is next at equal weights — and with B's share
+    doubled the ratio flips, because two bursts against a weight of 2 is the
+    same claim on the fleet as one against 1.
+    """
+    fleet, stores, fakes, journal, _ = rig
+    register(stores, A)
+    register(stores, B)
+    fleet.tick()
+    fakes[A].claimable = fakes[B].claimable = True
+    a_burst_of(stores, B, "b-1")
+    a_burst_of(stores, B, "b-2")
+    a_burst_of(stores, A, "a-1")
+
+    journal.clear()
+    fleet.tick()
+    assert bursts(journal) == [A]  # 1/1 beats 2/1
+
+    stores.ledger.update_repository(B, {"usage_share": 2.0}, "op", "B carries more")
+    journal.clear()
+    fleet.tick()
+    assert bursts(journal) == [B]  # 2/2 now beats A's 2/1 — the weight is the denominator
+
+
+def test_equal_weights_and_equal_service_fall_back_to_taking_turns(rig):
+    """The C4 order survives underneath: with nothing to separate two products,
+    the one served least *recently* goes, so they alternate instead of one name
+    always winning."""
+    fleet, stores, fakes, journal, _ = rig
+    register(stores, A)
+    register(stores, B)
+    fleet.tick()
+    fakes[A].claimable = fakes[B].claimable = True
+
+    journal.clear()
+    fleet.tick()
+    first = bursts(journal)[0]
+    journal.clear()
+    fleet.tick()
+    assert bursts(journal) == [B if first == A else A]
+
+
+def test_an_exhausted_pool_ends_the_tick_without_touching_a_task(rig, monkeypatch):
+    """The pool is the platform's, not a product's: an empty one is empty for
+    everybody. Asking per product would claim a task, give it back, and announce
+    the same exhaustion once per product — so the fleet asks once, says so once,
+    and leaves every task where it was."""
+    fleet, stores, fakes, journal, _ = rig
+    register(stores, A)
+    register(stores, B)
+    fleet.tick()
+    fakes[A].claimable = fakes[B].claimable = True
+    stores.ledger.register_subscription(
+        declare("ada", "env:ADA_TOKEN", 1_000, "2027-09-01"), actor="op"
+    )
+    spent = BurstRecord(burst_id="b-spent", task_id=task_id_for(A, 1), subscription_id="ada")
+    stores.ledger.upsert_task(TaskRecord(task_id=task_id_for(A, 1), repository=A, issue_number=1))
+    stores.ledger.record_burst(spent)
+    spent.status = BurstStatus.SUCCEEDED
+    spent.finished_at = utc_now()
+    spent.exit_code = 0
+    spent.input_tokens = 1_000
+    stores.ledger.finish_burst(spent)
+
+    journal.clear()
+    fleet.tick()
+    assert bursts(journal) == []  # nothing ran
+    assert ("observe", A) in journal and ("observe", B) in journal  # but the world was still read
+    (event,) = [e for e in stores.ledger.events() if e.kind == "capacity_exhausted"]
+    assert event.payload["products"] == 2  # once for the fleet, not once per product
+    assert stores.ledger.get_repository(A).last_burst_at is None  # no turn was spent
+
+
+def test_the_fleet_picks_who_pays_and_hands_it_down(rig, monkeypatch):
+    fleet, stores, fakes, journal, _ = rig
+    monkeypatch.setenv("ADA_TOKEN", "adas-secret")
+    register(stores, A)
+    stores.ledger.register_subscription(
+        declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), actor="op"
+    )
+    fleet.tick()
+    fakes[A].claimable = True
+
+    fleet.tick()
+    assert fakes[A].capacity.subscription_id == "ada"
+    assert fakes[A].capacity.token == "adas-secret"
 
 
 def test_the_turn_is_stamped_when_taken(rig):

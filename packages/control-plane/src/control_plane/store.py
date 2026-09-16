@@ -426,6 +426,7 @@ class Ledger(Protocol):
         self, repository: str | None = None, *, orphaned: bool = False
     ) -> list[BurstRecord]: ...
     def bursts_started_since(self, since_iso: str, repository: str | None = None) -> int: ...
+    def bursts_per_product_since(self, since_iso: str) -> dict[str, int]: ...
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
     def events(self, after_id: int = 0) -> list[Event]: ...
@@ -1239,6 +1240,19 @@ class SqliteLedger:
                 (utc_iso(since_iso), repository),
             ).fetchone()
         return int(row["n"])
+
+    def bursts_per_product_since(self, since_iso: str) -> dict[str, int]:
+        """How many bursts each product has had since an instant — the numerator
+        of fair share (H1). One statement for the whole fleet, because the
+        question is about the fleet: asking per product would make N reads out of
+        one and let the answers disagree with each other mid-tick."""
+        rows = self._conn.execute(
+            "SELECT t.repository AS repository, COUNT(*) AS n "
+            "FROM bursts b JOIN tasks t ON t.task_id = b.task_id "
+            "WHERE b.started_at >= ? GROUP BY t.repository",
+            (utc_iso(since_iso),),
+        ).fetchall()
+        return {row["repository"]: int(row["n"]) for row in rows}
 
     def touch_repository_burst(self, repository: str, at: str) -> None:
         """Stamp the least-recently-served cursor (C4) — the fleet marks the
