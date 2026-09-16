@@ -66,6 +66,8 @@ from control_plane.models import (
     BurstRecord,
     Event,
     OrgStop,
+    MemoryEntry,
+    MemoryStatus,
     ProductState,
     RepositoryRecord,
     RoleRecord,
@@ -254,6 +256,42 @@ def _already_contributed(subscription_id: str, *, check: bool) -> str:
     )
 
 
+class MemoryError_(RuntimeError):
+    """A proposal the platform must refuse."""
+
+
+def check_proposal(entry: MemoryEntry) -> MemoryEntry:
+    """The one gate every proposal passes, in both backends (TO-BE §9).
+
+    Three rules, and each is a wall rather than a preference. **Evidence is
+    required**: memory is injected as data an agent may verify, and an entry
+    without it is an instruction wearing a datum's clothes. **Scope decides
+    containment**: a product entry names its repository — which the harvest
+    derives from the burst, never from the proposal, so one product's burst
+    cannot write into another's memory. And **status is `proposed`, always**:
+    nothing a burst writes promotes itself into recall.
+    """
+    claim, evidence = entry.claim.strip(), entry.evidence.strip()
+    if not claim or not evidence:
+        raise MemoryError_("a memory entry is a claim with its evidence — both, or it is not one")
+    if entry.scope not in (MEMORY_SCOPES):
+        raise MemoryError_(f"memory scope is product, role or platform — {entry.scope!r} is none")
+    if (entry.scope == "product") != bool(entry.repository):
+        raise MemoryError_("a product entry names its product, and only a product entry does")
+    if (entry.scope == "role") != bool(entry.role):
+        raise MemoryError_("a role entry names its role, and only a role entry does")
+    return MemoryEntry(
+        scope=entry.scope, claim=claim, evidence=evidence,
+        repository=entry.repository, role=entry.role,
+        proposed_by_burst=entry.proposed_by_burst,
+        status=MemoryStatus.PROPOSED,  # whatever the proposal said
+        created_at=entry.created_at, updated_at=entry.updated_at,
+    )
+
+
+MEMORY_SCOPES = ("product", "role", "platform")
+
+
 def _check_stop_reason(reason: str) -> None:
     """The org STOP's one rule (E3), in the one place both backends pass
     through: a stop names why. The reason is what every replica logs while it
@@ -432,6 +470,10 @@ class Ledger(Protocol):
     def events(self, after_id: int = 0) -> list[Event]: ...
     def record_event(self, kind: str, payload: dict) -> None: ...
     def events_of_kind_since(self, kind: str, since: str) -> list[Event]: ...
+    def propose_memory(self, entry: MemoryEntry) -> MemoryEntry: ...
+    def memory_entries(
+        self, scope: str | None = None, repository: str | None = None
+    ) -> list[MemoryEntry]: ...
     def close(self) -> None: ...
 
 
@@ -627,6 +669,24 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
+);
+-- memory_entries — what the platform learned (TO-BE §9), the SQLite twin of
+-- 0002's table. The scope checks are the containment: a `product` entry names a
+-- repository and a `role` entry names a role, so a scope-filtered read cannot
+-- accidentally return an entry that belongs to nobody.
+CREATE TABLE IF NOT EXISTS memory_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL CHECK (scope IN ('product', 'platform', 'role')),
+    repository TEXT,
+    role TEXT,
+    claim TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    proposed_by_burst TEXT,
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'active', 'retired')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK ((scope = 'product') = (repository IS NOT NULL)),
+    CHECK ((scope = 'role') = (role IS NOT NULL))
 );
 """
 
@@ -1331,6 +1391,42 @@ class SqliteLedger:
                   created_at=row["created_at"])
             for row in rows
         ]
+
+    def propose_memory(self, entry: MemoryEntry) -> MemoryEntry:
+        """Store one proposal, with its provenance (TO-BE §9, H4).
+
+        The write path is the harvest's and nothing else's: a burst proposes,
+        this stores, and the status is `proposed` whatever the proposal said —
+        no entry promotes itself into recall. What comes back carries the id the
+        ledger gave it, so a caller can say which row it wrote."""
+        entry = check_proposal(entry)
+        data = asdict(entry)
+        data.pop("id")
+        cols = ", ".join(data)
+        placeholders = ", ".join(f":{k}" for k in data)
+        cursor = self._conn.execute(
+            f"INSERT INTO memory_entries ({cols}) VALUES ({placeholders})", data
+        )
+        self._conn.commit()
+        entry.id = cursor.lastrowid
+        return entry
+
+    def memory_entries(self, scope: str | None = None, repository: str | None = None) -> list[MemoryEntry]:
+        """What is remembered, scope-filtered — the read the console and the
+        gardener will use (T2). The prompt-assembly read path is not this one and
+        does not exist yet: it is scope *and* weight, and weight is T2's."""
+        where, params = [], {}
+        if scope is not None:
+            where.append("scope = :scope")
+            params["scope"] = scope
+        if repository is not None:
+            where.append("repository = :repository")
+            params["repository"] = repository
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM memory_entries{clause} ORDER BY id", params
+        ).fetchall()
+        return [MemoryEntry(**dict(row)) for row in rows]
 
     def record_event(self, kind: str, payload: dict) -> None:
         """An event that announces *no* mutation — the outbox's other shape (F2).

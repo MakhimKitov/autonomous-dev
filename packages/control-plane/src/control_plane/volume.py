@@ -28,8 +28,13 @@ from pathlib import Path
 
 from dev_agent.env import BURST_RESULT_FILENAME, VIOLATIONS_FILENAME
 
-from control_plane.models import BurstRecord, BurstStatus, Violation
-from control_plane.store import ArchiveError, Ledger, SessionArchive
+from control_plane.models import BurstRecord, BurstStatus, MemoryEntry, Violation
+import structlog
+
+from control_plane.store import ArchiveError, Ledger, MemoryError_, SessionArchive
+
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,13 @@ class BurstArtifacts:
     violations: list[dict] = field(default_factory=list)
     session_key: str | None = None
     session_checksum: str | None = None
+
+    @property
+    def memories(self) -> list[dict]:
+        """What the burst proposed to remember — part of the result contract
+        (TO-BE §9), so it travels wherever the result does, including out of a
+        pod through the harvester's record."""
+        return list((self.result or {}).get("memories") or [])
 
 
 @dataclass(slots=True)
@@ -155,6 +167,28 @@ def fold_artifacts(
         burst.num_turns = result.get("num_turns")
         if result.get("is_error"):
             burst.status = BurstStatus.FAILED
+
+    # What the burst proposes to remember (TO-BE §9, H4). The scope is *derived*
+    # — a product entry names the burst's own product, taken from its task id —
+    # so a burst cannot write into another product's memory even by asking to;
+    # and `propose_memory` forces the status, so nothing promotes itself into
+    # recall. A malformed proposal is dropped with a line, never a failed burst:
+    # the deliverable was the work, and this is a by-product of having done it.
+    repository = burst.task_id.rsplit("#", 1)[0] if "#" in burst.task_id else None
+    for proposal in artifacts.memories:
+        try:
+            stored = ledger.propose_memory(
+                MemoryEntry(
+                    scope="product" if repository else "platform",
+                    claim=str(proposal.get("claim") or ""),
+                    evidence=str(proposal.get("evidence") or ""),
+                    repository=repository,
+                    proposed_by_burst=burst.burst_id,
+                )
+            )
+            log.info("memory proposed", entry=stored.id, burst=burst.burst_id, scope=stored.scope)
+        except MemoryError_ as exc:
+            log.warning("a memory proposal was refused", burst=burst.burst_id, reason=str(exc))
 
     for entry in artifacts.violations:
         ledger.record_violation(

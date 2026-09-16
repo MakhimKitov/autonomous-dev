@@ -73,6 +73,7 @@ from control_plane.models import (
     OrgStop,
     ProductState,
     RepositoryRecord,
+    MemoryEntry,
     RoleRecord,
     SubscriptionRecord,
     SubscriptionStatus,
@@ -93,6 +94,7 @@ from control_plane.store import (
     _pool_refusal,
     _pool_transition,
     _registry_transition,
+    check_proposal,
 )
 from control_plane.subscriptions import SubscriptionError, check_cap, check_ref
 from control_plane.subscriptions import check_settable as check_subscription_settable
@@ -119,6 +121,7 @@ _REPOSITORY_TIMESTAMPS = ("last_burst_at", "claimed_until", "registered_at", "up
 _AUDIT_TIMESTAMPS = ("at",)
 _ROLE_TIMESTAMPS = ("created_at", "updated_at")
 _SUBSCRIPTION_TIMESTAMPS = ("expires_at", "backoff_until", "registered_at")
+_MEMORY_TIMESTAMPS = ("created_at", "updated_at")
 
 # numeric → float on load; see the module docstring.
 _BURST_NUMERICS = ("cost_usd",)
@@ -951,6 +954,36 @@ class PostgresLedger:
             (kind, _to_datetime(since)),
         ).fetchall()
         return [_load(row, Event, _EVENT_TIMESTAMPS) for row in rows]
+
+    def propose_memory(self, entry: MemoryEntry) -> MemoryEntry:
+        """Store one proposal with its provenance (H4) — see the SQLite backend
+        for the three rules `check_proposal` holds every proposal to."""
+        entry = check_proposal(entry)
+        data = _bind(entry, _MEMORY_TIMESTAMPS)
+        data.pop("id")
+        columns = ", ".join(data)
+        placeholders = ", ".join(f"%({column})s" for column in data)
+        row = self._execute(
+            f"INSERT INTO memory_entries ({columns}) VALUES ({placeholders}) RETURNING id", data
+        ).fetchone()
+        entry.id = int(row["id"])
+        return entry
+
+    def memory_entries(
+        self, scope: str | None = None, repository: str | None = None
+    ) -> list[MemoryEntry]:
+        where, params = [], {}
+        if scope is not None:
+            where.append("scope = %(scope)s")
+            params["scope"] = scope
+        if repository is not None:
+            where.append("repository = %(repository)s")
+            params["repository"] = repository
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        rows = self._execute(
+            f"SELECT * FROM memory_entries{clause} ORDER BY id", params
+        ).fetchall()
+        return [_load(row, MemoryEntry, _MEMORY_TIMESTAMPS) for row in rows]
 
     def record_event(self, kind: str, payload: dict) -> None:
         """An event announcing no mutation (F2) — see the SQLite backend. The

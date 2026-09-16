@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -57,6 +58,10 @@ class BurstResult:
     output_tokens: int | None = None
     is_error: bool = False
     error: str | None = None  # what killed the burst, when something did
+    # What this burst learned that outlives it (TO-BE §9, H2 of Stage H): claims
+    # with evidence, *proposed* — the control plane stores them with provenance
+    # and nothing here is trusted into recall. Empty is the normal case.
+    memories: list[dict] = field(default_factory=list)
     duration_s: float | None = None
     finished_at: str = ""
     text_tail: str = ""
@@ -157,8 +162,51 @@ async def run_burst(env: BurstEnv) -> BurstResult:
         result.finished_at = datetime.now(UTC).isoformat()
         result.text_tail = "".join(chunks)[-TEXT_TAIL_CHARS:]
         result.final_text = "".join(final_parts)[-FINAL_TEXT_CHARS:]
+        result.memories = proposed_memories(result.final_text)
         write_result(env, result)
     return result
+
+
+# What a burst may propose, and how much of it. Caps rather than validation:
+# the platform decides what a proposal *means* (§9) — this side only makes sure
+# a runaway final message cannot become a thousand rows.
+MAX_MEMORIES = 10
+MAX_MEMORY_CHARS = 500
+
+
+def proposed_memories(final_text: str) -> list[dict]:
+    """The `{"memories": [...]}` block a burst may end with, if it ends with one.
+
+    Optional by design, and never fatal: a dev burst's deliverable is a pull
+    request, not a JSON document, so a missing block is the normal case and a
+    malformed one is worth nothing more than being ignored. (The tester's report
+    is the opposite — there the JSON *is* the deliverable, and
+    `testing.parse_report` refuses rather than shrugs.)
+
+    Claim and evidence are both required here, because an entry without evidence
+    is an instruction wearing a datum's clothes, and §9's whole rule is that
+    memory is data an agent may verify.
+    """
+    text = (final_text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    candidate = fenced.group(1) if fenced else text[text.find("{") : text.rfind("}") + 1]
+    if not candidate.strip():
+        return []
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    proposals = []
+    for item in (data.get("memories") or [])[:MAX_MEMORIES]:
+        if not isinstance(item, dict):
+            continue
+        claim = str(item.get("claim") or "").strip()[:MAX_MEMORY_CHARS]
+        evidence = str(item.get("evidence") or "").strip()[:MAX_MEMORY_CHARS]
+        if claim and evidence:
+            proposals.append({"claim": claim, "evidence": evidence})
+    return proposals
 
 
 def write_result(env: BurstEnv, result: BurstResult) -> None:
