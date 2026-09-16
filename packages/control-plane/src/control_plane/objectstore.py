@@ -181,6 +181,18 @@ class ObjectSessionArchive:
                 )
             untar(blob, dest_dir)
 
+    def read_object(self, key: str) -> bytes | None:
+        """The raw bytes at `key` — the harvester's record (G2), not a snapshot."""
+        from botocore.exceptions import ClientError
+
+        try:
+            answer = self._client.get_object(Bucket=self.bucket, Key=self._object(key))
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404", "NoSuchBucket"):
+                return None
+            raise
+        return answer["Body"].read()
+
     def recorded_checksum(self, key: str) -> str | None:
         head = self._head(key)
         return None if head is None else head.get("Metadata", {}).get(CHECKSUM_METADATA_KEY)

@@ -12,6 +12,12 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# The two files a burst leaves in its volume are declared in `session-volume`
+# (G2): three parties have to agree on them and none may import the others —
+# this worker writes them, the control plane folds them, and the pod-side
+# harvester ships them. Re-exported below so the env contract still reads whole.
+from session_volume import BURST_RESULT_FILENAME, VIOLATIONS_FILENAME
+
 # --- variable names we own (the contract) ---
 ROLE = "AGENT_ROLE"
 TASK_ID = "AGENT_TASK_ID"
@@ -71,8 +77,7 @@ BURST_KINDS = ("work", "review", "assess", "test")
 # --- container filesystem contract (mount points, well-known files) ---
 CONTAINER_SESSION_DIR = "/session"  # control-plane-owned volume; CLAUDE_CONFIG_DIR
 CONTAINER_REPO_DIR = "/workspace/repo"  # the product clone
-BURST_RESULT_FILENAME = "burst-result.json"
-VIOLATIONS_FILENAME = "violations.jsonl"
+__all_shape__ = (BURST_RESULT_FILENAME, VIOLATIONS_FILENAME)  # imported above, re-exported here
 
 # Walls are hooks + the container + the scoped token — not interactive prompts,
 # which nobody is present to answer.

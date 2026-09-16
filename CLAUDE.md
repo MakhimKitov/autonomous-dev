@@ -22,13 +22,17 @@ cp .env.example .env         # add CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-t
 
 ## Layout
 
-Four workspace packages behind the §12 seam — `packages/control-plane` (scheduler,
+Six workspace packages behind the §12 seam — `packages/control-plane` (scheduler,
 owns all persistence + telemetry), `packages/dev-agent` (the burst worker; ships
 alone in the image and **must never import control-plane**), `packages/webhook-receiver`
 (the public HMAC filter, E5; its own image, **must never import control-plane**
-either — CI checks the image) and `packages/secret-refs` (SecretResolver, stdlib
-only — the one module the control plane and the receiver share). The env-var
-contract lives in `dev_agent.env`; control-plane imports it, never the reverse.
+either — CI checks the image), `packages/burst-phases` (the pod-side init and
+harvester, G2; its own image, same rule and same check) and two stdlib-only
+packages the others share: `packages/secret-refs` (SecretResolver) and
+`packages/session-volume` (what a burst leaves in its volume, and how it is
+packed — the one shape the worker, the control plane and the harvester must
+agree on). The env-var contract lives in `dev_agent.env`; control-plane imports
+it, never the reverse.
 
 ## Run
 
@@ -355,6 +359,26 @@ credentials. `open_runner(archive)` hands the runner the archive for the same
 reason the ledger and archive seams are chosen in one place.
 `tests/test_runner_contract.py` holds every runner to the phases as it already
 holds them to the exit code, the tee, the heartbeat and the fence.
+
+**Capabilities, not credentials, beside a burst (G2)**: `packages/burst-phases`
+is the pod's init and harvester — `burst-init` fills the volume (the parent
+snapshot through a presigned GET, checksum checked against what the *ledger*
+recorded; then the clone, with a `contents:read` single-repo token that is
+init's alone) and `burst-harvest` ships what the burst left (the snapshot to its
+key, and a small record — result + violations + the snapshot's checksum — that
+the control plane reads and folds). `control_plane.phases` is the other half:
+`mint_phase_env` hands out one URL per object, time-boxed (`PHASE_URL_TTL_S`,
+the wall-clock rail's stand-in until Stage H gives bursts one), and
+`read_artifacts` turns the record back into the same `BurstArtifacts` a host
+phase produces — so `fold_artifacts` cannot tell where the burst ran. The image
+(`docker/burst-phases/Dockerfile`) carries no control-plane code, no ledger
+client and no cloud SDK: CI checks it the way it checks the receiver's, because
+what is not installed cannot be imported in a pod. `LocalSessionArchive` refuses
+to presign — a directory has no URLs to hand out — which is the message a
+deployment meets if it tries to run bursts off the control plane's own
+filesystem without `ARCHIVE_URL`. `DockerRunner` stays on the host phases (G1):
+it shares that filesystem, so its burst container is handed nothing at all, and
+the zero-standing-credentials property holds on both paths for the same reason.
 
 **Webhooks as wake-up, polls as truth (E5)**: three parts and one wall (TO-BE §5).
 `packages/webhook-receiver` is the platform's only public surface — verify

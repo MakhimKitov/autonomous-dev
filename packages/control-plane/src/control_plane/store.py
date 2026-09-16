@@ -29,7 +29,6 @@ import json
 import os
 import re
 import sqlite3
-import tarfile
 from collections.abc import Callable
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
@@ -37,6 +36,12 @@ from pathlib import Path
 from typing import Protocol
 
 import structlog
+from session_volume import (
+    EXCLUDE_FROM_ARCHIVE,
+    sha256_of,
+    tar_without_credentials,
+    untar,
+)
 
 from control_plane.models import (
     BURST_FINALIZE_COLUMNS,
@@ -122,6 +127,15 @@ class SessionArchive(Protocol):
         """Materialize key into dest_dir. Missing key or checksum mismatch raises."""
         ...
 
+    def read_object(self, key: str) -> bytes | None:
+        """The raw bytes at `key`, or None if nothing is there.
+
+        For objects the control plane never wrote and that are not snapshots —
+        the harvester's artifacts record (G2), which arrives through a presigned
+        PUT from wherever the burst ran. `get` is for snapshots: it untars and
+        checks a checksum, and a record is neither."""
+        ...
+
     def recorded_checksum(self, key: str) -> str | None:
         """The sha256 the archive itself has stored beside the object, if any.
 
@@ -151,7 +165,10 @@ class PresigningArchive(SessionArchive, Protocol):
 # stores .credentials.json under it — i.e. on the session volume we harvest.
 # Env-token auth shouldn't write it, but the exclusion is unconditional.
 # auth.json is codex's credential file (mounted outside the volume — defense only).
-EXCLUDE_FROM_ARCHIVE = {".credentials.json", "auth.json"}
+# The credential exclusion and the packing live in `session-volume` since G2 —
+# the pod-side harvester packs the same way and may not import this package.
+# Re-exported here because callers and tests have always read them from the store.
+__shape__ = (EXCLUDE_FROM_ARCHIVE, tar_without_credentials, untar, sha256_of)
 
 
 class ArchiveError(RuntimeError):
@@ -285,21 +302,14 @@ def _after(now_iso: str, seconds: float) -> str:
     return (datetime.fromisoformat(now_iso) + timedelta(seconds=seconds)).isoformat()
 
 
-def tar_without_credentials(session_dir: Path, destination: Path) -> str:
-    """Tar session_dir to destination, minus credential files. Returns sha256."""
-
-    def _skip_credentials(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        return None if Path(info.name).name in EXCLUDE_FROM_ARCHIVE else info
-
-    with tarfile.open(destination, "w:gz") as tar:
-        tar.add(session_dir, arcname=".", filter=_skip_credentials)
-    return hashlib.sha256(destination.read_bytes()).hexdigest()
-
-
-def untar(blob: Path, dest_dir: Path) -> None:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(blob, "r:gz") as tar:
-        tar.extractall(dest_dir, filter="data")
+# A directory has no URLs to hand out. Said once, because both presign methods
+# refuse with it: a runner that does not share this filesystem — a Job pod, a
+# member's machine — needs an object archive, and this is the message that says
+# so at the moment someone tries.
+_NO_URLS = (
+    "a local directory cannot mint URLs: bursts that run off this filesystem need "
+    "the object archive (set ARCHIVE_URL)"
+)
 
 
 class LocalSessionArchive:
@@ -336,6 +346,16 @@ class LocalSessionArchive:
                 f"checksum mismatch for {key}: ledger says {expected_sha256}, bytes say {actual}"
             )
         untar(blob, dest_dir)
+
+    def read_object(self, key: str) -> bytes | None:
+        blob = self._blob(key)
+        return blob.read_bytes() if blob.is_file() else None
+
+    def presign_get(self, key: str, expires_in: int) -> str:
+        raise ArchiveError(_NO_URLS)
+
+    def presign_put(self, key: str, expires_in: int) -> str:
+        raise ArchiveError(_NO_URLS)
 
     def recorded_checksum(self, key: str) -> str | None:
         blob = self._blob(key)

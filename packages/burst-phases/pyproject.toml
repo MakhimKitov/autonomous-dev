@@ -1,0 +1,19 @@
+[project]
+name = "burst-phases"
+version = "0.1.0"
+description = "The pod-side phases (TO-BE §6): an init that fills a burst's volume from a presigned URL and a harvester that ships what it left. Holds capabilities for single objects, never credentials for a store — and never imports control-plane."
+requires-python = ">=3.12"
+dependencies = [
+    "session-volume",
+]
+
+[project.scripts]
+burst-init = "burst_phases.cli:init_main"
+burst-harvest = "burst_phases.cli:harvest_main"
+
+[tool.uv.sources]
+session-volume = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"

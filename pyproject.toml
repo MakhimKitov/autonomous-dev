@@ -8,9 +8,11 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "burst-phases",
     "control-plane",
     "dev-agent",
     "secret-refs",
+    "session-volume",
     "webhook-receiver",
 ]
 
@@ -18,9 +20,11 @@ dependencies = [
 members = ["packages/*"]
 
 [tool.uv.sources]
+burst-phases = { workspace = true }
 control-plane = { workspace = true }
 dev-agent = { workspace = true }
 secret-refs = { workspace = true }
+session-volume = { workspace = true }
 webhook-receiver = { workspace = true }
 
 [dependency-groups]

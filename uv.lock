@@ -11,9 +11,11 @@ resolution-markers = [
 [manifest]
 members = [
     "autonomous-dev",
+    "burst-phases",
     "control-plane",
     "dev-agent",
     "secret-refs",
+    "session-volume",
     "webhook-receiver",
 ]
 
@@ -53,9 +55,11 @@ name = "autonomous-dev"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "burst-phases" },
     { name = "control-plane" },
     { name = "dev-agent" },
     { name = "secret-refs" },
+    { name = "session-volume" },
     { name = "webhook-receiver" },
 ]
 
@@ -67,9 +71,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "burst-phases", editable = "packages/burst-phases" },
     { name = "control-plane", editable = "packages/control-plane" },
     { name = "dev-agent", editable = "packages/dev-agent" },
     { name = "secret-refs", editable = "packages/secret-refs" },
+    { name = "session-volume", editable = "packages/session-volume" },
     { name = "webhook-receiver", editable = "packages/webhook-receiver" },
 ]
 
@@ -106,6 +112,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/d6/c2/98b8ff6a21a9ed99b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/2f/700d973e3f0a37a275900be1a389af5a4ab67dd9362d17782b17f1045f0b/botocore-1.43.71-py3-none-any.whl", hash = "sha256:7bc3d5ddaca6f68e2eef707714264789048a6f496d375d976c560674f0cd1d1b", size = 15635728, upload-time = "2026-08-13T19:20:26.302Z" },
 ]
+
+[[package]]
+name = "burst-phases"
+version = "0.1.0"
+source = { editable = "packages/burst-phases" }
+dependencies = [
+    { name = "session-volume" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "session-volume", editable = "packages/session-volume" }]
 
 [[package]]
 name = "certifi"
@@ -300,6 +317,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "secret-refs" },
+    { name = "session-volume" },
     { name = "structlog" },
 ]
 
@@ -315,6 +333,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "requests", specifier = ">=2.31" },
     { name = "secret-refs", editable = "packages/secret-refs" },
+    { name = "session-volume", editable = "packages/session-volume" },
     { name = "structlog", specifier = ">=26.1.0" },
 ]
 
@@ -374,12 +393,14 @@ version = "0.1.0"
 source = { editable = "packages/dev-agent" }
 dependencies = [
     { name = "claude-agent-sdk" },
+    { name = "session-volume" },
     { name = "structlog" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.110" },
+    { name = "session-volume", editable = "packages/session-volume" },
     { name = "structlog", specifier = ">=26.1.0" },
 ]
 
@@ -1048,6 +1069,11 @@ wheels = [
 name = "secret-refs"
 version = "0.1.0"
 source = { editable = "packages/secret-refs" }
+
+[[package]]
+name = "session-volume"
+version = "0.1.0"
+source = { editable = "packages/session-volume" }
 
 [[package]]
 name = "six"

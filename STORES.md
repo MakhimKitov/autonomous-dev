@@ -540,12 +540,26 @@ class SessionArchive(Protocol):
         """Materialize key into dest_dir; checksum mismatch raises."""
     def recorded_checksum(self, key: str) -> str | None:
         """What the archive itself stored beside the object. Not the authority."""
+    def read_object(self, key: str) -> bytes | None:
+        """The raw bytes at key, or None. Not a snapshot: the harvester's record."""
+    def presign_get(self, key: str, expires_in: int) -> str: ...
+    def presign_put(self, key: str, expires_in: int) -> str: ...
 ```
 
-Per-object presigned GET/PUT (the three-container pod, T1) is a second protocol
-over the same backend — `PresigningArchive`, implemented by the object store and
-by nothing else, because `DockerRunner` keeps putting and getting in-process and
-should not have to fake a capability it never uses.
+Per-object presigned GET/PUT is what the three-container pod runs on (G2): a
+capability for one object, minted at spawn and expiring inside the burst's rail,
+so nothing beside a burst holds a credential for the store. The object backend
+implements it; **`LocalSessionArchive` refuses** — a directory has no URLs to
+hand out — and the refusal names `ARCHIVE_URL`, because a deployment whose bursts
+run off the control plane's filesystem needs the object archive. `DockerRunner`
+never asks: it shares that filesystem and moves the bytes in-process (G1), which
+is the same property by the cheaper mechanism.
+
+`read_object` is the other half of that path: the harvester PUTs a small record —
+result, violations, and the snapshot's checksum — and the control plane reads it
+back, because the pod's volume is gone the moment the pod is. It is deliberately
+not `get`: `get` untars a snapshot and checks it against the ledger, and a record
+is neither.
 
 **Walking the tree** is one query, not a join through the task row:
 `latest_archived_burst(task_id)` returns the leaf — the newest **dev** burst with
