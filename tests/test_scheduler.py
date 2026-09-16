@@ -23,7 +23,7 @@ from control_plane.models import (
     utc_now,
 )
 from control_plane.review import ReviewPolicy
-from control_plane.store import ArchiveError
+from control_plane.store import ArchiveError, RegistryError
 from control_plane.runner import HostPhases
 from control_plane.scheduler import Rails, Scheduler
 from control_plane.subscriptions import declare
@@ -556,6 +556,25 @@ def test_an_unusable_session_snapshot_fails_the_attempt_and_not_the_replica(rig,
     parked = [body for _, body in api.comments if "parking this task" in body]
     assert parked and "session snapshot unusable" in parked[0]
     assert "sessions/owner1/product#1/b-old/session.tar.gz" in parked[0]  # the key, for whoever looks
+
+
+def test_a_task_the_ledger_refuses_fails_the_attempt_and_not_the_replica(rig, monkeypatch):
+    """#90's other half: the registry wall can refuse a task on the way into a
+    burst, and a refusal is an attempt — not an exception out of the tick. (The
+    product would have to leave the registry between this tick's read and the
+    spawn, which the grants make very unlikely and not impossible.)"""
+    scheduler, api, stores, spawned, _ = rig
+
+    def refused(*args, **kwargs):
+        raise RegistryError("owner1/product is not a registered product — `control-plane product register …` first")
+
+    monkeypatch.setattr(sched_mod, "execute_burst", refused)
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+
+    scheduler.tick()
+    task = stores.ledger.get_task(tid(1))
+    assert (task.status, task.attempts) == (TaskStatus.CLAIMED, 1)
 
 
 def test_the_org_stop_freezes_the_tick(rig):
