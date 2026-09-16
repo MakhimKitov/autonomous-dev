@@ -35,6 +35,7 @@ from control_plane.models import (
     BurstStatus,
     OrgStop,
     ProductState,
+    MemoryEntry,
     RepositoryRecord,
     Role,
     SubscriptionStatus,
@@ -44,7 +45,13 @@ from control_plane.models import (
     task_id_for,
     utc_now,
 )
-from control_plane.store import LEDGER_DSN_ENV, RegistryError, SqliteLedger, session_key
+from control_plane.store import (
+    LEDGER_DSN_ENV,
+    MemoryError_,
+    RegistryError,
+    SqliteLedger,
+    session_key,
+)
 from control_plane.subscriptions import (
     SubscriptionError,
     candidates,
@@ -953,6 +960,71 @@ def test_bursts_per_product_is_one_answer_for_the_whole_fleet(ledger):
     }
     assert ledger.bursts_per_product_since("2026-01-01T00:00:00+00:00")[REPOSITORY] == 3
     assert ledger.bursts_per_product_since("2027-01-01T00:00:00+00:00") == {}
+
+
+# --- platform memory: the write path (H4) ---
+
+
+def _proposal(**overrides):
+    fields = dict(
+        scope="product", claim="the suite needs `uv sync` before it passes",
+        evidence="pytest failed with ModuleNotFoundError until uv sync ran",
+        repository=REPOSITORY, proposed_by_burst="b1",
+    ) | overrides
+    return MemoryEntry(**fields)
+
+
+def test_a_proposal_is_stored_with_its_provenance(ledger):
+    """TO-BE §9: a burst proposes, the platform stores — with the burst that
+    proposed it, which is what makes the entry traceable later."""
+    ledger.upsert_task(_task())
+    ledger.record_burst(_burst())
+
+    stored = ledger.propose_memory(_proposal())
+    assert stored.id is not None and stored.status == "proposed"
+    assert (stored.scope, stored.repository, stored.proposed_by_burst) == ("product", REPOSITORY, "b1")
+
+    (back,) = ledger.memory_entries()
+    assert (back.claim, back.evidence) == (stored.claim, stored.evidence)
+    assert ledger.memory_entries(scope="product", repository=REPOSITORY) == [back]
+    assert ledger.memory_entries(repository="owner/elsewhere") == []
+
+
+def test_nothing_a_burst_writes_promotes_itself(ledger):
+    """The status is the platform's, whatever the proposal said: memory that
+    could make itself trusted is not memory, it is an instruction."""
+    ledger.upsert_task(_task())
+    ledger.record_burst(_burst())
+    stored = ledger.propose_memory(_proposal(status="active"))
+    assert stored.status == "proposed"
+    assert ledger.memory_entries()[0].status == "proposed"
+
+
+def test_an_entry_without_evidence_is_refused(ledger):
+    for bad in (_proposal(evidence="  "), _proposal(claim="")):
+        with pytest.raises(MemoryError_, match="claim with its evidence"):
+            ledger.propose_memory(bad)
+    assert ledger.memory_entries() == []
+
+
+def test_scope_and_what_it_names_have_to_agree(ledger):
+    """Containment is the scope's job (§9): a product entry names its product,
+    and a scope-filtered read can never return an entry belonging to nobody."""
+    with pytest.raises(MemoryError_, match="names its product"):
+        ledger.propose_memory(_proposal(repository=None))
+    with pytest.raises(MemoryError_, match="names its product"):
+        ledger.propose_memory(_proposal(scope="platform", repository=REPOSITORY))
+    with pytest.raises(MemoryError_, match="names its role"):
+        ledger.propose_memory(_proposal(scope="role", repository=None))
+    with pytest.raises(MemoryError_, match="is none"):
+        ledger.propose_memory(_proposal(scope="whatever"))
+    assert ledger.memory_entries() == []
+
+    platform_wide = ledger.propose_memory(
+        MemoryEntry(scope="platform", claim="GitHub's read side lags its webhooks",
+                    evidence="a ready label listed 0.75s after it landed (E6)")
+    )
+    assert platform_wide.repository is None and platform_wide.role is None
 
 
 # --- the subscription pool (F1) ---

@@ -31,6 +31,41 @@ def _burst(burst_id, task_id="42", **kwargs):
     return BurstRecord(burst_id=burst_id, task_id=task_id, **kwargs)
 
 
+def test_what_a_burst_proposes_to_remember_becomes_a_row_with_its_provenance(stores, tmp_path):
+    """H4: the write path is the harvest's (TO-BE §9). The scope is derived from
+    the burst's own task, so a burst cannot write into another product's memory
+    even by asking to, and the status is the platform's, so nothing promotes
+    itself into recall."""
+    archive, ledger = stores
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
+    (volume / BURST_RESULT_FILENAME).write_text(
+        json.dumps({
+            "session_id": "s1",
+            "memories": [
+                {"claim": "the suite needs `uv sync` first", "evidence": "ModuleNotFoundError until it ran"},
+                {"claim": "no evidence given", "evidence": "   "},
+                {"claim": "", "evidence": "nothing claimed"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    burst = _burst("b1", task_id="owner/product#42")
+    harvest(volume, burst, archive, ledger)
+
+    (entry,) = ledger.memory_entries()
+    assert entry.claim == "the suite needs `uv sync` first"
+    assert entry.scope == "product" and entry.repository == "owner/product"
+    assert entry.proposed_by_burst == "b1" and entry.status == "proposed"
+
+
+def test_a_burst_that_learned_nothing_proposes_nothing(stores, tmp_path):
+    archive, ledger = stores
+    volume = materialize_volume(tmp_path / "volumes" / "b1", archive)
+    (volume / BURST_RESULT_FILENAME).write_text(json.dumps({"session_id": "s1"}), encoding="utf-8")
+    harvest(volume, _burst("b1", task_id="owner/product#42"), archive, ledger)
+    assert ledger.memory_entries() == []
+
+
 def harvest(volume, burst, archive, ledger, archive_session=True):
     """The two phases as `execute_burst` runs them: bytes out, then rows in."""
     artifacts = collect_volume(

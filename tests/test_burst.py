@@ -120,6 +120,34 @@ def test_final_text_is_the_last_assistant_message(tmp_path, monkeypatch):
     assert "Let me look" in result.text_tail  # the tail still keeps the narrative
 
 
+def test_a_burst_may_propose_what_it_learned_and_usually_proposes_nothing(tmp_path, monkeypatch):
+    """The result contract's `memories` field (TO-BE §9, H4). Optional by
+    design: a dev burst's deliverable is a pull request, not a JSON document, so
+    a missing block is the ordinary case and a malformed one is worth nothing
+    more than being ignored — the opposite of the tester's report, where the
+    JSON *is* the deliverable and a bad one is refused."""
+    from dev_agent.burst import proposed_memories
+
+    said = (
+        "I opened the PR.\n\n```json\n"
+        '{"memories": [{"claim": "the sandbox has no network on port 443",'
+        ' "evidence": "curl timed out in three scenarios"},'
+        ' {"claim": "unsupported", "evidence": ""}]}'
+        "\n```"
+    )
+    assert proposed_memories(said) == [
+        {"claim": "the sandbox has no network on port 443",
+         "evidence": "curl timed out in three scenarios"},
+    ]
+    assert proposed_memories("I opened the PR and left a comment.") == []
+    assert proposed_memories("```json\n{not json at all}\n```") == []
+    assert proposed_memories("") == []
+
+    # and the caps: a runaway final message cannot become a thousand rows
+    many = {"memories": [{"claim": f"c{i}", "evidence": "e"} for i in range(50)]}
+    assert len(proposed_memories(json.dumps(many))) == 10
+
+
 def test_tool_use_is_logged_but_never_contaminates_final_text(tmp_path, monkeypatch, capsys):
     """A silent burst looks hung from outside — tool calls must reach the log;
     they must not leak into final_text (the structured-output channel)."""

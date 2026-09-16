@@ -191,6 +191,43 @@ class SubscriptionRecord:
     registered_at: str = field(default_factory=utc_now)
 
 
+class MemoryStatus(StrEnum):
+    """A memory entry's standing (TO-BE §9). A burst may only ever produce
+    `proposed`: nothing a burst writes promotes itself into recall."""
+
+    PROPOSED = "proposed"
+    ACTIVE = "active"
+    RETIRED = "retired"
+
+
+@dataclass(slots=True)
+class MemoryEntry:
+    """One thing the platform learned, as a datum and not an instruction.
+
+    `claim` is what is believed, `evidence` is why — both required, because an
+    entry without evidence is an instruction wearing a datum's clothes, and §9's
+    rule is that memory is injected as data an agent may *verify*. Provenance is
+    the burst that proposed it, which is what makes an entry traceable and what
+    the gardener and the console read.
+
+    Scope decides who ever sees it: `product` entries name a repository and are
+    filtered to that product's bursts (containment — product A's bursts never see
+    product B's memory), `role` entries name a role, `platform` entries name
+    neither and are operational.
+    """
+
+    scope: str  # 'product' | 'role' | 'platform'
+    claim: str
+    evidence: str
+    repository: str | None = None  # product scope ⇔ set
+    role: str | None = None  # role scope ⇔ set
+    proposed_by_burst: str | None = None
+    status: str = MemoryStatus.PROPOSED
+    id: int | None = None
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
 @dataclass(slots=True)
 class AuditRecord:
     """One operator mutation, as the ledger recorded it — the read shape of the

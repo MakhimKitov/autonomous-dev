@@ -558,6 +558,29 @@ task lacks an `issue_number` (the repair is the verb, and the state after the
 failure is a prefix), and `SqliteLedger` refuses to open a pre-A6 file for the same
 reason instead of half-repairing it.
 
+### Platform memory — the write path
+
+A burst may propose what it learned; the platform stores it with provenance
+(TO-BE §9, H4). The channel is the result contract, like everything else that
+leaves a burst: the work prompt invites an optional fenced
+`{"memories": [{"claim", "evidence"}]}` block at the end of the final message,
+`dev_agent.burst.proposed_memories` parses it (optional and never fatal — the
+deliverable is the PR, so a missing block is the ordinary case and a malformed
+one is ignored), and the harvest folds it into `memory_entries`.
+
+Three rules, each a wall rather than a preference. **Evidence is required** —
+memory is injected as data an agent may verify, and an entry without evidence is
+an instruction wearing a datum's clothes. **The scope is derived** — a product
+entry names the burst's *own* product, taken from its task id, so one product's
+burst cannot write into another's memory even by asking to. **The status is
+`proposed`, always** — nothing a burst writes promotes itself into recall.
+`check_proposal` holds both backends to all three; a refused proposal is a log
+line, never a failed burst.
+
+There is no read path yet: injecting recalled data into prompts is scope *and*
+weight, and weight is T2's. `memory_entries(scope=…, repository=…)` is the read
+the console and the gardener will use.
+
 ### The session tree
 
 One immutable snapshot per burst, keyed `sessions/{task_id}/{burst_id}/session.tar.gz`,
