@@ -74,6 +74,7 @@ from control_plane.review import (
     parse_findings,
 )
 from control_plane.runner import DEFAULT_IMAGE, Runner, open_runner
+from control_plane.store import ArchiveError
 from control_plane.subscriptions import (
     Capacity,
     CapacityExhausted,
@@ -658,6 +659,14 @@ class Scheduler:
             log.error("burst spawn failed", error=str(exc))
             self._register_failure(task, f"burst could not start: {exc}")
             return
+        except ArchiveError as exc:
+            # the session tree let go of a node: the snapshot is gone, or its
+            # bytes disagree with the checksum the ledger recorded (#87). One
+            # missing object used to take the replica down — and then its peer,
+            # which resolves the same leaf — so this is an attempt, not a crash
+            log.error("session snapshot unusable", task=task.task_id, error=str(exc))
+            self._register_failure(task, f"session snapshot unusable: {exc}")
+            return
         finally:
             self.current_burst_id = None
 
@@ -749,6 +758,14 @@ class Scheduler:
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
             self._register_failure(task, f"burst could not start: {exc}")
+            return
+        except ArchiveError as exc:
+            # the session tree let go of a node: the snapshot is gone, or its
+            # bytes disagree with the checksum the ledger recorded (#87). One
+            # missing object used to take the replica down — and then its peer,
+            # which resolves the same leaf — so this is an attempt, not a crash
+            log.error("session snapshot unusable", task=task.task_id, error=str(exc))
+            self._register_failure(task, f"session snapshot unusable: {exc}")
             return
         finally:
             self.current_burst_id = None
@@ -860,6 +877,14 @@ class Scheduler:
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
             self._register_failure(task, f"burst could not start: {exc}")
+            return
+        except ArchiveError as exc:
+            # the session tree let go of a node: the snapshot is gone, or its
+            # bytes disagree with the checksum the ledger recorded (#87). One
+            # missing object used to take the replica down — and then its peer,
+            # which resolves the same leaf — so this is an attempt, not a crash
+            log.error("session snapshot unusable", task=task.task_id, error=str(exc))
+            self._register_failure(task, f"session snapshot unusable: {exc}")
             return
         finally:
             self.current_burst_id = None

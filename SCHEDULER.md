@@ -63,6 +63,7 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | `claimed` | leased, but no subscription is eligible | release the lease; `capacity_exhausted` event — **no attempt spent** | `claimed` |
 | `working` | burst ok ∧ linked PR open | record `pr_number`; review round → re-request Copilot + owner | `awaiting_review` |
 | `working` | burst ok ∧ no PR ∧ **issue closed** | clear `in-progress` | `done` |
+| `working` | the session snapshot is gone or its bytes disagree | attempts+1; the parking comment names the key | `claimed` |
 | `working` | the burst's token was rate limited | bench that subscription (`backoff_until`, CAS); release the lease — **no attempt spent** | `claimed` |
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
@@ -105,6 +106,17 @@ Notes:
   a burst's token count is not known until it ends, so headroom always reads
   *finished* work and the cap is a budget rail, not a wall — the wall is the
   provider's 429, which F3 turns into `backoff_until`.
+- **An unusable session snapshot is a failed attempt, not a dead replica** (#87).
+  The archive no longer holds the node the ledger named — pruned, offline, or
+  bytes that disagree with the recorded checksum — and that used to leave an
+  uncaught `ArchiveError` on the way out of `execute_burst`: the replica died,
+  its peer reconciled the task, resolved the same leaf and died too. It is an
+  attempt now, and the rail parks the task with the key named in the comment, so
+  a human decides whether to restore the object or re-`ready` the issue. A
+  mismatch and an absence are the same rail on purpose: they differ in what a
+  reader should do, not in what the scheduler can do, and the message says which
+  one happened. Neither is a `violations` row — that table is a burst crossing a
+  wall, and this is the platform's own storage failing.
 - **A spent token is not a failed attempt** (F3). A burst whose result reads as a
   rate limit benches the subscription that paid for it — `backoff_until`, moved
   forward only, from the provider's own reset stamp when it sent one — and the
