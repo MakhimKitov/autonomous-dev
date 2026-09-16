@@ -86,6 +86,11 @@ class BurstSpec:
     # Reviewer bursts get the clone read-only — "never modify" is a wall, not
     # an instruction (REVIEWERS.md); anything they execute copies to /tmp first.
     repo_read_only: bool = False
+    # The Anthropic OAuth token this burst runs on, resolved at spawn from the
+    # picked subscription's ref (F2). None = an empty pool, and the box gets
+    # whatever credential this machine holds — the MVP's shape. Never logged,
+    # never archived, never written to a row: the ledger keeps the id.
+    oauth_token: str | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -126,10 +131,13 @@ def burst_env(spec: BurstSpec) -> dict[str, str]:
         env[agentenv.GIT_USER_EMAIL] = spec.git_user_email
     # Exactly one Anthropic credential enters the box, subscription first —
     # the CLI prefers ANTHROPIC_API_KEY over the OAuth token, so passing
-    # both would silently switch billing to the API.
+    # both would silently switch billing to the API. The pool's pick wins over
+    # this machine's own credential when there is one (F2): a burst stamped with
+    # a member's subscription has to actually run on it, or the attribution is
+    # a fiction. No pick — an empty pool — is the machine's, as before.
     if spec.command == "run":
-        oauth = os.environ.get(agentenv.CLAUDE_CODE_OAUTH_TOKEN)
-        api_key = os.environ.get(agentenv.ANTHROPIC_API_KEY)
+        oauth = spec.oauth_token or os.environ.get(agentenv.CLAUDE_CODE_OAUTH_TOKEN)
+        api_key = None if spec.oauth_token else os.environ.get(agentenv.ANTHROPIC_API_KEY)
         if oauth:
             env[agentenv.CLAUDE_CODE_OAUTH_TOKEN] = oauth
         elif api_key:

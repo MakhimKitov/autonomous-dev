@@ -27,10 +27,21 @@ stores'; the pick that spends them is admission's (F2).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
-from secret_refs import SecretError, parse_ref
+import structlog
+from secret_refs import SecretError, SecretResolver, parse_ref
 
-from control_plane.models import SubscriptionRecord, SubscriptionStatus, utc_iso, utc_now
+from control_plane.models import (
+    USAGE_WINDOW_H,
+    SubscriptionRecord,
+    SubscriptionStatus,
+    utc_iso,
+    utc_now,
+)
+
+log = structlog.get_logger()
 
 # What `subscription set` may touch. `status` is deliberately absent — `revoke`
 # owns it, with its reason discipline — and so is `backoff_until`, which is the
@@ -41,6 +52,13 @@ SUBSCRIPTION_SET_COLUMNS: tuple[str, ...] = ("secret_ref", "cap_tokens", "expire
 # something a log line, a CLI argument and a `reporting.contribution` row can
 # all carry without quoting.
 _HANDLE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+class CapacityExhausted(RuntimeError):
+    """The pool had nothing to give: every contributed subscription is spent for
+    this window, backing off, expired, revoked — or its secret is gone from
+    where the member put it, which is the member's own revocation lever. Not a
+    failure of the task: nothing was attempted, so nothing failed."""
 
 
 class SubscriptionError(RuntimeError):
@@ -123,4 +141,121 @@ def declare(member: str, ref: str, cap_tokens: int, expires_at: str) -> Subscrip
         cap_tokens=check_cap(cap_tokens),
         expires_at=check_expiry(expires_at),
         status=SubscriptionStatus.ACTIVE,
+    )
+
+
+
+# --- the pick (F2): who pays for the next burst ---
+
+
+@dataclass(frozen=True, slots=True)
+class Capacity:
+    """Which contributed subscription pays for a burst, and the token that
+    proves it. `MACHINE_CREDENTIAL` — both fields None — is an empty pool: the
+    burst runs on whatever Anthropic credential this machine holds, which is the
+    MVP's shape and still the single-owner laptop's. A burst records the id and
+    hands the token to the box; neither the token nor this object is written
+    anywhere."""
+
+    subscription_id: str | None = None
+    token: str | None = None
+    headroom: int | None = None
+
+
+MACHINE_CREDENTIAL = Capacity()
+
+
+def window_start(now: str | None = None, window_h: float = USAGE_WINDOW_H) -> str:
+    """The oldest burst the headroom question counts."""
+    moment = datetime.fromisoformat(utc_iso(now or utc_now()))
+    return (moment - timedelta(hours=window_h)).astimezone(UTC).isoformat()
+
+
+def headroom(row: SubscriptionRecord, spent: int) -> int:
+    """What is left of this member's window. Never negative in meaning — a
+    member who overshot has no capacity, not negative capacity — but the
+    subtraction is reported as it comes out, because the overshoot is worth
+    seeing in a log line."""
+    return row.cap_tokens - spent
+
+
+def eligible(row: SubscriptionRecord, spent: int, now: str) -> bool:
+    """The predicate, pure and whole (TO-BE §4): active ∧ unexpired ∧ not
+    backing off ∧ headroom > 0. Kept in Python rather than in the pick's WHERE
+    clause so there is one statement of it, testable without a database, and one
+    aggregate for the store to answer."""
+    return (
+        row.status == SubscriptionStatus.ACTIVE
+        and row.expires_at > now
+        and (row.backoff_until is None or row.backoff_until <= now)
+        and headroom(row, spent) > 0
+    )
+
+
+def candidates(
+    rows: list[SubscriptionRecord], usage: dict[str, int], now: str | None = None
+) -> list[SubscriptionRecord]:
+    """The eligible subscriptions, most headroom first — the pick's order.
+
+    Ties break on the id, so the answer is the same on every replica reading the
+    same rows; a pool where two members have identical caps and no usage yet
+    would otherwise depend on row order.
+    """
+    moment = now or utc_now()
+    fit = [row for row in rows if eligible(row, usage.get(row.subscription_id, 0), moment)]
+    return sorted(
+        fit, key=lambda row: (-headroom(row, usage.get(row.subscription_id, 0)), row.subscription_id)
+    )
+
+
+def pick_capacity(
+    ledger,
+    resolver: SecretResolver | None = None,
+    *,
+    now: str | None = None,
+    window_h: float = USAGE_WINDOW_H,
+) -> Capacity:
+    """Who pays for the next burst — the pool's half of admission (TO-BE §5).
+
+    Two reads and no write: the rows, and one rolling-window aggregate over
+    `bursts`. An empty pool is `MACHINE_CREDENTIAL`, so a deployment that has
+    registered nobody behaves exactly as it did before F2. Otherwise the
+    candidates are walked in headroom order and the first whose ref *resolves*
+    pays: a ref that points at nothing is a subscription whose member deleted
+    the secret at its source, which is their revocation lever and needs no verb
+    to work — it is logged by id and skipped, never a crash and never a reason
+    to fall back to the machine's own credential, because that would spend the
+    operator's capacity in a member's name.
+
+    Nothing eligible raises `CapacityExhausted`; the caller idles and says so
+    (`capacity_exhausted`). Concurrency: two replicas can pick the same
+    subscription in the same instant and both spend it. That is deliberate — a
+    burst's token count is not known until it ends, so headroom is always a
+    reading of *finished* work and the cap is a budget rail rather than a wall.
+    The wall is the provider's own 429, which F3 turns into `backoff_until`.
+    """
+    rows = ledger.list_subscriptions()
+    if not rows:
+        return MACHINE_CREDENTIAL
+    moment = now or utc_now()
+    usage = ledger.subscription_usage(window_start(moment, window_h))
+    resolver = resolver if resolver is not None else SecretResolver()
+    unresolved: list[str] = []
+    for row in candidates(rows, usage, moment):
+        left = headroom(row, usage.get(row.subscription_id, 0))
+        try:
+            token = resolver.resolve(row.secret_ref)
+        except SecretError as exc:
+            # the message names the ref, never a value — SecretError is built that way
+            log.warning(
+                "a contributed subscription's secret is not there — skipping it",
+                subscription=row.subscription_id, ref=row.secret_ref, detail=str(exc),
+            )
+            unresolved.append(row.subscription_id)
+            continue
+        log.info("burst pays from the pool", subscription=row.subscription_id, headroom=left)
+        return Capacity(subscription_id=row.subscription_id, token=token, headroom=left)
+    raise CapacityExhausted(
+        f"no eligible subscription: {len(rows)} contributed, "
+        f"{len(unresolved)} with a secret that is no longer there"
     )

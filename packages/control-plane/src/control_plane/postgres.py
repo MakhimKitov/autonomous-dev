@@ -426,6 +426,18 @@ class PostgresLedger:
                 _pool_refusal(self.get_subscription(subscription_id), subscription_id, status)
             )
 
+    def subscription_usage(self, since: str) -> dict[str, int]:
+        """The rolling-window aggregate the pick reads (F2) — see the SQLite
+        backend for what it means and why nothing mirrors it."""
+        rows = self._execute(
+            "SELECT subscription_id, "
+            "       SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS spent "
+            "FROM bursts WHERE subscription_id IS NOT NULL AND started_at > %s "
+            "GROUP BY subscription_id",
+            (_to_datetime(since),),
+        ).fetchall()
+        return {row["subscription_id"]: int(row["spent"] or 0) for row in rows}
+
     def update_subscription(self, subscription_id: str, changes: dict, actor: str, reason: str = "") -> None:
         check_subscription_settable(changes)
         values = dict(changes)
@@ -859,6 +871,17 @@ class PostgresLedger:
             raise RegistryError("the org is not stopped")
 
     # --- violations, and the outbox row each one announces ---
+
+    def record_event(self, kind: str, payload: dict) -> None:
+        """An event announcing no mutation (F2) — see the SQLite backend. The
+        notify rides along as everywhere else, so a listener hears it promptly
+        and the cursor poll over `events` stays the truth."""
+        self._execute(
+            "WITH announced AS ("
+            "    INSERT INTO events (kind, payload) VALUES (%(kind)s, %(payload)s) RETURNING id"
+            ") SELECT pg_notify(%(channel)s, id::text) FROM announced",
+            {"kind": kind, "payload": Json(payload), "channel": EVENT_CHANNEL},
+        )
 
     def record_violation(self, violation: Violation) -> None:
         """Record the violation and announce it, in one statement (STORES.md).

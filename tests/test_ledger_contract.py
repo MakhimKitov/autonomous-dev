@@ -45,7 +45,12 @@ from control_plane.models import (
     utc_now,
 )
 from control_plane.store import LEDGER_DSN_ENV, RegistryError, SqliteLedger, session_key
-from control_plane.subscriptions import SubscriptionError, declare
+from control_plane.subscriptions import (
+    SubscriptionError,
+    candidates,
+    declare,
+    window_start,
+)
 from psycopg.conninfo import make_conninfo
 
 DSN = os.environ.get(LEDGER_DSN_ENV, "").strip()
@@ -931,6 +936,7 @@ def _subscription(member=MEMBER, ref=REF, cap=12_000_000, expires="2027-09-01"):
     return declare(member, ref, cap, expires)
 
 
+
 def test_a_contribution_is_the_row_the_member_declared(ledger):
     """What comes back is what was declared — the ref as a name, the cap as an
     int, the expiry in the one spelling the ledger keeps, and nothing else set:
@@ -1045,6 +1051,75 @@ def test_set_reaches_only_the_declaration(ledger):
         "registered_at": ledger.get_subscription(MEMBER).registered_at,
         "status": "active",
     }
+
+
+def test_usage_is_derived_from_the_bursts_that_named_a_subscription(ledger):
+    """The rolling-window aggregate the pick reads (F2). Nothing is mirrored:
+    what a member spent is the sum over their bursts, so a burst that is still
+    running counts as nothing (what it spent is not known yet), a burst on the
+    machine's own credential counts for nobody, and a burst older than the
+    window is out of the question."""
+    ledger.register_subscription(_subscription(), "op")
+    ledger.register_subscription(_subscription(member="ada", ref="env:ADA"), "op")
+    ledger.upsert_task(_task())
+    assert ledger.subscription_usage("2026-01-01T00:00:00+00:00") == {}
+
+    def spent(burst_id, subscription, tokens, started="2026-09-16T12:00:00+00:00", finished=True):
+        burst = _burst(burst_id=burst_id, started_at=started, subscription_id=subscription)
+        ledger.record_burst(burst)
+        if finished:
+            burst.status = BurstStatus.SUCCEEDED
+            burst.finished_at = started
+            burst.exit_code = 0
+            burst.input_tokens = tokens
+            burst.output_tokens = tokens
+            ledger.finish_burst(burst)
+
+    spent("b1", MEMBER, 100)
+    spent("b2", MEMBER, 400)
+    spent("b3", "ada", 50)
+    spent("b4", MEMBER, 9_000, started="2026-09-15T00:00:00+00:00")  # before the window
+    spent("b5", None, 9_000)  # this machine's own credential: nobody's usage
+    # last, because it stays running and a task has only one of those (A4)
+    spent("b6", MEMBER, 9_000, finished=False)  # not known yet, so not counted
+
+    usage = ledger.subscription_usage("2026-09-16T08:00:00+00:00")
+    assert usage == {MEMBER: 1000, "ada": 100}
+    assert ledger.get_burst("b1").subscription_id == MEMBER
+    assert ledger.get_burst("b5").subscription_id is None
+
+
+def test_the_pick_follows_the_headroom_across_two_subscriptions(ledger):
+    """F2's done-when, on the ledger both backends implement: two contributions,
+    and the next burst goes to whoever has more of their window left — with the
+    usage read from the bursts, not from a counter anyone maintains."""
+    ledger.register_subscription(_subscription(cap=10_000), "op")          # maksim
+    ledger.register_subscription(_subscription(member="ada", ref="env:ADA", cap=10_000), "op")
+    ledger.upsert_task(_task())
+
+    def burn(burst_id, subscription, tokens):
+        burst = _burst(burst_id=burst_id, subscription_id=subscription, started_at=utc_now())
+        ledger.record_burst(burst)
+        burst.status = BurstStatus.SUCCEEDED
+        burst.finished_at = utc_now()
+        burst.exit_code = 0
+        burst.input_tokens = tokens
+        burst.output_tokens = 0
+        ledger.finish_burst(burst)
+
+    def order():
+        usage = ledger.subscription_usage(window_start())
+        return [row.subscription_id for row in candidates(ledger.list_subscriptions(), usage)]
+
+    assert order() == ["ada", MEMBER]  # equal headroom: the id breaks the tie, stably
+    burn("b1", "ada", 6_000)
+    assert order() == [MEMBER, "ada"]  # ada spent more of hers — maksim pays next
+    burn("b2", MEMBER, 8_000)
+    assert order() == ["ada", MEMBER]  # and back, on the same evidence
+    burn("b3", "ada", 4_000)
+    assert order() == [MEMBER]  # ada is spent for this window; nobody is revoked
+    burn("b4", MEMBER, 2_000)
+    assert order() == []  # the pool has nothing to give until the window rolls
 
 
 # --- the org STOP (E3) ---

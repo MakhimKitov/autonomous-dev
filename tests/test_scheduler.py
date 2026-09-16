@@ -24,6 +24,7 @@ from control_plane.models import (
 )
 from control_plane.review import ReviewPolicy
 from control_plane.scheduler import Rails, Scheduler
+from control_plane.subscriptions import declare
 from control_plane.testing import E2EPolicy
 from control_plane.volume import HarvestOutcome
 
@@ -122,6 +123,7 @@ def rig(tmp_path, monkeypatch):
                 "role": kwargs.get("role"),
                 "extra_env": kwargs.get("extra_env"),
                 "heartbeat": kwargs.get("heartbeat"),
+                "capacity": kwargs.get("capacity"),
             }
         )
         return fake_execute.next_outcome
@@ -429,6 +431,54 @@ def test_agent_blocked_label_parks_the_task(rig):
     api.issues[1] = _issue(labels=("in-progress", "blocked"))
     scheduler.observe()
     assert stores.ledger.get_task(tid(1)).status == TaskStatus.BLOCKED
+
+
+def test_an_exhausted_pool_idles_the_task_instead_of_failing_it(rig):
+    """F2: the pool is asked before anything is synced or spawned. Nothing
+    eligible is not a failed attempt — nothing was tried — so the task keeps its
+    attempts and its `claimed` status, loses only the lease, and the adopter
+    hears about it as `capacity_exhausted`."""
+    scheduler, api, stores, spawned, _ = rig
+    stores.ledger.register_subscription(
+        declare("ada", "env:ADA_TOKEN", 1_000, "2027-09-01"), actor="op"
+    )  # contributed, and already spent for this window
+    burst = BurstRecord(burst_id="b-earlier", task_id=tid(1), subscription_id="ada")
+    stores.ledger.upsert_task(_task(1, status=TaskStatus.CLAIMED))
+    stores.ledger.record_burst(burst)
+    burst.status = BurstStatus.SUCCEEDED
+    burst.finished_at = utc_now()
+    burst.exit_code = 0
+    burst.input_tokens = 1_000
+    stores.ledger.finish_burst(burst)
+
+    api.ready_issues = []
+    scheduler.tick()
+
+    task = stores.ledger.get_task(tid(1))
+    assert spawned == []  # nothing ran
+    assert task.status == TaskStatus.CLAIMED and task.attempts == 0  # and nothing failed
+    assert task.claimed_by is None and task.claimed_until is None  # the lease is back
+    (event,) = [e for e in stores.ledger.events() if e.kind == "capacity_exhausted"]
+    assert event.payload["repository"] == REPOSITORY and event.payload["task"] == tid(1)
+    assert api.comments == []  # nobody is told the task failed, because it did not
+
+
+def test_a_burst_names_the_subscription_that_paid_for_it(rig, monkeypatch):
+    """The stamp (F2): the pick happens once per burst, in the scheduler, and
+    the id reaches the burst row — the token reaches the box and nothing else."""
+    scheduler, api, stores, spawned, _ = rig
+    monkeypatch.setenv("ADA_TOKEN", "adas-secret")
+    stores.ledger.register_subscription(
+        declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), actor="op"
+    )
+    api.ready_issues = [_issue()]
+    api.issues[1] = _issue()
+    api.open_prs = [_pr()]
+    scheduler.tick()
+
+    assert spawned[0]["capacity"].subscription_id == "ada"
+    assert spawned[0]["capacity"].token == "adas-secret"
+    assert stores.ledger.get_task(tid(1)).status == TaskStatus.AWAITING_REVIEW
 
 
 def test_the_org_stop_freezes_the_tick(rig):

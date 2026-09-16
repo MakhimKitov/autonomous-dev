@@ -364,6 +364,7 @@ class Ledger(Protocol):
     def register_subscription(self, sub: SubscriptionRecord, actor: str, reason: str = "") -> None: ...
     def get_subscription(self, subscription_id: str) -> SubscriptionRecord | None: ...
     def list_subscriptions(self) -> list[SubscriptionRecord]: ...
+    def subscription_usage(self, since: str) -> dict[str, int]: ...
     def set_subscription_status(
         self, subscription_id: str, status: str, actor: str, reason: str = ""
     ) -> None: ...
@@ -402,6 +403,7 @@ class Ledger(Protocol):
     def record_violation(self, violation: Violation) -> None: ...
     def violations(self, task_id: str | None = None) -> list[Violation]: ...
     def events(self, after_id: int = 0) -> list[Event]: ...
+    def record_event(self, kind: str, payload: dict) -> None: ...
     def close(self) -> None: ...
 
 
@@ -580,7 +582,8 @@ CREATE TABLE IF NOT EXISTS bursts (
     num_turns INTEGER,
     session_id TEXT,
     session_key TEXT,
-    session_checksum TEXT
+    session_checksum TEXT,
+    subscription_id TEXT
 );
 CREATE TABLE IF NOT EXISTS violations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -621,6 +624,9 @@ _ADDITIVE_COLUMNS = (
     ("bursts", "span_id", "TEXT NOT NULL DEFAULT ''"),  # 0009, B1 (#19)
     ("tasks", "claimed_by", "TEXT"),  # 0015, E1 (#32) — NULL: nobody holds the task
     ("tasks", "claimed_until", "TEXT"),
+    # 0018, F2 (#39) — NULL: the burst ran on the machine's own credential, which
+    # is what every burst in a file this old did
+    ("bursts", "subscription_id", "TEXT"),
 )
 
 
@@ -825,6 +831,24 @@ class SqliteLedger:
             raise SubscriptionError(_pool_refusal(self.get_subscription(subscription_id), subscription_id, status))
         self._audit_and_announce(actor, action, subscription_id, reason, kind, subject="subscription")
         self._conn.commit()
+
+    def subscription_usage(self, since: str) -> dict[str, int]:
+        """Tokens spent per subscription since `since` — the rolling-window
+        aggregate the pick reads (F2). Derived, never mirrored: the pool keeps no
+        counter, so there is nothing to drift from the bursts themselves.
+
+        A running burst counts as zero, because what it spent is not known until
+        it ends — which is the same reason the cap is a budget and not a wall.
+        Only subscriptions with bursts in the window appear; the caller reads a
+        missing key as nothing spent."""
+        rows = self._conn.execute(
+            "SELECT subscription_id, "
+            "       SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS spent "
+            "FROM bursts WHERE subscription_id IS NOT NULL AND started_at > ? "
+            "GROUP BY subscription_id",
+            (utc_iso(since),),
+        ).fetchall()
+        return {row["subscription_id"]: int(row["spent"] or 0) for row in rows}
 
     def update_subscription(self, subscription_id: str, changes: dict, actor: str, reason: str = "") -> None:
         check_subscription_settable(changes)
@@ -1196,6 +1220,21 @@ class SqliteLedger:
         )
         self._conn.commit()
         return True
+
+    def record_event(self, kind: str, payload: dict) -> None:
+        """An event that announces *no* mutation — the outbox's other shape (F2).
+
+        Every kind before this one rode along with the row it was about, in the
+        same statement, because an event without its mutation would be a lie.
+        `capacity_exhausted` is the opposite case: what it announces is that
+        nothing happened — a task was ready and the pool had nothing to pay with
+        — and there is no row to ride with. One statement, then, and no audit
+        row: nobody acted."""
+        self._conn.execute(
+            "INSERT INTO events (kind, payload, created_at) VALUES (?, ?, ?)",
+            (kind, json.dumps(payload), utc_now()),
+        )
+        self._conn.commit()
 
     def subscribe_wakes(self, on_wake: Callable[[str], None]) -> None:
         """Nothing to subscribe to: the single-node ledger has one process, and

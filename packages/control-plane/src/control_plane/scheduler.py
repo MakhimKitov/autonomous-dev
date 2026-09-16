@@ -56,6 +56,7 @@ from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Issue, Review
 from control_plane.github_auth import GitHubAuthError
 from control_plane.models import (
+    EVENT_CAPACITY_EXHAUSTED,
     BurstStatus,
     ProductState,
     RepositoryRecord,
@@ -73,6 +74,7 @@ from control_plane.review import (
     parse_findings,
 )
 from control_plane.runner import DEFAULT_IMAGE, Runner, open_runner
+from control_plane.subscriptions import Capacity, CapacityExhausted, pick_capacity
 from secret_refs import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
@@ -574,14 +576,38 @@ class Scheduler:
             concurrency=self.rails.concurrency,
         )
 
+    def _capacity(self, task: TaskRecord) -> Capacity | None:
+        """Who pays for this burst (F2) — or None, and the task stays where it is.
+
+        The pool is asked once per burst, before anything is synced, minted or
+        spawned. Nothing eligible is not a failed attempt: nothing was tried, so
+        the task keeps its attempts and its `claimed` status and only loses the
+        lease — the next replica to pass, or this one after the next window,
+        picks it up unchanged. The `capacity_exhausted` event is how an adopter
+        hears about it, because capacity is a people question (TO-BE §4): the
+        answer is another member opting in, not a retry."""
+        try:
+            return pick_capacity(self.stores.ledger)
+        except CapacityExhausted as exc:
+            log.warning("the pool has nothing to give — idling", task=task.task_id, detail=str(exc))
+            self.stores.ledger.record_event(
+                EVENT_CAPACITY_EXHAUSTED,
+                {"repository": self.api.repo, "task": task.task_id, "detail": str(exc)},
+            )
+            self._move(task, **self._released())  # unleased, still claimed, attempts untouched
+            return None
+
     def run_task_burst(self, task: TaskRecord) -> None:
         number = task.issue_number
         kind = task.next_burst_kind or WORK
+        capacity = self._capacity(task)
+        if capacity is None:
+            return
         if kind == ASSESS:
-            self._run_assess_burst(task)
+            self._run_assess_burst(task, capacity)
             return
         if kind == TEST:
-            self._run_test_burst(task)
+            self._run_test_burst(task, capacity)
             return
         repo = self.repo
         if self.sync_clone is not None:
@@ -620,6 +646,7 @@ class Scheduler:
                 burst_id=self.current_burst_id,
                 heartbeat=self._heartbeat(task),
                 runner=self.runner,
+                capacity=capacity,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -677,7 +704,7 @@ class Scheduler:
             return f"{what} {outcome.burst.burst_id} was killed — fenced by its heartbeat (see its log)"
         return f"{what} {outcome.burst.burst_id} failed (see its log)"
 
-    def _run_assess_burst(self, task: TaskRecord) -> None:
+    def _run_assess_burst(self, task: TaskRecord, capacity: Capacity) -> None:
         """A reviewer-role burst judging the open PR (REVIEWERS.md): fresh
         session, no GitHub credential; findings return via the harvest and the
         control plane posts them as the reviewer App."""
@@ -710,6 +737,7 @@ class Scheduler:
                 burst_id=self.current_burst_id,
                 heartbeat=self._heartbeat(task),
                 runner=self.runner,
+                capacity=capacity,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))
@@ -772,7 +800,7 @@ class Scheduler:
         except GitHubApiError as exc:
             log.warning("skip comment failed — advisory, continuing", error=str(exc))
 
-    def _run_test_burst(self, task: TaskRecord) -> None:
+    def _run_test_burst(self, task: TaskRecord, capacity: Capacity) -> None:
         """A tester-role burst (TESTER.md): boots the product per its own
         TESTING.md, sandbox credentials injected as the declared-ref
         intersection (resolved at spawn, D4); the report returns via the
@@ -819,6 +847,7 @@ class Scheduler:
                 extra_env=sandbox_env,  # the resolved intersection — tester bursts only
                 heartbeat=self._heartbeat(task),
                 runner=self.runner,
+                capacity=capacity,
             )
         except (GitHubAuthError, GitHubApiError) as exc:
             log.error("burst spawn failed", error=str(exc))

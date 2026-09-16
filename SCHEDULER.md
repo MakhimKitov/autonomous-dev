@@ -59,7 +59,8 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | From | Event (observed) | Side effects | To |
 |---|---|---|---|
 | — | issue `human`+`ready`, unclaimed | task row (insert-if-absent); labels `ready`→`in-progress` | `claimed` (work) |
-| `claimed` | leased by the claim statement: cooldown passed, ceiling ok | spawn burst (resume when a session exists); heartbeat renews the lease | `working` |
+| `claimed` | leased by the claim statement: cooldown passed, ceiling ok | the pool is asked who pays (F2); spawn burst (resume when a session exists); heartbeat renews the lease | `working` |
+| `claimed` | leased, but no subscription is eligible | release the lease; `capacity_exhausted` event — **no attempt spent** | `claimed` |
 | `working` | burst ok ∧ linked PR open | record `pr_number`; review round → re-request Copilot + owner | `awaiting_review` |
 | `working` | burst ok ∧ no PR ∧ **issue closed** | clear `in-progress` | `done` |
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
@@ -88,6 +89,21 @@ Notes:
   worker captures the session id from the init message and writes its result file in a
   `finally` (the task-17 lesson), so attempts × per-burst budget behaves as an installment
   plan — each retry continues where the last died, never a restart from zero.
+- **The pool is asked before anything is spent.** Admission has a second question
+  since F2: *who pays for this burst?* `pick_capacity` reads the contributed
+  subscriptions and one rolling-window aggregate over `bursts`, and hands back the
+  eligible one with the most headroom (active ∧ unexpired ∧ not backing off ∧
+  headroom > 0), its token resolved from the member's ref at that moment. A ref
+  that no longer resolves is the member's own revocation — the platform cannot
+  override it — so that subscription is logged and skipped, never fallen back
+  from. Nothing eligible is **not a failed attempt**: nothing was tried, the task
+  keeps its attempts and its `claimed` status, the lease goes back, and the
+  adopter hears `capacity_exhausted`. An empty pool is the machine's own
+  credential, which is the MVP's shape and the single-owner laptop's. Two
+  replicas can pick the same subscription in the same instant and both spend it:
+  a burst's token count is not known until it ends, so headroom always reads
+  *finished* work and the cap is a budget rail, not a wall — the wall is the
+  provider's 429, which F3 turns into `backoff_until`.
 - A **review round** triggers on reviews above the `last_review_id` cursor (GitHub
   review ids are immutable and monotonic): the owner's `changes_requested`, or a
   registered machine reviewer's **`changes_requested` or inline findings** — the
