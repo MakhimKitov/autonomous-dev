@@ -60,6 +60,8 @@ from control_plane.models import (
     EVENT_PRODUCT_UPDATED,
     EVENT_PRODUCT_WOKEN,
     EVENT_ROLE_UPDATED,
+    EVENT_SUBSCRIPTION_REGISTERED,
+    EVENT_SUBSCRIPTION_UPDATED,
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
     WAKE_CHANNEL,
@@ -71,6 +73,7 @@ from control_plane.models import (
     ProductState,
     RepositoryRecord,
     RoleRecord,
+    SubscriptionRecord,
     TaskRecord,
     Violation,
     utc_now,
@@ -79,12 +82,17 @@ from control_plane.roles import RoleError
 from control_plane.roles import check_settable as check_role_settable
 from control_plane.store import (
     RegistryError,
+    _already_contributed,
     _already_stopped,
     _check_settable,
     _check_stop_reason,
     _check_transition,
+    _pool_refusal,
+    _pool_transition,
     _registry_transition,
 )
+from control_plane.subscriptions import SubscriptionError, check_cap, check_ref
+from control_plane.subscriptions import check_settable as check_subscription_settable
 
 log = structlog.get_logger()
 
@@ -107,6 +115,7 @@ _EVENT_TIMESTAMPS = ("created_at",)
 _REPOSITORY_TIMESTAMPS = ("last_burst_at", "claimed_until", "registered_at", "updated_at")
 _AUDIT_TIMESTAMPS = ("at",)
 _ROLE_TIMESTAMPS = ("created_at", "updated_at")
+_SUBSCRIPTION_TIMESTAMPS = ("expires_at", "backoff_until", "registered_at")
 
 # numeric → float on load; see the module docstring.
 _BURST_NUMERICS = ("cost_usd",)
@@ -343,6 +352,116 @@ class PostgresLedger:
             raise RoleError(f"{role}: {exc.diag.message_primary}") from exc
         if not cursor.fetchall():
             raise RoleError(f"no role named {role!r}")
+
+    # --- the subscription pool (F1) ---
+    #
+    # The registry's shape, on the pool's table: one CTE per verb, the change
+    # with its audit row and its announcement. What is stored is a ref — checked
+    # here by the same grammar the SQLite backend uses, and by the table's own
+    # CHECK beneath (0017), which is what a caller reaching past the verbs meets.
+
+    def register_subscription(self, sub: SubscriptionRecord, actor: str, reason: str = "") -> None:
+        data = _bind(sub, _SUBSCRIPTION_TIMESTAMPS)
+        check_ref(data["secret_ref"])
+        check_cap(data["cap_tokens"])
+        columns = ", ".join(data)
+        placeholders = ", ".join(f"%({column})s" for column in data)
+        try:
+            self._execute(
+                f"WITH registered AS ("
+                f"    INSERT INTO subscriptions ({columns}) VALUES ({placeholders})"
+                f"    RETURNING subscription_id"
+                f"), recorded AS ("
+                f"    INSERT INTO audit (actor, action, target, reason)"
+                f"    SELECT %(_actor)s, 'subscription.register', subscription_id, %(_reason)s FROM registered"
+                f"    RETURNING id, target"
+                f"), announced AS ("
+                f"    INSERT INTO events (kind, payload)"
+                f"    SELECT %(_kind)s, jsonb_build_object("
+                f"        'audit_id', id, 'subscription', target, 'actor', %(_actor)s)"
+                f"    FROM recorded RETURNING id"
+                f") SELECT pg_notify(%(_channel)s, id::text) FROM announced",
+                {**data, "_actor": actor, "_reason": reason,
+                 "_kind": EVENT_SUBSCRIPTION_REGISTERED, "_channel": EVENT_CHANNEL},
+            )
+        except psycopg.errors.UniqueViolation:
+            raise SubscriptionError(_already_contributed(sub.subscription_id, check=False)) from None
+        except psycopg.errors.CheckViolation:  # the table's own wall, behind the grammar
+            raise SubscriptionError(_already_contributed(sub.subscription_id, check=True)) from None
+
+    def get_subscription(self, subscription_id: str) -> SubscriptionRecord | None:
+        row = self._execute(
+            "SELECT * FROM subscriptions WHERE subscription_id = %s", (subscription_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _load(row, SubscriptionRecord, _SUBSCRIPTION_TIMESTAMPS)
+
+    def list_subscriptions(self) -> list[SubscriptionRecord]:
+        rows = self._execute("SELECT * FROM subscriptions ORDER BY subscription_id").fetchall()
+        return [_load(row, SubscriptionRecord, _SUBSCRIPTION_TIMESTAMPS) for row in rows]
+
+    def set_subscription_status(self, subscription_id: str, status: str, actor: str, reason: str = "") -> None:
+        action, kind = _pool_transition(status, reason)
+        cursor = self._execute(
+            "WITH changed AS ("
+            "    UPDATE subscriptions SET status = %(status)s"
+            "    WHERE subscription_id = %(subscription_id)s AND status <> %(status)s"
+            "    RETURNING subscription_id"
+            "), recorded AS ("
+            "    INSERT INTO audit (actor, action, target, reason)"
+            "    SELECT %(actor)s, %(action)s, subscription_id, %(reason)s FROM changed"
+            "    RETURNING id, target"
+            "), announced AS ("
+            "    INSERT INTO events (kind, payload)"
+            "    SELECT %(kind)s, jsonb_build_object("
+            "        'audit_id', id, 'subscription', target, 'actor', %(actor)s)"
+            "    FROM recorded RETURNING id"
+            ") SELECT pg_notify(%(channel)s, id::text) FROM announced",
+            {"subscription_id": subscription_id, "status": status, "actor": actor,
+             "action": action, "reason": reason, "kind": kind, "channel": EVENT_CHANNEL},
+        )
+        if not cursor.fetchall():  # the CAS refused — nothing was written; say why
+            raise SubscriptionError(
+                _pool_refusal(self.get_subscription(subscription_id), subscription_id, status)
+            )
+
+    def update_subscription(self, subscription_id: str, changes: dict, actor: str, reason: str = "") -> None:
+        check_subscription_settable(changes)
+        values = dict(changes)
+        if "secret_ref" in values:
+            check_ref(values["secret_ref"])
+        if "cap_tokens" in values:
+            check_cap(values["cap_tokens"])
+        if "expires_at" in values:
+            values["expires_at"] = _to_datetime(values["expires_at"])
+        # column names come from SUBSCRIPTION_SET_COLUMNS (checked above), never the caller
+        assignments = ", ".join(f"{column} = %({column})s" for column in values)
+        try:
+            cursor = self._execute(
+                f"WITH changed AS ("
+                f"    UPDATE subscriptions SET {assignments}"
+                f"    WHERE subscription_id = %(_subscription_id)s"
+                f"    RETURNING subscription_id"
+                f"), recorded AS ("
+                f"    INSERT INTO audit (actor, action, target, reason)"
+                f"    SELECT %(_actor)s, 'subscription.set', subscription_id, %(_reason)s FROM changed"
+                f"    RETURNING id, target"
+                f"), announced AS ("
+                f"    INSERT INTO events (kind, payload)"
+                f"    SELECT %(_kind)s, jsonb_build_object("
+                f"        'audit_id', id, 'subscription', target, 'actor', %(_actor)s,"
+                f"        'changed', %(_changed)s)"
+                f"    FROM recorded RETURNING id"
+                f") SELECT pg_notify(%(_channel)s, id::text) FROM announced",
+                {**values, "_subscription_id": subscription_id, "_actor": actor, "_reason": reason,
+                 "_kind": EVENT_SUBSCRIPTION_UPDATED, "_changed": Json(sorted(changes)),
+                 "_channel": EVENT_CHANNEL},
+            )
+        except psycopg.errors.CheckViolation:  # the schema's wall, behind the grammar
+            raise SubscriptionError(_already_contributed(subscription_id, check=True)) from None
+        if not cursor.fetchall():
+            raise SubscriptionError(f"{subscription_id} is not a registered subscription")
 
     # --- tasks ---
 

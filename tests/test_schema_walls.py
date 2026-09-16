@@ -295,6 +295,44 @@ def test_a_status_nobody_implements_is_refused(db):
         )
 
 
+# ------------------------------------------------------- the subscription pool
+
+
+def a_subscription(conn, secret_ref="env:MAKSIM_CLAUDE_TOKEN", cap=12_000_000, member="maksim"):
+    return attempt(
+        conn,
+        "INSERT INTO subscriptions (subscription_id, member, secret_ref, cap_tokens, "
+        "expires_at, status) VALUES (%s, %s, %s, %s, now() + interval '1 year', 'active')",
+        (member, member, secret_ref, cap),
+    )
+
+
+def test_the_pool_column_holds_a_ref_and_cannot_hold_a_token(db):
+    """F1's claim, in the schema (0017): `secret_ref` is one of the resolver's
+    three schemes followed by a name. A verb refuses a value first; this is what
+    a console, a psql session or a bug meets instead. What no column can hold,
+    no dump can leak."""
+    for scheme in ("env:MAKSIM_CLAUDE_TOKEN", "file:/run/secrets/maksim", "helper:maksim"):
+        a_subscription(db, secret_ref=scheme, member=scheme[:4])
+    for not_a_ref in ("sk-ant-oat01-A-REAL-LOOKING-TOKEN", "MAKSIM_CLAUDE_TOKEN", "vault:maksim", "env:", ""):
+        with pytest.raises(psycopg.errors.CheckViolation, match="subscriptions_secret_ref_check"):
+            a_subscription(db, secret_ref=not_a_ref)
+
+
+def test_a_cap_is_capacity(db):
+    for cap in (0, -1):
+        with pytest.raises(psycopg.errors.CheckViolation, match="subscriptions_cap_tokens_check"):
+            a_subscription(db, cap=cap)
+
+
+def test_a_subscription_ends_in_a_status_the_pool_speaks(db):
+    a_subscription(db)
+    for status in ("expired", "revoked", "active"):
+        attempt(db, "UPDATE subscriptions SET status = %s WHERE subscription_id = 'maksim'", (status,))
+    with pytest.raises(psycopg.errors.CheckViolation, match="subscriptions_status_check"):
+        attempt(db, "UPDATE subscriptions SET status = 'lapsed' WHERE subscription_id = 'maksim'")
+
+
 def test_burst_kind_is_deliberately_open(db):
     """`kind` is scheduler vocabulary — 'assess' arrived without a migration and
     the next one should too. The absence of a CHECK here is a decision."""
@@ -478,12 +516,16 @@ def test_the_evidence_tables_are_append_only(db, table, verb):
         attempt(db, statement, role="platform_app")
 
 
-@pytest.mark.parametrize("table", ["tasks", "bursts", "repositories", "roles", "org_state"])
+@pytest.mark.parametrize(
+    "table", ["tasks", "bursts", "repositories", "roles", "org_state", "subscriptions"]
+)
 def test_the_runtime_cannot_delete_its_own_state(db, table):
     """No DELETE grant anywhere: retention is platform_admin's, on a horizon —
     unregistering a product is not a verb (C1 granted INSERT/UPDATE only), and
     neither is dropping a role (D5 granted UPDATE only) or the org row (E3
-    granted UPDATE only — the kill switch can be flipped, never removed)."""
+    granted UPDATE only — the kill switch can be flipped, never removed). A
+    revoked subscription stays for the same reason (F1, 0017): the bursts it
+    paid for still name it."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, f"DELETE FROM {table}", role="platform_app")
 
@@ -498,23 +540,19 @@ def test_the_runtime_cannot_delete_its_own_state(db, table):
             "('shadow', 'pipeline', '', '[]', 'claude-sonnet-5', 1.0, 10, 'rw', 'none', 'event')",
         ),
         (
-            "a subscription",
-            "INSERT INTO subscriptions (subscription_id, member, secret_ref, cap_tokens, "
-            "expires_at, status) VALUES ('s1', 'm', 'env:TOKEN', 100, now(), 'active')",
-        ),
-        (
             "a second org row",
             "INSERT INTO org_state (id) VALUES (false)",
         ),
     ],
 )
 def test_the_runtime_cannot_register_what_operators_register(db, what, statement):
-    """Role composition and the subscription pool are operator verbs. Each grows
-    the app role a grant in the stage that ships it — until then the runtime
-    reads them and nothing more. Products left this list at C1 (registry verbs);
-    roles gained UPDATE at D5 (`role set`, see test_the_role_verb_runs_under_the
-    _runtime_grants) and *only* UPDATE: a new row is a trust slot or a custom
-    role, and neither is the runtime's to create until T4 can run one."""
+    """Role composition is an operator verb, and each verb grows the app role a
+    grant in the stage that ships it — until then the runtime reads and nothing
+    more. Products left this list at C1 (registry verbs) and the subscription
+    pool at F1 (0017, see test_the_pool_verbs_run_under_the_runtime_grants);
+    roles gained UPDATE at D5 (`role set`) and *only* UPDATE: a new row is a
+    trust slot or a custom role, and neither is the runtime's to create until T4
+    can run one."""
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         attempt(db, statement, role="platform_app")
 
@@ -541,6 +579,38 @@ def test_the_registry_verbs_run_under_the_runtime_grants(db, walls_dsn):
             "product.register", "product.pause", "product.set",
         ]
         assert ledger.get_repository("newly/registered").concurrency == 2
+    finally:
+        ledger.close()
+
+
+def test_the_pool_verbs_run_under_the_runtime_grants(db, walls_dsn):
+    """The F1 grant (0017), exercised by the real methods as the real role: each
+    verb is one CTE writing subscriptions + audit + events through pg_notify. And
+    the wall beneath the grant: a value where a ref belongs, sent past the
+    grammar through the same connection, meets the column's CHECK — INSERT is
+    granted, storing a token is not."""
+    from control_plane.postgres import PostgresLedger
+    from control_plane.subscriptions import SubscriptionError, declare
+
+    ledger = PostgresLedger(walls_dsn)
+    try:
+        ledger._conn.execute("SET ROLE platform_app")  # for the rest of the session
+        ledger.register_subscription(declare("ada", "env:ADA_CLAUDE_TOKEN", 5_000_000, "2027-09-01"), "op")
+        ledger.update_subscription("ada", {"cap_tokens": 6_000_000}, "op", "bump")
+        ledger.set_subscription_status("ada", "revoked", "op", "rotating the token")
+
+        assert [a.action for a in ledger.audit_trail("ada")] == [
+            "subscription.register", "subscription.set", "subscription.revoke",
+        ]
+        assert ledger.get_subscription("ada").cap_tokens == 6_000_000
+
+        token = "sk-ant-oat01-PAST-THE-GRAMMAR"
+        row = declare("bob", "env:BOB", 1_000, "2027-09-01")
+        row.secret_ref = token
+        with pytest.raises(SubscriptionError) as refused:
+            ledger.register_subscription(row, "op")
+        assert token not in str(refused.value)  # the row is in the DETAIL; it stays there
+        assert ledger.get_subscription("bob") is None
     finally:
         ledger.close()
 

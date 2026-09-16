@@ -49,6 +49,8 @@ from control_plane.models import (
     ProductState,
     RepositoryRecord,
     RoleRecord,
+    SubscriptionRecord,
+    SubscriptionStatus,
     TaskRecord,
     task_id_for,
 )
@@ -68,6 +70,14 @@ from control_plane.review import (
 )
 from control_plane.runner import DEFAULT_IMAGE, HEARTBEAT_POLL_S, open_runner
 from control_plane.scheduler import Fleet, Rails, Scheduler
+from control_plane.subscriptions import (
+    SUBSCRIPTION_SET_COLUMNS,
+    SubscriptionError,
+    check_cap,
+    check_expiry,
+    check_ref,
+    declare,
+)
 from secret_refs import SecretError, parse_ref
 from control_plane.store import (
     LEDGER_DSN_ENV,
@@ -256,6 +266,53 @@ def build_parser() -> argparse.ArgumentParser:
     set_verb.add_argument("--usage-share", type=float, default=None)
     set_verb.add_argument("--reason", default="", help="lands in the audit row")
     _operator_flags(set_verb)
+
+    pool = sub.add_parser(
+        "subscription",
+        help="the subscription pool (TO-BE §4 mechanism A, F1): register/list/show/revoke/set — refs, never tokens",
+    )
+    pool_verbs = pool.add_subparsers(dest="verb", required=True)
+    pool_register = pool_verbs.add_parser(
+        "register",
+        help="a member contributes their subscription: the platform stores a ref, the member keeps the token",
+    )
+    pool_register.add_argument("--member", required=True, help="who is contributing — the id is derived from it")
+    pool_register.add_argument(
+        "--ref",
+        required=True,
+        metavar="REF",
+        help="where the member materialized their OAuth token: env:NAME, file:PATH or helper:NAME — never the token",
+    )
+    pool_register.add_argument("--cap", type=int, required=True, metavar="TOKENS", help="the member's ceiling, tokens per rolling window")
+    pool_register.add_argument("--expires", required=True, metavar="DATE", help="when the token dies: a date (YYYY-MM-DD) or an ISO timestamp")
+    pool_register.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(pool_register)
+
+    pool_list = pool_verbs.add_parser("list", help="every contributed subscription, one line each")
+    _operator_flags(pool_list)
+
+    pool_show = pool_verbs.add_parser("show", help="one subscription's row, and its audit trail")
+    pool_show.add_argument("subscription", help="the subscription id — the member's handle")
+    _operator_flags(pool_show)
+
+    pool_revoke = pool_verbs.add_parser(
+        "revoke",
+        help="retire a contribution: immediately ineligible, in-flight bursts finish; requires a reason",
+    )
+    pool_revoke.add_argument("subscription", help="the subscription id — the member's handle")
+    pool_revoke.add_argument("--reason", required=True, help="why — it lands in the audit row")
+    _operator_flags(pool_revoke)
+
+    pool_set = pool_verbs.add_parser(
+        "set",
+        help=f"change a live contribution — {', '.join(SUBSCRIPTION_SET_COLUMNS)}; audited",
+    )
+    pool_set.add_argument("subscription", help="the subscription id — the member's handle")
+    pool_set.add_argument("--cap", type=int, default=None, metavar="TOKENS", help="the new ceiling, tokens per rolling window")
+    pool_set.add_argument("--expires", default=None, metavar="DATE", help="the new expiry — renewal is re-materializing at the same ref and moving this")
+    pool_set.add_argument("--ref", default=None, metavar="REF", help="where the token is materialized now — still a ref, never a value")
+    pool_set.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(pool_set)
 
     role = sub.add_parser(
         "role",
@@ -607,6 +664,86 @@ def _product(args: argparse.Namespace, api_factory=_preflight_api) -> int:
         GitHubAuthError,
         GitHubApiError,
     ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        ledger.close()
+
+
+def _print_subscription(row: SubscriptionRecord) -> None:
+    backoff = f"   backing off until {row.backoff_until}" if row.backoff_until else ""
+    print(f"  member:     {row.member}")
+    print(f"  status:     {row.status}{backoff}")
+    print(f"  ref:        {row.secret_ref}   (a name — the value never reaches the platform)")
+    print(f"  cap:        {row.cap_tokens:,} tokens per window")
+    print(f"  expires:    {row.expires_at}")
+    print(f"  registered: {row.registered_at}")
+
+
+def _subscription_set(args: argparse.Namespace, ledger, actor: str) -> int:
+    changes: dict = {}
+    if args.cap is not None:
+        changes["cap_tokens"] = check_cap(args.cap)
+    if args.expires is not None:
+        changes["expires_at"] = check_expiry(args.expires)
+    if args.ref is not None:
+        changes["secret_ref"] = check_ref(args.ref)
+    ledger.update_subscription(args.subscription, changes, actor, args.reason)  # checks the columns by name
+    print(f"{args.subscription} set: {', '.join(sorted(changes))}")
+    _print_subscription(ledger.get_subscription(args.subscription))
+    return 0
+
+
+def _subscription(args: argparse.Namespace) -> int:
+    """The pool verbs (F1). No GitHub, and no secret: what goes in is a ref.
+
+    Every refusal here is deliberately mute about its input — an operator who
+    pastes a token where a ref belongs must not see it echoed into their
+    terminal, their shell history's neighbour, or this process's log.
+    """
+    actor = args.actor or getpass.getuser()
+    ledger = open_ledger(args.data_dir.expanduser().resolve())
+    try:
+        if args.verb == "register":
+            row = declare(args.member, args.ref, args.cap, args.expires)
+            ledger.register_subscription(row, actor, args.reason)
+            print(f"{row.subscription_id} contributes a subscription")
+            _print_subscription(ledger.get_subscription(row.subscription_id))
+            return 0
+        if args.verb == "list":
+            rows = ledger.list_subscriptions()
+            if not rows:
+                print("no subscriptions contributed")
+            for row in rows:
+                print(
+                    f"{row.subscription_id}  {row.status}  member={row.member}  ref={row.secret_ref}  "
+                    f"cap={row.cap_tokens}  expires={row.expires_at}"
+                )
+            return 0
+        if args.verb == "show":
+            row = ledger.get_subscription(args.subscription)
+            if row is None:
+                raise SubscriptionError(f"{args.subscription} is not a registered subscription")
+            print(row.subscription_id)
+            _print_subscription(row)
+            print("audit:")
+            for entry in ledger.audit_trail(args.subscription):
+                reason = f" — {entry.reason}" if entry.reason else ""
+                print(f"  #{entry.id} {entry.at} {entry.actor} {entry.action}{reason}")
+            return 0
+        if args.verb == "revoke":
+            ledger.set_subscription_status(
+                args.subscription, SubscriptionStatus.REVOKED, actor, args.reason
+            )
+            print(
+                f"{args.subscription} revoked: {args.reason} — ineligible from now; "
+                f"deleting the secret at its source is the member's own lever"
+            )
+            return 0
+        if args.verb == "set":
+            return _subscription_set(args, ledger, actor)
+        return 2
+    except SubscriptionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
@@ -1242,6 +1379,8 @@ def main(argv: list[str] | None = None) -> int:
         return _github_check()
     if args.command == "product":
         return _product(args)
+    if args.command == "subscription":
+        return _subscription(args)
     return 2
 
 

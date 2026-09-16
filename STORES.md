@@ -141,9 +141,10 @@ and `schema.sql` as what exists: Stage A closed most of the gap (org tables and
 walls at A4, per-burst snapshots at A5, derived task identity at A6), C1 added
 `tasks.repository`'s foreign key along with the registry verbs that can create a
 `repositories` row, E1 the task claim columns with the statements that use them
-(0015), E3 the `org_state` STOP row with the two verbs over it (0016), and what
-remains arrives with the stage that needs it — `bursts.subscription_id` with the
-pool at F, `bursts.pinned` with the harness that pins fixtures at G4.
+(0015), E3 the `org_state` STOP row with the two verbs over it (0016), F1 the
+subscription pool's walls with the verbs that write it (0017), and what remains
+arrives with the stage that needs it — `bursts.subscription_id` with the pick
+that stamps it at F2, `bursts.pinned` with the harness that pins fixtures at G4.
 `schema.sql`'s header carries that list, and it is the shorter document to keep
 honest.
 
@@ -198,14 +199,16 @@ CREATE TABLE roles (
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
--- subscriptions — the ref-only pool (TO-BE §4). Usage is derived from bursts;
+-- subscriptions — the ref-only pool (TO-BE §4, F1). Usage is derived from bursts;
 -- backoff_until is the pool's only mutable state, set by CAS on rate limiting,
--- cleared by time.
+-- cleared by time. The `secret_ref` CHECK is the pool's claim made structural:
+-- the column holds a scheme and a name, so a token value cannot become a row —
+-- and what no column holds, no dump, log line or archive can leak.
 CREATE TABLE subscriptions (
-    subscription_id text PRIMARY KEY,
+    subscription_id text PRIMARY KEY,          -- the member's handle, derived from it
     member          text NOT NULL,
-    secret_ref      text NOT NULL,             -- env:NAME / file:PATH — a name, never a value
-    cap_tokens      bigint NOT NULL,           -- per rolling window
+    secret_ref      text NOT NULL CHECK (secret_ref ~ '^(env|file|helper):.'),  -- a name, never a value
+    cap_tokens      bigint NOT NULL CHECK (cap_tokens > 0),  -- per rolling window
     expires_at      timestamptz NOT NULL,
     status          text NOT NULL CHECK (status IN ('active', 'expired', 'revoked')),
     backoff_until   timestamptz,
@@ -344,17 +347,21 @@ INSERT INTO org_state DEFAULT VALUES;
 | `violations` / `audit` / `events` are append-only | grants: `platform_app` gets `SELECT, INSERT` only — append-only is a grant, not a promise |
 | The org has one STOP row, and a stop is whole | `org_state` (E3): a boolean key that must be true — a second row is a duplicate key or a CHECK violation — and `org_state_stop_shape_check`, so a stop carries who and when or is not a state the row can hold. `platform_app` holds `SELECT, UPDATE` on it: the kill switch can be flipped by any replica's verb and removed by none |
 | Pipeline role rows are frozen | `roles_pipeline_guard`, the schema's only trigger: rejects updates to the wall-bearing fields (`kind`, `identity`, `sink`, `tools`) of `kind = 'pipeline'` rows, plus renames of `role` itself and deletion — a row that can be dropped and re-inserted is not frozen. CHECKs pin the `identity`/`sink` enumerations for every row, and `platform_app` holds `UPDATE` on `roles` and nothing else (D5's `role set`, 0014) — it can move the open fields and can neither open a trust slot (no `INSERT`) nor drop one (no `DELETE`) |
-| No secret values at rest | nothing to enforce — no column exists for a value; refs only |
+| No secret values at rest | `subscriptions_secret_ref_check` (F1, 0017): the one column that could hold a token holds `env:NAME` / `file:PATH` / `helper:NAME` instead — the verbs refuse a value first, this is what a console, a psql session or a bug meets. Everywhere else there is nothing to enforce, because no column for a value exists |
 
 Every one of these is provoked in `tests/test_schema_walls.py` and required to
 raise — the two that a schema diff cannot see (the trigger, the grants) have
 nothing else standing behind them.
 
-SQLite carries none of them, deliberately. It *can* express partial unique
-indexes and CHECKs, but it cannot add a constraint to a table that already
-exists, so a wall placed in its bootstrap DDL would hold in ledgers created after
-the change and be silently missing from every older file — worse than absent,
-because nothing can tell you which one you're holding. Grants and `SKIP LOCKED`
+SQLite carries one of them, and skips the rest deliberately. It *can* express
+partial unique indexes and CHECKs, but it cannot add a constraint to a table that
+already exists, so a wall placed in its bootstrap DDL would hold in ledgers
+created after the change and be silently missing from every older file — worse
+than absent, because nothing can tell you which one you're holding. The pool's
+`secret_ref` CHECK is the exception that proves the rule rather than breaking it:
+the `subscriptions` table itself is new to the single-node schema at F1, so
+`CREATE TABLE IF NOT EXISTS` gives every ledger the same table with the same
+wall, old file or new — there is no older shape for it to be missing from. Grants and `SKIP LOCKED`
 don't exist there at all. The single-node variant runs one process, so claims are
 uncontended lease UPDATEs and transitions uncontended CAS updates with the same
 semantics (E1 — the contract suite holds both backends to one answer per
