@@ -426,6 +426,18 @@ class PostgresLedger:
                 _pool_refusal(self.get_subscription(subscription_id), subscription_id, status)
             )
 
+    def back_off_subscription(self, subscription_id: str, until: str) -> bool:
+        """Bench a rate-limited subscription (F3) — see the SQLite backend for
+        why it only ever moves forward."""
+        cursor = self._execute(
+            "UPDATE subscriptions SET backoff_until = %(until)s "
+            "WHERE subscription_id = %(id)s "
+            "AND (backoff_until IS NULL OR backoff_until < %(until)s) "
+            "RETURNING subscription_id",
+            {"until": _to_datetime(until), "id": subscription_id},
+        )
+        return bool(cursor.fetchall())
+
     def subscription_usage(self, since: str) -> dict[str, int]:
         """The rolling-window aggregate the pick reads (F2) — see the SQLite
         backend for what it means and why nothing mirrors it."""

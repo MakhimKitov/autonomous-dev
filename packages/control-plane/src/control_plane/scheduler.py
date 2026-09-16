@@ -656,7 +656,8 @@ class Scheduler:
             self.current_burst_id = None
 
         if not outcome.succeeded:
-            self._register_failure(task, self._burst_ended_badly(outcome))
+            if not self._spent_token(task, outcome):
+                self._register_failure(task, self._burst_ended_badly(outcome))
             return
 
         queue_assess = False
@@ -747,7 +748,8 @@ class Scheduler:
             self.current_burst_id = None
 
         if not outcome.succeeded:
-            self._register_failure(task, self._burst_ended_badly(outcome, ASSESS))
+            if not self._spent_token(task, outcome):
+                self._register_failure(task, self._burst_ended_badly(outcome, ASSESS))
             return
         try:
             parsed = parse_findings((outcome.harvest.result or {}).get("final_text") or "")
@@ -857,7 +859,8 @@ class Scheduler:
             self.current_burst_id = None
 
         if not outcome.succeeded:
-            self._register_failure(task, self._burst_ended_badly(outcome, TEST))
+            if not self._spent_token(task, outcome):
+                self._register_failure(task, self._burst_ended_badly(outcome, TEST))
             return
         try:
             report = parse_report((outcome.harvest.result or {}).get("final_text") or "")
@@ -1016,6 +1019,26 @@ class Scheduler:
             log.warning("review request silently dropped", pr=task.pr_number, reviewers=dropped)
 
     # --- failure rail ---
+
+    def _spent_token(self, task: TaskRecord, outcome) -> bool:
+        """A burst that came back rate limited (F3): the token is spent, the task
+        is not at fault.
+
+        `execute_burst` has already benched the subscription by CAS, so the next
+        pick cannot choose it; all the rail has to do is *not* charge the task
+        for it — no attempt, no cooldown, no comment on the issue — and give the
+        lease back so the next tick admits the same task on another member's
+        token. The session is the task's, not the subscription's: it was written
+        by CAS while the burst ran, so the retry resumes exactly where the limit
+        cut it off."""
+        if not outcome.rate_limited:
+            return False
+        log.warning(
+            "the burst's token was spent — retrying the task on another, no attempt charged",
+            task=task.task_id, until=outcome.rate_limited_until, attempt=task.attempts,
+        )
+        self._move(task, status=TaskStatus.CLAIMED, **self._released())
+        return True
 
     def _register_failure(self, task: TaskRecord, reason: str) -> None:
         """One failed attempt, by CAS: the ledger moves first, the comments and

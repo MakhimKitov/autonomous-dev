@@ -98,7 +98,9 @@ dependency, as the example above does.
 query, never a maintained counter: subscription usage is a rolling-window
 aggregate over `bursts` (`subscription_usage`, F2 — a burst still running counts
 as nothing, because what it spent is not known until it ends), product daily
-counts likewise (§12's ledger-as-metrics rule). The only aggregate *decision* — admission — runs under
+counts likewise (§12's ledger-as-metrics rule). The pool's one exception is not
+an aggregate at all: `backoff_until` is a *fact the provider stated* — 429, this
+long — which no history contains, written by a forward-only CAS (F3). The only aggregate *decision* — admission — runs under
 a short advisory lock fencing in-memory math and single-statement writes,
 never held across I/O. As built (E1, `PostgresLedger.claim_next`): one
 session-level `pg_try_advisory_lock` around two statements — the rail's

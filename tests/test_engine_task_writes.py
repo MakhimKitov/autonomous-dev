@@ -7,9 +7,11 @@ id by compare-and-set against the (status, holder) the task carried on entry.
 """
 
 import json
+from datetime import UTC, datetime
 
 from control_plane.bursts import PlatformStores, execute_burst
-from control_plane.models import BurstStatus, TaskRecord, TaskStatus
+from control_plane.models import BurstStatus, TaskRecord, TaskStatus, utc_now
+from control_plane.subscriptions import declare
 from dev_agent.env import BURST_RESULT_FILENAME
 
 REPOSITORY = "owner/product"
@@ -82,6 +84,62 @@ def test_the_dev_session_lands_by_cas_and_a_moved_task_is_left_alone(tmp_path):
     execute_burst(stores, _task(status=TaskStatus.CLAIMED), repo, "judge", role="reviewer", fresh=True,
                   runner=ResultRunner("sess-reviewer"))
     assert stores.ledger.get_task(task.task_id).session_id is None
+
+
+# --- F3: a spent token benches its subscription, and the session survives ---
+
+
+class RateLimitedRunner(ResultRunner):
+    """Docker's seat when the provider says no: the worker still writes its
+    result — with the session id from the init message — and exits non-zero."""
+
+    def __init__(self, session_id="sess-9", message="Claude AI usage limit reached|%d"):
+        super().__init__(session_id)
+        self.message = message
+
+    def run(self, spec, log_path=None, heartbeat=None):
+        reset = int(datetime.now(UTC).timestamp()) + 3600
+        (spec.volume_dir / BURST_RESULT_FILENAME).write_text(
+            json.dumps({
+                "session_id": self.session_id,
+                "is_error": True,
+                "error": self.message % reset if "%d" in self.message else self.message,
+            }),
+            encoding="utf-8",
+        )
+        return 1
+
+
+def test_a_rate_limited_burst_benches_the_subscription_that_paid(tmp_path, monkeypatch):
+    """F3: the token is spent, so the row that named it is benched by CAS until
+    the provider's own reset — and the outcome says so, because the rail that
+    reads it must not charge the task for a limit it did not cause."""
+    stores, repo = _rig(tmp_path)
+    monkeypatch.setenv("ADA_TOKEN", "adas-secret")
+    stores.ledger.register_subscription(declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), "op")
+
+    outcome = execute_burst(stores, _task(), repo, "fix", runner=RateLimitedRunner())
+
+    assert outcome.succeeded is False and outcome.rate_limited is True
+    row = stores.ledger.get_subscription("ada")
+    assert row.backoff_until == outcome.rate_limited_until > utc_now()
+    assert row.status == "active"  # benched, not ended: the member did nothing wrong
+    assert stores.ledger.get_burst(outcome.burst.burst_id).subscription_id == "ada"
+    # and the session is on the task, so the retry on another token resumes it
+    assert stores.ledger.get_task(f"{REPOSITORY}#7").session_id == "sess-9"
+
+
+def test_an_ordinary_failure_benches_nobody(tmp_path, monkeypatch):
+    stores, repo = _rig(tmp_path)
+    monkeypatch.setenv("ADA_TOKEN", "adas-secret")
+    stores.ledger.register_subscription(declare("ada", "env:ADA_TOKEN", 1_000_000, "2027-09-01"), "op")
+
+    outcome = execute_burst(
+        stores, _task(), repo, "fix",
+        runner=RateLimitedRunner(message="TypeError: the agent tripped over its own feet"),
+    )
+    assert outcome.succeeded is False and outcome.rate_limited is False
+    assert stores.ledger.get_subscription("ada").backoff_until is None
 
 
 # --- E3: a burst the heartbeat fenced is `killed`, not `failed` ---

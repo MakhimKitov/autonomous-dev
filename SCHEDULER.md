@@ -63,6 +63,7 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | `claimed` | leased, but no subscription is eligible | release the lease; `capacity_exhausted` event — **no attempt spent** | `claimed` |
 | `working` | burst ok ∧ linked PR open | record `pr_number`; review round → re-request Copilot + owner | `awaiting_review` |
 | `working` | burst ok ∧ no PR ∧ **issue closed** | clear `in-progress` | `done` |
+| `working` | the burst's token was rate limited | bench that subscription (`backoff_until`, CAS); release the lease — **no attempt spent** | `claimed` |
 | `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
 | `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back (E3: killed via the heartbeat and the runner — STOP row, lost lease or shutdown; a crash is `killed` by the reconciler) | pre-burst state |
@@ -104,6 +105,12 @@ Notes:
   a burst's token count is not known until it ends, so headroom always reads
   *finished* work and the cap is a budget rail, not a wall — the wall is the
   provider's 429, which F3 turns into `backoff_until`.
+- **A spent token is not a failed attempt** (F3). A burst whose result reads as a
+  rate limit benches the subscription that paid for it — `backoff_until`, moved
+  forward only, from the provider's own reset stamp when it sent one — and the
+  task keeps its attempts, gives back its lease and is admitted again on the next
+  tick, on another member's token, resuming the session the limited burst had
+  already written. The session belongs to the task, not to the token.
 - A **review round** triggers on reviews above the `last_review_id` cursor (GitHub
   review ids are immutable and monotonic): the owner's `changes_requested`, or a
   registered machine reviewer's **`changes_requested` or inline findings** — the

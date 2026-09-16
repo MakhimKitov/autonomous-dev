@@ -25,7 +25,12 @@ from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_
 from control_plane.roles import validate as validate_role
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, Heartbeat, Runner, open_runner
 from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger
-from control_plane.subscriptions import MACHINE_CREDENTIAL, Capacity, pick_capacity
+from control_plane.subscriptions import (
+    MACHINE_CREDENTIAL,
+    Capacity,
+    pick_capacity,
+    rate_limited_until,
+)
 from control_plane.telemetry import burst_span
 from control_plane.volume import HarvestOutcome, harvest_volume, prepare_volume
 
@@ -61,10 +66,28 @@ class BurstOutcome:
     harvest: HarvestOutcome
     exit_code: int
     log_path: Path
+    # When the subscription that paid for this burst is usable again (F3), if
+    # what came back was a rate limit. Set here because this is where the result
+    # and the payer are both in hand; the ledger already carries the backoff by
+    # the time a caller reads it. None is every other ending, including success.
+    rate_limited_until: str | None = None
 
     @property
     def succeeded(self) -> bool:
-        return self.exit_code == 0 and not (self.harvest.result or {}).get("is_error")
+        return outcome_succeeded(self.exit_code, self.harvest.result)
+
+    @property
+    def rate_limited(self) -> bool:
+        """The burst did not fail on its own account — the token it was given is
+        spent. The attempt rail treats this as no attempt at all: nothing about
+        the task was tried, and the next pick has one fewer eligible payer."""
+        return self.rate_limited_until is not None
+
+
+def outcome_succeeded(exit_code: int, result: dict | None) -> bool:
+    """`BurstOutcome.succeeded`, before there is an outcome to ask — the harvest
+    knows both halves and the answer must not be spelled twice."""
+    return exit_code == 0 and not (result or {}).get("is_error")
 
 
 def codex_auth_dir() -> Path | None:
@@ -311,6 +334,18 @@ def execute_burst(
         # outside it the trace, burst and task ids are no longer bound (B1). The
         # burst is already finalized in the ledger by here — the span is still open
         # only because the log line is part of the burst, not part of what follows.
+        # a spent token is not a failed task (F3): bench the subscription by CAS
+        # — forward only — and tell the caller, whose rail must not charge the
+        # task for a limit it did not cause
+        backoff = None
+        if capacity.subscription_id is not None and not outcome_succeeded(exit_code, outcome.result):
+            backoff = rate_limited_until(outcome.result)
+            if backoff is not None:
+                moved = stores.ledger.back_off_subscription(capacity.subscription_id, backoff)
+                log.warning(
+                    "the subscription that paid for this burst is rate limited — benched",
+                    subscription=capacity.subscription_id, until=backoff, moved=moved,
+                )
         log.info(
             "burst finished",
             exit=exit_code,
@@ -322,4 +357,7 @@ def execute_burst(
             snapshot=outcome.session_key,
             log=str(log_path),
         )
-    return BurstOutcome(burst=burst, harvest=outcome, exit_code=exit_code, log_path=log_path)
+    return BurstOutcome(
+        burst=burst, harvest=outcome, exit_code=exit_code, log_path=log_path,
+        rate_limited_until=backoff,
+    )

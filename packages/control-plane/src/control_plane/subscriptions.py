@@ -145,6 +145,75 @@ def declare(member: str, ref: str, cap_tokens: int, expires_at: str) -> Subscrip
 
 
 
+# --- the rate limit (F3): what a spent token looks like coming back ---
+
+# How long a subscription is benched when the provider said "no" without saying
+# until when. Deliberately short: the miss it protects against is a *misread*
+# message, and an hour costs one member one hour, while the real reset — when the
+# message carries one — is used exactly. Too long would bench a member on a
+# string match; too short would hammer a limit that has hours left to run, which
+# is self-correcting anyway because the next 429 backs off again.
+RATE_LIMIT_BACKOFF_H = 1.0
+
+# The provider's own words, matched case-insensitively against what the burst
+# came back with. This is text, not a status code: the agent SDK's stream gives
+# the control plane a result file, not an HTTP response, so a rate limit arrives
+# as the CLI's message. Two consequences, both acceptable: a *miss* scores the
+# burst as the ordinary failure it already was before F3 (an attempt spent, the
+# rail unchanged), and a *false positive* benches one member for an hour. The
+# first marker is the one that carries a reset time.
+# the prefix ("Claude AI ") is not required: what matters is the phrase and the
+# stamp behind the pipe, and the wording around it is the provider's to change
+_USAGE_LIMIT = re.compile(r"usage limit reached\s*\|\s*(\d{9,13})", re.I)
+_RATE_LIMIT_MARKERS = (
+    "usage limit reached",
+    "rate_limit_error",
+    "rate limit exceeded",
+    "429 too many requests",
+)
+# Where in the result to look, and how much of it — a burst's tail can be long,
+# and the message is at its end when it is anywhere.
+_RESULT_FIELDS = ("error", "final_text", "text_tail")
+_SCAN_CHARS = 4000
+
+
+def rate_limited_until(result: dict | None, *, now: str | None = None) -> str | None:
+    """When this burst's subscription is usable again — or None if what came
+    back was not a rate limit at all.
+
+    The reset stamp the provider sometimes includes is used verbatim (it is the
+    truth about when the window rolls); otherwise the burst is read as limited
+    "for about an hour", which the next attempt corrects if it was optimistic.
+    """
+    if not result:
+        return None
+    text = " ".join(str(result.get(field) or "")[-_SCAN_CHARS:] for field in _RESULT_FIELDS)
+    if not text.strip():
+        return None
+    moment = datetime.fromisoformat(utc_iso(now or utc_now()))
+    stamp = _USAGE_LIMIT.search(text)
+    if stamp is not None:
+        epoch = int(stamp.group(1))
+        epoch = epoch // 1000 if epoch > 10_000_000_000 else epoch  # ms or s, both are sent
+        return _sane_backoff(datetime.fromtimestamp(epoch, UTC), moment)
+    lowered = text.lower()
+    if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+        return (moment + timedelta(hours=RATE_LIMIT_BACKOFF_H)).astimezone(UTC).isoformat()
+    return None
+
+
+def _sane_backoff(until: datetime, now: datetime) -> str:
+    """The provider's reset stamp, kept honest. A stamp already past — a stale
+    message, a clock apart, a misparse — would bench nobody and let the next
+    tick hammer the same limit; one a year out would bench a member on a string
+    match. Outside a day either way, the hour we would have used anyway stands."""
+    if not (now < until <= now + timedelta(hours=24)):
+        log.warning("a rate-limit reset time outside the next day — using the default backoff",
+                    reset=until.isoformat())
+        until = now + timedelta(hours=RATE_LIMIT_BACKOFF_H)
+    return until.astimezone(UTC).isoformat()
+
+
 # --- the pick (F2): who pays for the next burst ---
 
 
