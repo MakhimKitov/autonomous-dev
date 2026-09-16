@@ -303,6 +303,16 @@ def build_parser() -> argparse.ArgumentParser:
     pool_revoke.add_argument("--reason", required=True, help="why — it lands in the audit row")
     _operator_flags(pool_revoke)
 
+    pool_renew = pool_verbs.add_parser(
+        "renew",
+        help="a contribution continues: a new expiry on the same ref (or a new one) — and the way back from expired/revoked",
+    )
+    pool_renew.add_argument("subscription", help="the subscription id — the member's handle")
+    pool_renew.add_argument("--expires", required=True, metavar="DATE", help="the new expiry: a date (YYYY-MM-DD) or an ISO timestamp")
+    pool_renew.add_argument("--ref", default=None, metavar="REF", help="where the re-materialized token lives now, if it moved")
+    pool_renew.add_argument("--reason", default="", help="lands in the audit row")
+    _operator_flags(pool_renew)
+
     pool_set = pool_verbs.add_parser(
         "set",
         help=f"change a live contribution — {', '.join(SUBSCRIPTION_SET_COLUMNS)}; audited",
@@ -739,6 +749,14 @@ def _subscription(args: argparse.Namespace) -> int:
                 f"{args.subscription} revoked: {args.reason} — ineligible from now; "
                 f"deleting the secret at its source is the member's own lever"
             )
+            return 0
+        if args.verb == "renew":
+            ledger.renew_subscription(
+                args.subscription, check_expiry(args.expires), actor, args.reason,
+                secret_ref=check_ref(args.ref) if args.ref else None,
+            )
+            print(f"{args.subscription} renewed — active until {check_expiry(args.expires)}")
+            _print_subscription(ledger.get_subscription(args.subscription))
             return 0
         if args.verb == "set":
             return _subscription_set(args, ledger, actor)

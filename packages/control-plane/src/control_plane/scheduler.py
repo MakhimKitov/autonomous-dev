@@ -74,7 +74,12 @@ from control_plane.review import (
     parse_findings,
 )
 from control_plane.runner import DEFAULT_IMAGE, Runner, open_runner
-from control_plane.subscriptions import Capacity, CapacityExhausted, pick_capacity
+from control_plane.subscriptions import (
+    Capacity,
+    CapacityExhausted,
+    announce_expiring,
+    pick_capacity,
+)
 from secret_refs import SecretResolver
 from control_plane.testing import (
     MANIFEST_FILENAME,
@@ -238,6 +243,7 @@ class Scheduler:
         it takes `observation_turn` per product instead."""
         if self.stopped():
             return
+        announce_expiring(self.stores.ledger)  # the pool's housekeeping (F4), as the fleet's tick does
         self.reconcile_running()
         self.observe()
         if self.stopped():  # `stop` may have landed during observation
@@ -1131,6 +1137,10 @@ class Fleet:
     def tick(self) -> None:
         if self.stopped():
             return
+        # the pool's own housekeeping, once a tick and independent of any product:
+        # a contribution running out of year is announced daily (F4), whether or
+        # not there is work to spend it on
+        announce_expiring(self.stores.ledger)
         pairs: list[tuple[RepositoryRecord, Scheduler]] = []
         for row in self.stores.ledger.list_repositories():
             if row.state != ProductState.ACTIVE:

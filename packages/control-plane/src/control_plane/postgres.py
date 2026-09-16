@@ -61,6 +61,7 @@ from control_plane.models import (
     EVENT_PRODUCT_WOKEN,
     EVENT_ROLE_UPDATED,
     EVENT_SUBSCRIPTION_REGISTERED,
+    EVENT_SUBSCRIPTION_RENEWED,
     EVENT_SUBSCRIPTION_UPDATED,
     EVENT_VIOLATION_RECORDED,
     ORG_TARGET,
@@ -74,8 +75,10 @@ from control_plane.models import (
     RepositoryRecord,
     RoleRecord,
     SubscriptionRecord,
+    SubscriptionStatus,
     TaskRecord,
     Violation,
+    utc_iso,
     utc_now,
 )
 from control_plane.roles import RoleError
@@ -425,6 +428,42 @@ class PostgresLedger:
             raise SubscriptionError(
                 _pool_refusal(self.get_subscription(subscription_id), subscription_id, status)
             )
+
+    def renew_subscription(
+        self, subscription_id: str, expires_at: str, actor: str,
+        reason: str = "", secret_ref: str | None = None,
+    ) -> None:
+        """A contribution renewed (F4) — see the SQLite backend for why this is
+        the only way back to `active`."""
+        values: dict = {"expires_at": _to_datetime(expires_at), "status": SubscriptionStatus.ACTIVE}
+        if secret_ref is not None:
+            values["secret_ref"] = check_ref(secret_ref)
+        assignments = ", ".join(f"{column} = %({column})s" for column in values)
+        try:
+            cursor = self._execute(
+                f"WITH renewed AS ("
+                f"    UPDATE subscriptions SET {assignments}"
+                f"    WHERE subscription_id = %(_subscription_id)s"
+                f"    RETURNING subscription_id"
+                f"), recorded AS ("
+                f"    INSERT INTO audit (actor, action, target, reason)"
+                f"    SELECT %(_actor)s, 'subscription.renew', subscription_id, %(_reason)s FROM renewed"
+                f"    RETURNING id, target"
+                f"), announced AS ("
+                f"    INSERT INTO events (kind, payload)"
+                f"    SELECT %(_kind)s, jsonb_build_object("
+                f"        'audit_id', id, 'subscription', target, 'actor', %(_actor)s,"
+                f"        'expires_at', %(_expires)s::text)"
+                f"    FROM recorded RETURNING id"
+                f") SELECT pg_notify(%(_channel)s, id::text) FROM announced",
+                {**values, "_subscription_id": subscription_id, "_actor": actor, "_reason": reason,
+                 "_kind": EVENT_SUBSCRIPTION_RENEWED, "_expires": utc_iso(expires_at),
+                 "_channel": EVENT_CHANNEL},
+            )
+        except psycopg.errors.CheckViolation:  # the schema's wall, behind the grammar
+            raise SubscriptionError(_already_contributed(subscription_id, check=True)) from None
+        if not cursor.fetchall():
+            raise SubscriptionError(f"{subscription_id} is not a registered subscription")
 
     def back_off_subscription(self, subscription_id: str, until: str) -> bool:
         """Bench a rate-limited subscription (F3) — see the SQLite backend for
@@ -883,6 +922,15 @@ class PostgresLedger:
             raise RegistryError("the org is not stopped")
 
     # --- violations, and the outbox row each one announces ---
+
+    def events_of_kind_since(self, kind: str, since: str) -> list[Event]:
+        """The outbox read from the inside (F4) — see the SQLite backend."""
+        rows = self._execute(
+            "SELECT id, kind, payload, created_at FROM events "
+            "WHERE kind = %s AND created_at > %s ORDER BY id",
+            (kind, _to_datetime(since)),
+        ).fetchall()
+        return [_load(row, Event, _EVENT_TIMESTAMPS) for row in rows]
 
     def record_event(self, kind: str, payload: dict) -> None:
         """An event announcing no mutation (F2) — see the SQLite backend. The

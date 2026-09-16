@@ -463,8 +463,11 @@ instruments (`TO-BE.md` §12).
   *nothing* happened — a task was ready and every contributed subscription was
   spent, backing off, expired, revoked or missing its secret — so there is no
   row for it to ride with, and `record_event` writes it alone, with no audit row
-  because nobody acted. `subscription_expiring` and `task_blocked` arrive with
-  the stages that raise them.
+  because nobody acted. `subscription_expiring` (F4) is the same shape and adds a
+  rule of its own: it must not repeat, and it has nowhere to remember that it was
+  said — so the outbox is read from the inside (`events_of_kind_since`) and one
+  is written per subscription per day through its final fortnight. No column, no
+  daemon. `task_blocked` arrives with the stage that raises it.
 - **Consumed by cursor**: `SELECT * FROM events WHERE id > $cursor ORDER BY id`
   — at-least-once, ordered, replayable; each consumer keeps its own cursor, and
   the `Ledger` protocol's `events(after_id)` is that read. No `LISTEN/NOTIFY`
@@ -477,6 +480,18 @@ instruments (`TO-BE.md` §12).
   replica's sleep — same rule, a lost notification costs the interval, never truth.
 - **Retention** is a `platform_admin` concern (the runtime role can't delete):
   prune by age once consumers confirm cursors past the horizon.
+
+### The pool's view
+
+`reporting.contribution` (0020) answers TO-BE §4's "your subscription ran N
+bursts / M tokens this week" — one row per subscription per week it did work in,
+plus one with a NULL week for a contribution nobody has spent yet. Tokens are the
+unit, because consumption under a subscription is measured in tokens and not USD;
+`cost_usd` is deliberately absent, since under subscription billing the SDK's
+figure estimates what the work *would* have cost on the API — the one number
+nobody is paying. Headroom is absent for a different reason: it belongs to an
+instant, and a week-old row showing it would be showing something that was true
+once.
 
 ## The session archive — a tree of immutable snapshots
 

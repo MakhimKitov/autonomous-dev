@@ -20,7 +20,7 @@ from control_plane.github_auth import (
     bot_git_identity,
     mint_installation_token,
 )
-from control_plane.models import BurstRecord, BurstStatus, TaskRecord, utc_now
+from control_plane.models import BurstRecord, BurstStatus, SubscriptionStatus, TaskRecord, utc_now
 from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_only
 from control_plane.roles import validate as validate_role
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, Heartbeat, Runner, open_runner
@@ -28,6 +28,8 @@ from control_plane.store import Ledger, SessionArchive, open_archive, open_ledge
 from control_plane.subscriptions import (
     MACHINE_CREDENTIAL,
     Capacity,
+    SubscriptionError,
+    auth_failed,
     pick_capacity,
     rate_limited_until,
 )
@@ -346,6 +348,22 @@ def execute_burst(
                     "the subscription that paid for this burst is rate limited — benched",
                     subscription=capacity.subscription_id, until=backoff, moved=moved,
                 )
+            elif auth_failed(outcome.result):
+                # the credential itself was refused: the year ran out, or the
+                # member revoked it at the provider. The row says `expired` from
+                # now on — by CAS, and with an audit row, because the platform
+                # changed a member's standing on its own authority (F4)
+                try:
+                    stores.ledger.set_subscription_status(
+                        capacity.subscription_id, SubscriptionStatus.EXPIRED, "control-plane",
+                        reason=f"burst {burst_id} could not authenticate with this subscription's token",
+                    )
+                    log.warning(
+                        "a contributed token no longer authenticates — marked expired",
+                        subscription=capacity.subscription_id,
+                    )
+                except SubscriptionError as exc:  # already expired or revoked: nothing to say
+                    log.info("the subscription was already ended", subscription=capacity.subscription_id, detail=str(exc))
         log.info(
             "burst finished",
             exit=exit_code,
