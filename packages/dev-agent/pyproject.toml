@@ -5,8 +5,12 @@ description = "The burst worker: runs one work burst inside the dev container. S
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.2.110",
+    "session-volume",
     "structlog>=26.1.0",
 ]
+
+[tool.uv.sources]
+session-volume = { workspace = true }
 
 [project.scripts]
 dev-agent = "dev_agent.cli:main"

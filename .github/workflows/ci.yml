@@ -59,6 +59,29 @@ jobs:
           fi
           docker run --rm --entrypoint python "$img" -c "import webhook_receiver.cli, secret_refs"
           test "$(docker run --rm --entrypoint id "$img" -u)" = "1000"
+      - name: the burst-phases image
+        run: docker build -f docker/burst-phases/Dockerfile -t autonomous-dev/burst-phases:latest .
+      - name: the phases image holds capabilities, never credentials
+        # TO-BE §6, G2: what runs beside a burst cannot reach a ledger or a
+        # store. No control-plane code, no ledger client, no cloud SDK — the
+        # phases hold presigned URLs for single objects. `git` *is* expected:
+        # init clones the product with a contents:read, single-repo token.
+        run: |
+          set -e
+          img=autonomous-dev/burst-phases:latest
+          for banned in control_plane dev_agent psycopg boto3 structlog; do
+            if docker run --rm --entrypoint python "$img" -c "import $banned" 2>/dev/null; then
+              echo "::error::the phases image can import $banned — a pod must not carry it"
+              exit 1
+            fi
+          done
+          docker run --rm --entrypoint python "$img" -c "import burst_phases.cli, session_volume"
+          docker run --rm --entrypoint sh "$img" -c "command -v git >/dev/null"
+          test "$(docker run --rm --entrypoint id "$img" -u)" = "1000"
+          # both entrypoints refuse loudly rather than half-working
+          if docker run --rm "$img" 2>/dev/null; then
+            echo "::error::burst-init succeeded with nothing to do"; exit 1
+          fi
       - name: the control-plane image runs the CLI
         run: |
           docker run --rm autonomous-dev/control-plane:latest --help >/dev/null

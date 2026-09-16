@@ -1,0 +1,10 @@
+[project]
+name = "session-volume"
+version = "0.1.0"
+description = "The burst volume's shape: what a burst leaves in it, and how it is packed (TO-BE §6). Stdlib only — the control plane, the dev agent and the pod-side phases all read it."
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.9.21,<0.10.0"]
+build-backend = "uv_build"
