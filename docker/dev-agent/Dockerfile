@@ -12,9 +12,16 @@ FROM python:3.12-slim AS build
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Build the dev-agent wheel in isolation — nothing else from the repo enters the image.
+# Build the burst worker's wheels in isolation — nothing else from the repo
+# enters the image. Two packages, not one: `session-volume` is what the worker,
+# the control plane and the pod-side harvester all agree a burst leaves behind
+# (G2), and it is stdlib-only, so carrying it costs the image nothing and
+# leaving it out costs the image everything — `pip install` cannot resolve a
+# workspace dependency that was never built.
 COPY packages/dev-agent /src/dev-agent
-RUN uv build --wheel /src/dev-agent --out-dir /wheels
+COPY packages/session-volume /src/session-volume
+RUN uv build --wheel /src/session-volume --out-dir /wheels \
+    && uv build --wheel /src/dev-agent --out-dir /wheels
 
 
 FROM python:3.12-slim
@@ -77,7 +84,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
 
 WORKDIR /workspace/repo
-VOLUME ["/session", "/workspace/repo"]
+# No `VOLUME` here, deliberately. Both paths are always mounted by whatever runs
+# the burst — a bind mount under docker, an `emptyDir` in a pod — so the
+# declaration bought nothing, and under containerd it *costs*: an image volume
+# becomes an ephemeral empty mount at that exact path, which shadowed the working
+# tree the init container had just cloned into the pod's shared volume (G3).
 
 ENTRYPOINT ["dev-agent"]
 CMD ["run"]

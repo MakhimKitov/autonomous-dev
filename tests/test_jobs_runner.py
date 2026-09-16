@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from control_plane.jobs import (
     AGENT_EXIT_FILE,
+    CLONE_PARENT,
     DEFAULT_PHASES_IMAGE,
     JobsRunner,
     job_name,
@@ -160,6 +161,18 @@ def test_the_harvester_waits_for_the_agent_and_the_agent_says_when_it_is_done(ru
     assert f"while [ ! -f {AGENT_EXIT_FILE} ]" in " ".join(container(job, "harvest")["command"])
     mounts = {m["mountPath"] for m in container(job, "harvest")["volumeMounts"]}
     assert mounts == {agentenv.CONTAINER_SESSION_DIR, "/signal"}  # no clone for the harvester
+
+
+def test_the_working_tree_is_a_directory_the_clone_owns(runner):
+    """A mount point stays root-owned whatever `fsGroup` says, and git refuses to
+    work in a repository owned by somebody else. So the volume is mounted one
+    level up and the tree is the clone's own directory — otherwise every burst on
+    a cluster would begin by arguing with its checkout."""
+    job = manifest(runner, _spec())
+    for name in ("init", "agent"):
+        paths = {m["mountPath"] for m in container(job, name)["volumeMounts"]}
+        assert CLONE_PARENT in paths and agentenv.CONTAINER_REPO_DIR not in paths
+    assert env_of(job, "init")["BURST_CLONE_DIR"] == agentenv.CONTAINER_REPO_DIR
 
 
 def test_the_phases_run_the_platforms_image_and_the_burst_runs_its_own(runner):

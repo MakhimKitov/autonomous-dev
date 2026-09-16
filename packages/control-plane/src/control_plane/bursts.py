@@ -316,7 +316,10 @@ def execute_burst(
             # given a credential scoped to fetching it — and neither is asked for
             # on a substrate that shares a filesystem with the control plane
             clone=pinned_origin(repo) if runner.pod_side else None,
-            clone_token=mint_clone_token(task) if runner.pod_side and mode == "run" else None,
+            # minted for a `check` burst too: the mode decides what the *agent*
+            # holds, and the init container is not the agent — a boot smoke still
+            # needs the working tree it is smoking against
+            clone_token=mint_clone_token(task) if runner.pod_side else None,
             extra_env=dict(extra_env or {}),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"

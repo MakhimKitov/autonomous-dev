@@ -110,6 +110,19 @@ AGENT_EXIT_FILE = f"{SIGNAL_DIR}/agent-exit"
 # otherwise, so without this the burst cannot write its own volume.
 POD_UID = 1000
 
+# The clone's volume is mounted one level *above* the working tree, so that the
+# tree itself is a directory the clone creates and therefore owns. A mount point
+# stays root-owned however the pod's `fsGroup` is set, and git refuses to work in
+# a repository owned by somebody else ("dubious ownership") — which would make
+# every burst on a cluster start by arguing with its own checkout.
+#
+# The other half of that arrangement is in the agent image: it must not declare a
+# `VOLUME` for the working tree. containerd honours image volumes by mounting an
+# empty ephemeral directory at that path, which would shadow the clone this pod
+# just made — a thing that is invisible under docker, where the bind mount lands
+# on the same path and wins.
+CLONE_PARENT = str(Path(agentenv.CONTAINER_REPO_DIR).parent)
+
 # What a fenced burst's exit code is when the pod is gone before it can be read
 # — the same number a SIGKILLed container reports, for the same reason.
 FENCED_EXIT_CODE = 137
@@ -190,7 +203,7 @@ class JobsRunner:
         capabilities, so the walls in it can be read off in a test without a
         cluster (`tests/test_jobs_runner.py`)."""
         session = {"name": "session", "mountPath": agentenv.CONTAINER_SESSION_DIR}
-        repo = {"name": "repo", "mountPath": agentenv.CONTAINER_REPO_DIR}
+        repo = {"name": "repo", "mountPath": CLONE_PARENT}
         signal = {"name": "signal", "mountPath": SIGNAL_DIR}
         return {
             "apiVersion": "batch/v1",
