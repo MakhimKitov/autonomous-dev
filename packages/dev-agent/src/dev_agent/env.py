@@ -44,6 +44,11 @@ ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 # the same value — the gh CLI reads it natively.
 GITHUB_TOKEN = "GITHUB_TOKEN"
 GH_TOKEN = "GH_TOKEN"
+# The CLI's own ceiling on a Bash call (H2, #104). Read by the CLI the SDK
+# drives, not by this package — named here because the control plane sets them
+# and the contract is one list.
+BASH_DEFAULT_TIMEOUT_MS = "BASH_DEFAULT_TIMEOUT_MS"
+BASH_MAX_TIMEOUT_MS = "BASH_MAX_TIMEOUT_MS"
 
 # Claude Code's own telemetry (B2). Set by the control plane, read by the CLI the
 # SDK drives — this package reads none of them, and doesn't need to: the SDK passes
