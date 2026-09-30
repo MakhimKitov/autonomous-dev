@@ -65,7 +65,8 @@ and posts nothing. `claimed → working` additionally names the replica's own
 | `working` | burst ok ∧ no PR ∧ **issue closed** | clear `in-progress` | `done` |
 | `working` | the session snapshot is gone or its bytes disagree | attempts+1; the parking comment names the key | `claimed` |
 | `working` | the burst's token was rate limited | bench that subscription (`backoff_until`, CAS); release the lease — **no attempt spent** | `claimed` |
-| `working` | burst failed ∨ no PR, attempts < max | attempts+1; failure cooldown | `claimed` |
+| `working` | burst spent its turns or budget ∨ finished with no PR (the approach's failure, H5) | abandon the burst's node (`branch_summary`), propose the summary to product memory; attempts+1 — the next burst **branches** from the node it grew from | `claimed` |
+| `working` | burst failed any other way, attempts < max | attempts+1; failure cooldown — the next burst **retries** the same node | `claimed` |
 | `working` | burst failed, attempts = max | comment on issue; clear `in-progress` | `blocked` |
 | `working` | kill switch / crash | container killed → burst `killed`; attempts+1; roll back (E3: killed via the heartbeat and the runner — STOP row, lost lease or shutdown; a crash is `killed` by the reconciler) | pre-burst state |
 | `awaiting_review` | unseen owner `changes_requested` **or machine findings**, rounds < max | rounds+1; queue review prompt | `claimed` (review) |
@@ -91,6 +92,27 @@ Notes:
   worker captures the session id from the init message and writes its result file in a
   `finally` (the task-17 lesson), so attempts × per-burst budget behaves as an installment
   plan — each retry continues where the last died, never a restart from zero.
+- **Retry ≠ branch** (H5, TO-BE §6). Resuming the leaf is right when the
+  *environment* stopped the burst — a kill, a spent token, a refused credential,
+  a stream that died with no result from the engine — and wrong when the
+  *approach* did not work: resuming that transcript hands the next burst the same
+  exhausted path (finding #6's hung call haunted every retry after it). The rail
+  tells them apart from what it already holds, with no new signal: an approach
+  failure is the engine's own ending `error_max_turns` / `error_max_budget_usd`
+  (`BurstOutcome.spent_its_allowance`), or a clean finish with no PR. Anything
+  else — including `error_during_execution`, which is as often the API as the
+  plan — retries the same node, because a wrong branch throws work away and a
+  wrong retry only costs one attempt. On an approach failure `abandon_attempt`
+  sets the burst's `branch_summary` by CAS (0021): the leaf query steps over it,
+  so the next burst grows from the node *it* grew from — that node's bytes, that
+  node's session, forked by the SDK (`fork_session`) rather than continued, never
+  a transcript edited by hand. The abandoned snapshot stays in the archive,
+  immutable, as the record of what was tried. The summary is **structural** — the
+  row, the engine's ending, the rail's reason; the platform never reads the
+  transcript — and it reaches the next branch as data (`abandoned_attempts`,
+  framed like an `auto` issue) and the product's memory as a *proposal* with the
+  burst that made it (H4). A branch is shown only its own node's abandoned
+  attempts, never another node's.
 - **Whose turn it is, is a weight and not a clock** (H1). The fleet orders its
   products by *bursts served per unit of weight* over a day — the numerator an
   aggregate over `bursts`, the denominator the row's `usage_share` — so a product

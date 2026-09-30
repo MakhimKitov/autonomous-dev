@@ -759,13 +759,36 @@ class PostgresLedger:
         archived a snapshot. Served by `bursts_session_leaf`, the partial index
         on exactly this predicate (0011 narrowed both to `role = 'dev'`): a
         tester's archived snapshot is evidence, never what the next dev burst
-        resumes (B5)."""
+        resumes (B5). An abandoned node is no leaf (0021, H5): the index carries
+        that predicate too, and the next burst branches from its parent."""
         row = self._execute(
             "SELECT * FROM bursts WHERE task_id = %s AND session_key IS NOT NULL "
-            "AND role = 'dev' ORDER BY started_at DESC, burst_id DESC LIMIT 1",
+            "AND role = 'dev' AND branch_summary IS NULL "
+            "ORDER BY started_at DESC, burst_id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
         return None if row is None else _load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS)
+
+    def abandon_burst(self, burst_id: str, summary: str) -> bool:
+        """Mark a finished node abandoned (H5), by compare-and-set: once, and
+        never while it runs. Rowcount decides — False is a burst that is still
+        running, already abandoned, or not there."""
+        cursor = self._execute(
+            "UPDATE bursts SET branch_summary = %s WHERE burst_id = %s "
+            "AND status <> 'running' AND branch_summary IS NULL",
+            (summary, burst_id),
+        )
+        return cursor.rowcount == 1
+
+    def abandoned_branches(self, task_id: str, parent_burst_id: str | None) -> list[BurstRecord]:
+        """The abandoned dev attempts that grew from this node — None is the
+        task's root. What a new branch from the node is shown, oldest first."""
+        rows = self._execute(
+            "SELECT * FROM bursts WHERE task_id = %s AND role = 'dev' AND branch_summary IS NOT NULL "
+            "AND resumed_from_burst_id IS NOT DISTINCT FROM %s ORDER BY started_at, burst_id",
+            (task_id, parent_burst_id),
+        ).fetchall()
+        return [_load(row, BurstRecord, _BURST_TIMESTAMPS, _BURST_NUMERICS) for row in rows]
 
     def running_bursts(
         self, repository: str | None = None, *, orphaned: bool = False

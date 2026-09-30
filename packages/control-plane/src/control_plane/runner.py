@@ -111,6 +111,10 @@ class BurstSpec:
     command: str = "run"  # or "check" (boot smoke, no network)
     image: str = DEFAULT_IMAGE
     resume_session_id: str | None = None
+    # A new branch of the session tree (H5): the node being resumed already has
+    # an abandoned attempt grown from it, so the SDK forks to a new session id
+    # rather than continuing the one that attempt continued.
+    fork_session: bool = False
     max_budget_usd: float | None = None
     max_turns: int | None = None
     model: str | None = None
@@ -168,6 +172,8 @@ def burst_env(spec: BurstSpec) -> dict[str, str]:
         env[agentenv.TASK_PROMPT] = spec.prompt
     if spec.resume_session_id:
         env[agentenv.RESUME_SESSION_ID] = spec.resume_session_id
+        if spec.fork_session:
+            env[agentenv.FORK_SESSION] = "1"
     if spec.max_budget_usd is not None:
         env[agentenv.MAX_BUDGET_USD] = str(spec.max_budget_usd)
     if spec.max_turns is not None:

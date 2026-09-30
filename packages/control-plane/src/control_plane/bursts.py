@@ -22,11 +22,19 @@ from control_plane.github_auth import (
     bot_git_identity,
     mint_installation_token,
 )
-from control_plane.models import BurstRecord, BurstStatus, SubscriptionStatus, TaskRecord, utc_now
+from control_plane.models import (
+    BurstRecord,
+    BurstStatus,
+    MemoryEntry,
+    SubscriptionStatus,
+    TaskRecord,
+    utc_now,
+)
+from control_plane.prompts import abandoned_attempts
 from control_plane.roles import ALL_TOOLS, RoleError, compose_prompt, repo_read_only
 from control_plane.roles import validate as validate_role
 from control_plane.runner import DEFAULT_IMAGE, BurstSpec, Heartbeat, Runner, open_runner
-from control_plane.store import Ledger, SessionArchive, open_archive, open_ledger, session_key
+from control_plane.store import Ledger, MemoryError_, SessionArchive, open_archive, open_ledger, session_key
 from control_plane.subscriptions import (
     MACHINE_CREDENTIAL,
     Capacity,
@@ -75,10 +83,26 @@ class BurstOutcome:
     # and the payer are both in hand; the ledger already carries the backoff by
     # the time a caller reads it. None is every other ending, including success.
     rate_limited_until: str | None = None
+    # The subscription's credential was refused (F4) — the environment's
+    # failure, like a rate limit, and never the approach's (H5).
+    credential_refused: bool = False
 
     @property
     def succeeded(self) -> bool:
         return outcome_succeeded(self.exit_code, self.harvest.result)
+
+    @property
+    def spent_its_allowance(self) -> bool:
+        """The engine ran the attempt to the end of what it was given — its
+        turns or its budget — and came back without the work (H5). The one
+        failure the rail reads as the *approach's*: nothing stopped the burst
+        from outside, and resuming the same transcript would hand the next
+        burst the same exhausted path. Everything else that fails — a kill, a
+        spent token, a refused credential, a stream that died with no result —
+        is the environment's, and re-runs the same node."""
+        if self.burst.status == BurstStatus.KILLED or self.rate_limited or self.credential_refused:
+            return False
+        return (self.harvest.result or {}).get("subtype") in ALLOWANCE_SPENT
 
     @property
     def rate_limited(self) -> bool:
@@ -86,6 +110,82 @@ class BurstOutcome:
         spent. The attempt rail treats this as no attempt at all: nothing about
         the task was tried, and the next pick has one fewer eligible payer."""
         return self.rate_limited_until is not None
+
+
+# How the engine says an attempt used up what it was given (the result's
+# `subtype`, as the SDK spells it). The rail's whole test for an approach
+# failure among bursts that failed: see `BurstOutcome.spent_its_allowance`.
+ALLOWANCE_SPENT = frozenset({"error_max_turns", "error_max_budget_usd"})
+
+# What the engine's ending reads as in a branch summary — a sentence a person
+# and the next branch can both take in at once.
+_ENDINGS = {
+    "error_max_turns": "ran out of turns",
+    "error_max_budget_usd": "ran out of budget",
+    "error_during_execution": "stopped on an error during execution",
+    "success": "finished",
+}
+
+
+def branch_summary(burst: BurstRecord, result: dict | None, why: str) -> str:
+    """The short summary of an abandoned attempt (H5), built from what the
+    platform already holds — the burst's row, the engine's ending, and the
+    rail's reason — never from the transcript, which the platform does not
+    read. Structural on purpose: it says *that* and *how* an attempt ended, not
+    what it tried; what it tried stays in its archived snapshot, one key away."""
+    result = result or {}
+    ending = _ENDINGS.get(result.get("subtype") or "", "ended without a result from the engine")
+    grew = f"burst {burst.resumed_from_burst_id}" if burst.resumed_from_burst_id else "the start of the task"
+    spent = []
+    if burst.num_turns is not None:
+        spent.append(f"{burst.num_turns} turns")
+    if burst.cost_usd is not None:
+        spent.append(f"${float(burst.cost_usd):.2f}")
+    detail = f" ({', '.join(spent)})" if spent else ""
+    return (
+        f"Attempt {burst.burst_id} ({burst.kind}, grown from {grew}) {ending}{detail} "
+        f"and was abandoned: {why}."
+    )
+
+
+def abandon_attempt(ledger: Ledger, task: TaskRecord, outcome: BurstOutcome, why: str) -> bool:
+    """Retire an attempt's node from the session tree and remember that it
+    happened (H5): the next burst branches from the node this one grew from,
+    and is shown this summary as data (`abandoned_attempts`) rather than the
+    transcript that led here.
+
+    The summary is also proposed to the product's memory, with the burst that
+    made it as provenance — proposed, like everything a burst leads to (H4),
+    so the gardener decides whether a failed attempt taught anything durable.
+    A refused proposal is a log line; the abandon is what the rail needed.
+    False when the node was already abandoned (a peer, or a retry of this
+    judgement) — nothing is proposed twice."""
+    burst = outcome.burst
+    summary = branch_summary(burst, outcome.harvest.result, why)
+    if not ledger.abandon_burst(burst.burst_id, summary):
+        return False
+    burst.branch_summary = summary
+    log.warning(
+        "attempt abandoned — the next burst branches",
+        task=task.task_id, burst=burst.burst_id, branch_from=burst.resumed_from_burst_id,
+    )
+    try:
+        ledger.propose_memory(
+            MemoryEntry(
+                scope="product",
+                claim=summary,
+                evidence=(
+                    f"burst {burst.burst_id}: status {burst.status}, exit {burst.exit_code}, "
+                    f"engine ending {(outcome.harvest.result or {}).get('subtype')!r}; "
+                    f"snapshot {burst.session_key or 'not archived'}"
+                ),
+                repository=task.repository,
+                proposed_by_burst=burst.burst_id,
+            )
+        )
+    except MemoryError_ as exc:
+        log.warning("the branch summary was not proposed", burst=burst.burst_id, reason=str(exc))
+    return True
 
 
 def outcome_succeeded(exit_code: int, result: dict | None) -> bool:
@@ -257,6 +357,16 @@ def execute_burst(
     parent = None if fresh else stores.ledger.latest_archived_burst(task.task_id)
     volume = stores.data_dir / "volumes" / burst_id  # where this host keeps it; the runner fills it
     resume = None if fresh else task.session_id
+    # Attempts already abandoned at this node (H5): this burst is a new branch.
+    # It resumes the node's own session — not the task's latest, which is the
+    # abandoned tail — and forks it, so the tail is neither in the volume nor in
+    # the session id; what it gets instead is each attempt's summary, as data.
+    abandoned = [] if fresh else stores.ledger.abandoned_branches(
+        task.task_id, parent.burst_id if parent is not None else None
+    )
+    if abandoned:
+        resume = parent.session_id if parent is not None else None
+        prompt = f"{prompt}\n\n{abandoned_attempts([b.branch_summary or '' for b in abandoned])}"
 
     burst = BurstRecord(
         burst_id=burst_id,
@@ -301,6 +411,7 @@ def execute_burst(
             command=mode,
             image=image,
             resume_session_id=resume,
+            fork_session=bool(abandoned) and resume is not None,
             max_budget_usd=max_budget_usd,
             max_turns=max_turns,
             model=model,
@@ -383,6 +494,7 @@ def execute_burst(
         # — forward only — and tell the caller, whose rail must not charge the
         # task for a limit it did not cause
         backoff = None
+        refused = False
         if capacity.subscription_id is not None and not outcome_succeeded(exit_code, outcome.result):
             backoff = rate_limited_until(outcome.result)
             if backoff is not None:
@@ -392,6 +504,7 @@ def execute_burst(
                     subscription=capacity.subscription_id, until=backoff, moved=moved,
                 )
             elif auth_failed(outcome.result):
+                refused = True
                 # the credential itself was refused: the year ran out, or the
                 # member revoked it at the provider. The row says `expired` from
                 # now on — by CAS, and with an audit row, because the platform
@@ -420,5 +533,5 @@ def execute_burst(
         )
     return BurstOutcome(
         burst=burst, harvest=outcome, exit_code=exit_code, log_path=log_path,
-        rate_limited_until=backoff,
+        rate_limited_until=backoff, credential_refused=refused,
     )

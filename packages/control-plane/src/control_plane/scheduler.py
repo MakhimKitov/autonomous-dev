@@ -51,7 +51,7 @@ from typing import Callable
 
 import structlog
 
-from control_plane.bursts import PlatformStores, execute_burst
+from control_plane.bursts import PlatformStores, abandon_attempt, execute_burst
 from control_plane.clone import CloneError
 from control_plane.github_api import COPILOT_REVIEWER, COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, Issue, Review
 from control_plane.github_auth import GitHubAuthError
@@ -684,6 +684,14 @@ class Scheduler:
 
         if not outcome.succeeded:
             if not self._spent_token(task, outcome):
+                if outcome.spent_its_allowance:
+                    # retry ≠ branch (H5): the approach ran to the end of its
+                    # turns or budget, so the next attempt grows from the node
+                    # this one grew from, and does not carry its tail
+                    abandon_attempt(
+                        self.stores.ledger, task, outcome,
+                        "it spent what it was given without delivering",
+                    )
                 self._register_failure(task, self._burst_ended_badly(outcome))
             return
 
@@ -697,6 +705,9 @@ class Scheduler:
                 # finishes the task (#93) rather than failing an attempt of it
                 if self._finish_if_issue_closed(task):
                     return
+                # the engine said it finished and there is nothing to show for
+                # it — the approach's failure, not the environment's (H5)
+                abandon_attempt(self.stores.ledger, task, outcome, "it finished without opening a pull request")
                 self._register_failure(task, f"burst {outcome.burst.burst_id} succeeded but opened no PR")
                 return
             task.pr_number = pr.number  # the re-review below reads it; the CAS writes it

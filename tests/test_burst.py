@@ -83,6 +83,17 @@ def test_result_records_the_resolved_model(tmp_path, monkeypatch):
     assert result.num_turns == 1
     written = json.loads(env.result_path.read_text(encoding="utf-8"))
     assert written["model"] == "claude-sonnet-5-20260203"
+    # the engine's own word for how the run ended, which the branch summary
+    # reads (H5): "ran out of turns" is not something the exit code can say
+    assert written["subtype"] == "success"
+
+
+def test_a_fork_reaches_the_engine_as_the_sdks_own_flag():
+    """A new branch of the session tree (H5) is the SDK's `fork_session` on the
+    resume — never transcript surgery, and nothing the worker decides itself."""
+    base = dict(task_id="42", burst_id="b1", resume_session_id="sess-1")
+    assert burst._to_options(BurstEnv(**base, fork_session=True)).fork_session is True
+    assert burst._to_options(BurstEnv(**base)).fork_session is False
 
 
 def test_final_text_is_the_last_assistant_message(tmp_path, monkeypatch):

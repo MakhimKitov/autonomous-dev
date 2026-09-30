@@ -248,6 +248,17 @@ def test_a_burst_is_never_half_finished(db, label, sql):
         attempt(db, sql)
 
 
+def test_an_abandoned_node_says_why(db):
+    """H5 (0021): the abandon mark *is* the branch summary, so an empty one — a
+    branch that forgets why it exists — is not a value the column takes."""
+    a_task(db)
+    a_running_burst(db, "b1")
+    finish(db, "b1")
+
+    with pytest.raises(psycopg.errors.CheckViolation, match="bursts_branch_summary_check"):
+        attempt(db, "UPDATE bursts SET branch_summary = '' WHERE burst_id = 'b1'")
+
+
 def test_a_finished_burst_cannot_be_reopened(db):
     a_task(db)
     a_running_burst(db, "b1")

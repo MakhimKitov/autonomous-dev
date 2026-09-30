@@ -127,6 +127,13 @@ def test_optional_env_only_when_set(monkeypatch):
 
     resumed = burst_env(_spec(resume_session_id="sess-9"))
     assert resumed[agentenv.RESUME_SESSION_ID] == "sess-9"
+    assert agentenv.FORK_SESSION not in resumed
+
+    # a branch (H5) forks the session it resumes; with nothing to resume there
+    # is nothing to fork, and the flag is not sent at all
+    forked = burst_env(_spec(resume_session_id="sess-9", fork_session=True))
+    assert forked[agentenv.FORK_SESSION] == "1"
+    assert agentenv.FORK_SESSION not in burst_env(_spec(fork_session=True))
 
 
 def test_extra_env_rides_along(monkeypatch):

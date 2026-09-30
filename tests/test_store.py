@@ -72,6 +72,10 @@ def test_a_column_added_after_the_file_was_made_gets_added_to_it(tmp_path):
     # the burst that predates the column keeps its trace and reads back unspanned,
     # which is what `telemetry.link_to_burst` refuses to make a link out of
     assert (ledger.get_burst("b0").trace_id, ledger.get_burst("b0").span_id) == ("ab", "")
+    # 0021 (H5): the old burst is a live node, and it can still be abandoned
+    assert ledger.get_burst("b0").branch_summary is None
+    assert ledger.abandon_burst("b0", "abandoned after the column arrived")
+    assert ledger.latest_archived_burst("owner/product#7") is None
 
 
 def test_a_pre_a6_ledger_refuses_to_open_and_says_what_to_run(tmp_path):

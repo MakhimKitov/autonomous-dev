@@ -643,6 +643,20 @@ is how an amnesiac burst is expressed — there is deliberately no way to ask fo
 volume that resumes nothing but still holds the session. Snapshots are write-once:
 a retry is a new burst, so a new key, and branching is a ledger write.
 
+**Retry ≠ branch (H5)**: a node can be *abandoned* — `bursts.branch_summary`
+(0021) is both the mark and its content, set once by CAS (`abandon_burst`), and
+the leaf query steps over it, so the next burst grows from the abandoned node's
+parent. The scheduler abandons only the approach's failures — the engine's own
+`error_max_turns` / `error_max_budget_usd`, or a clean finish with no PR
+(`BurstOutcome.spent_its_allowance`, `abandon_attempt`); a kill, a spent token, a
+refused credential or a dead stream retries the same node as before. A branch
+resumes its node's own session with `AGENT_FORK_SESSION=1` (the SDK's
+`fork_session`), is shown the node's abandoned attempts as data
+(`abandoned_branches`, `prompts.abandoned_attempts`), and each summary is proposed
+to product memory with the burst that made it. The summary is structural — the row,
+the engine's `subtype` (now in the result file), the rail's reason — because the
+platform does not read transcripts. `tests/test_fork_rails.py` is the done-when.
+
 With `LEDGER_DSN` and/or `ARCHIVE_URL` set, `uv run pytest` additionally runs that
 store's contract suite (`test_ledger_contract.py`, `test_archive_contract.py`)
 against the service backend as well as the single-node one. Everything else keeps

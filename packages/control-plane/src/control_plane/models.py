@@ -336,6 +336,12 @@ class BurstRecord:
     # NULL is the honest value for every burst that ran on the machine's own
     # credential — the whole MVP, and any deployment with an empty pool.
     subscription_id: str | None = None
+    # Set when the scheduler abandons this node (H5): the attempt ran and did not
+    # work, so no burst resumes it — the next one branches from its parent. The
+    # value is the branch summary that branch is shown; None is a live node.
+    # Written only by `abandon_burst`, never by `finish_burst`: abandoning is the
+    # rail's judgement about a finished burst, not something the burst learned.
+    branch_summary: str | None = None
 
 
 # What `finish_burst` writes — everything a burst learns by ending. Shared by both

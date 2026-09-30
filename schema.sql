@@ -172,6 +172,10 @@ CREATE TABLE bursts (
     -- pick. NULL is the honest value for a burst that ran on the machine's own
     -- credential — the whole MVP, and any deployment with an empty pool.
     subscription_id       text CONSTRAINT bursts_subscription_fk REFERENCES subscriptions (subscription_id),
+    -- set when the scheduler abandons this node (H5): the attempt ran and did
+    -- not work, so no burst resumes it. The value is the branch summary the next
+    -- branch is shown; NULL is a live node.
+    branch_summary        text CONSTRAINT bursts_branch_summary_check CHECK (branch_summary <> ''),
     started_at            timestamptz NOT NULL DEFAULT now(),
     finished_at           timestamptz,
     exit_code             integer,
@@ -196,9 +200,10 @@ CREATE INDEX bursts_subscription_started_idx ON bursts (subscription_id, started
 -- the next burst's volume. Partial on exactly the query's predicate — archived,
 -- and the dev's. The role filter is the B5 wall in miniature: a tester burst
 -- archives its volume as *evidence*, and must never become what the next dev
--- burst resumes. Reviewer bursts archive nothing and never enter.
+-- burst resumes. Reviewer bursts archive nothing and never enter. An abandoned
+-- node (H5) is not a leaf either: the next burst branches from its parent.
 CREATE INDEX bursts_session_leaf ON bursts (task_id, started_at)
-    WHERE session_key IS NOT NULL AND role = 'dev';
+    WHERE session_key IS NOT NULL AND role = 'dev' AND branch_summary IS NULL;
 
 -- WALL: sessions are single-writer — at most one running burst per task, as a
 -- constraint, not a scheduler promise. Any claiming bug becomes a constraint

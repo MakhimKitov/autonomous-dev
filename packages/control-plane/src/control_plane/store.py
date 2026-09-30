@@ -460,6 +460,8 @@ class Ledger(Protocol):
     def finish_burst(self, burst: BurstRecord) -> None: ...
     def get_burst(self, burst_id: str) -> BurstRecord | None: ...
     def latest_archived_burst(self, task_id: str) -> BurstRecord | None: ...
+    def abandon_burst(self, burst_id: str, summary: str) -> bool: ...
+    def abandoned_branches(self, task_id: str, parent_burst_id: str | None) -> list[BurstRecord]: ...
     def running_bursts(
         self, repository: str | None = None, *, orphaned: bool = False
     ) -> list[BurstRecord]: ...
@@ -653,7 +655,8 @@ CREATE TABLE IF NOT EXISTS bursts (
     session_id TEXT,
     session_key TEXT,
     session_checksum TEXT,
-    subscription_id TEXT
+    subscription_id TEXT,
+    branch_summary TEXT CHECK (branch_summary <> '')
 );
 CREATE TABLE IF NOT EXISTS violations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -715,6 +718,8 @@ _ADDITIVE_COLUMNS = (
     # 0018, F2 (#39) — NULL: the burst ran on the machine's own credential, which
     # is what every burst in a file this old did
     ("bursts", "subscription_id", "TEXT"),
+    # 0021, H5 (#107) — NULL: a live node, which every burst in a file this old is
+    ("bursts", "branch_summary", "TEXT CHECK (branch_summary <> '')"),
 )
 
 
@@ -1252,13 +1257,33 @@ class SqliteLedger:
         and what its `resumed_from_burst_id` points at. The role filter is what
         makes a tester's archived snapshot evidence rather than memory (B5):
         without it, one archived tester burst and the next dev round would
-        resume the tester's session."""
+        resume the tester's session. An abandoned node (H5) is no leaf either:
+        the next burst branches from its parent instead."""
         row = self._conn.execute(
             "SELECT * FROM bursts WHERE task_id = ? AND session_key IS NOT NULL "
-            "AND role = 'dev' ORDER BY started_at DESC, burst_id DESC LIMIT 1",
+            "AND role = 'dev' AND branch_summary IS NULL "
+            "ORDER BY started_at DESC, burst_id DESC LIMIT 1",
             (task_id,),
         ).fetchone()
         return BurstRecord(**dict(row)) if row else None
+
+    def abandon_burst(self, burst_id: str, summary: str) -> bool:
+        # the same CAS as Postgres: a finished, live node, abandoned once
+        cursor = self._conn.execute(
+            "UPDATE bursts SET branch_summary = ? WHERE burst_id = ? "
+            "AND status <> 'running' AND branch_summary IS NULL",
+            (summary, burst_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def abandoned_branches(self, task_id: str, parent_burst_id: str | None) -> list[BurstRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM bursts WHERE task_id = ? AND role = 'dev' AND branch_summary IS NOT NULL "
+            "AND resumed_from_burst_id IS ? ORDER BY started_at, burst_id",
+            (task_id, parent_burst_id),
+        ).fetchall()
+        return [BurstRecord(**dict(row)) for row in rows]
 
     def running_bursts(
         self, repository: str | None = None, *, orphaned: bool = False
