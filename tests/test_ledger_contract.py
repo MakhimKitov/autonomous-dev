@@ -687,6 +687,72 @@ def test_the_leaf_is_per_task(ledger):
         assert leaf.session_key == session_key(tid(issue_number), f"b-{issue_number}")
 
 
+def _node(ledger, burst_id, started, parent=None, status=BurstStatus.FAILED):
+    burst = _burst(
+        burst_id, started_at=started, resumed_from_burst_id=parent,
+        session_key=session_key(tid(), burst_id), session_checksum="c" * 64,
+    )
+    ledger.record_burst(burst)
+    burst.status = status
+    burst.finished_at = started
+    ledger.finish_burst(burst)
+    return burst
+
+
+def test_an_abandoned_node_is_no_leaf_and_its_parent_is(ledger):
+    """Retry ≠ branch (H5): an attempt the rail abandoned stays in the tree —
+    its row, its snapshot — but the leaf query steps over it, so the next burst
+    grows from the node it grew from. Abandoning the root attempt leaves no leaf
+    at all: the next burst starts from the task's start."""
+    ledger.upsert_task(_task())
+    _node(ledger, "good", "2026-08-14T09:00:00+00:00", status=BurstStatus.SUCCEEDED)
+    _node(ledger, "tried", "2026-08-14T10:00:00+00:00", parent="good")
+    assert ledger.latest_archived_burst(tid()).burst_id == "tried"
+
+    assert ledger.abandon_burst("tried", "Attempt tried ran out of turns and was abandoned: x.")
+    assert ledger.latest_archived_burst(tid()).burst_id == "good"
+    assert ledger.get_burst("tried").branch_summary.startswith("Attempt tried")
+
+    assert ledger.abandon_burst("good", "the root, abandoned too")
+    assert ledger.latest_archived_burst(tid()) is None
+
+
+def test_abandoning_is_once_and_never_while_running(ledger):
+    """The rail's judgement is about a finished burst: a running one cannot be
+    abandoned, and a second judgement neither overwrites the first nor says it
+    happened — so a summary is proposed once."""
+    ledger.upsert_task(_task())
+    ledger.upsert_task(_task(43))  # its own task: one running burst per task is a wall
+    ledger.record_burst(_burst("live", issue_number=43))
+    assert not ledger.abandon_burst("live", "too early")
+    assert ledger.get_burst("live").branch_summary is None
+
+    _node(ledger, "done", "2026-08-14T09:00:00+00:00")
+    assert ledger.abandon_burst("done", "first")
+    assert not ledger.abandon_burst("done", "second")
+    assert ledger.get_burst("done").branch_summary == "first"
+    assert not ledger.abandon_burst("nobody", "absent")
+
+
+def test_the_abandoned_branches_of_a_node_are_its_own(ledger):
+    """What a new branch from a node is shown: the abandoned attempts grown from
+    *that* node, oldest first — not a sibling's, not a live child, and the root
+    (no parent) is a node like any other."""
+    ledger.upsert_task(_task())
+    _node(ledger, "root-try", "2026-08-14T08:00:00+00:00")
+    _node(ledger, "good", "2026-08-14T09:00:00+00:00", status=BurstStatus.SUCCEEDED)
+    _node(ledger, "try-1", "2026-08-14T10:00:00+00:00", parent="good")
+    _node(ledger, "try-2", "2026-08-14T11:00:00+00:00", parent="good")
+    _node(ledger, "live", "2026-08-14T12:00:00+00:00", parent="good")
+    for burst_id in ("root-try", "try-2", "try-1"):
+        ledger.abandon_burst(burst_id, f"summary of {burst_id}")
+
+    assert [b.burst_id for b in ledger.abandoned_branches(tid(), "good")] == ["try-1", "try-2"]
+    assert [b.burst_id for b in ledger.abandoned_branches(tid(), None)] == ["root-try"]
+    assert ledger.abandoned_branches(tid(), "live") == []
+    assert ledger.abandoned_branches(tid(43), "good") == []
+
+
 def test_the_snapshot_is_written_by_finalize(ledger):
     """Harvest sets the key and checksum on the record, and `finish_burst` is what
     persists them — so a burst that never finalizes leaves no leaf, even if its

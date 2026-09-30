@@ -57,6 +57,11 @@ class BurstResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     is_error: bool = False
+    # How the engine says the run ended — `success`, `error_max_turns`,
+    # `error_max_budget_usd`, `error_during_execution`. Read by the control
+    # plane's branch summary (H5), which describes an abandoned attempt from
+    # what it can see without reading the transcript.
+    subtype: str | None = None
     error: str | None = None  # what killed the burst, when something did
     # What this burst learned that outlives it (TO-BE §9, H2 of Stage H): claims
     # with evidence, *proposed* — the control plane stores them with provenance
@@ -78,6 +83,9 @@ def _to_options(env: BurstEnv) -> ClaudeAgentOptions:
         cwd=str(env.repo_dir),
         system_prompt=build_system_prompt(env.role, env.repo_dir),
         resume=env.resume_session_id,
+        # a fork only means something with a session to fork from; without one
+        # the flag is inert, and it is passed as given rather than second-guessed
+        fork_session=env.fork_session,
         max_turns=env.max_turns,
         max_budget_usd=env.max_budget_usd,
         permission_mode=env.permission_mode,  # type: ignore[arg-type]
@@ -148,6 +156,7 @@ async def run_burst(env: BurstEnv) -> BurstResult:
                 result.num_turns = getattr(message, "num_turns", None)
                 result.total_cost_usd = getattr(message, "total_cost_usd", None)
                 result.is_error = bool(getattr(message, "is_error", False))
+                result.subtype = getattr(message, "subtype", None)
                 usage = getattr(message, "usage", None) or {}
                 result.input_tokens = usage.get("input_tokens")
                 result.output_tokens = usage.get("output_tokens")

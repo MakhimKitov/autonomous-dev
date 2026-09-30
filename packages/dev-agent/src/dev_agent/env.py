@@ -26,6 +26,10 @@ BURST_KIND = "AGENT_BURST_KIND"
 TASK_PROMPT = "AGENT_TASK_PROMPT"
 REPO_DIR = "AGENT_REPO_DIR"
 RESUME_SESSION_ID = "AGENT_RESUME_SESSION_ID"
+# Set when the resumed node already has an abandoned attempt grown from it (H5):
+# the burst is a new branch, so the SDK forks the session to a new id rather
+# than continuing the one the abandoned attempt continued.
+FORK_SESSION = "AGENT_FORK_SESSION"
 MAX_BUDGET_USD = "AGENT_MAX_BUDGET_USD"
 MAX_TURNS = "AGENT_MAX_TURNS"
 PERMISSION_MODE = "AGENT_PERMISSION_MODE"
@@ -105,6 +109,7 @@ class BurstEnv:
     repo_dir: Path = field(default_factory=lambda: Path(CONTAINER_REPO_DIR))
     session_dir: Path = field(default_factory=lambda: Path(CONTAINER_SESSION_DIR))
     resume_session_id: str | None = None
+    fork_session: bool = False
     max_budget_usd: float | None = None
     max_turns: int | None = None
     permission_mode: str = DEFAULT_PERMISSION_MODE
@@ -177,6 +182,7 @@ class BurstEnv:
             repo_dir=Path(env.get(REPO_DIR, CONTAINER_REPO_DIR)),
             session_dir=Path(env.get(CLAUDE_CONFIG_DIR, CONTAINER_SESSION_DIR)),
             resume_session_id=env.get(RESUME_SESSION_ID) or None,
+            fork_session=env.get(FORK_SESSION) == "1",
             max_budget_usd=_float(MAX_BUDGET_USD),
             max_turns=_int(MAX_TURNS),
             permission_mode=env.get(PERMISSION_MODE, DEFAULT_PERMISSION_MODE),

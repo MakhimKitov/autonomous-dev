@@ -19,6 +19,7 @@ def test_minimal_env_parses_with_defaults():
     assert env.session_dir == Path(agentenv.CONTAINER_SESSION_DIR)
     assert env.permission_mode == agentenv.DEFAULT_PERMISSION_MODE
     assert env.resume_session_id is None
+    assert env.fork_session is False
     assert env.result_path == Path(agentenv.CONTAINER_SESSION_DIR) / agentenv.BURST_RESULT_FILENAME
 
 
@@ -49,6 +50,8 @@ def test_full_env_parses():
     assert env.max_budget_usd == 2.5
     assert env.max_turns == 40
     assert env.session_dir == Path("/tmp/session")
+    assert env.fork_session is False  # resuming is continuing, unless told to fork
+    assert BurstEnv.from_environ(MINIMAL | {agentenv.FORK_SESSION: "1"}).fork_session is True
     assert env.violations_path == Path("/tmp/session") / agentenv.VIOLATIONS_FILENAME
 
 
