@@ -185,7 +185,7 @@ def rig(request, tmp_path, monkeypatch, pg_dsn):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    def sync_clone():
+    def sync_clone(task):
         probe.probe("sync_clone")
         return repo
 

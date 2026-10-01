@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             repo_dir,
             row.team,
             rails=replace(rails, daily_burst_ceiling=row.daily_bursts, concurrency=row.concurrency),
-            sync_clone=lambda: repo_dir,
+            sync_clone=lambda task: repo_dir,
             runner=runner,
         )
 

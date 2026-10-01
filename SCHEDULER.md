@@ -468,15 +468,29 @@ registry row's lease pair (columns since 0002) and the `concurrency` count to `c
 
 ## The clone
 
-Bursts mount a **platform-owned clone** (`data/clones/<owner>__<name>/`), never the
-operator's working copy — a burst mutates its checkout (branch, `--local` git config,
-bytecode churn), and that state must stay platform state (issue #4; learned the hard
-way when a burst left the operator's clone on the PR branch with the bot's identity).
-The scheduler re-syncs it to origin's default branch before every burst: fetch →
-reset → clean (ignored files survive, so the product `.venv` stays warm). Assess
-bursts sync it to the **PR head instead (detached)** and mount it **read-only**
-(REVIEWERS.md). The lifecycle invariant: one clone, serial bursts, **sync before
-every mount** — whatever a burst leaves behind is erased before the next one looks.
+Bursts mount a **platform-owned clone**, never the operator's working copy — a burst
+mutates its checkout (branch, `--local` git config, bytecode churn), and that state must
+stay platform state (issue #4; learned the hard way when a burst left the operator's clone
+on the PR branch with the bot's identity). Since H3 it is **one tree per task**
+(`data/clones/tasks/<owner>__<name>/<issue>/`) seeded from **one bare cache per
+repository** (`data/clones/cache/<owner>__<name>.git`), because two replicas on one host
+share the data dir and a product's `concurrency` may run two of its bursts there at once —
+never two of one task, whose bursts the ledger serializes. The scheduler re-syncs the
+task's tree to origin's default branch before every burst: fetch → reset → clean (ignored
+files survive, so the `.venv` stays warm across the task's work, rounds, assess and test;
+the task's first burst pays a cold `uv sync`). Assess and test bursts sync it to the **PR
+head instead (detached)** and mount it **read-only** (REVIEWERS.md). The lifecycle
+invariant: serial bursts per tree, **sync before every mount** — whatever a burst leaves
+behind is erased before the next one looks, and is never in another task's tree.
+
+A tree is a plain local clone of the cache (objects hardlinked): no alternates and no
+`git worktree` link, because the box mounts it at `/workspace` and a tree that pointed
+back at a host path would be a broken repository in there. Its `origin` is the product's
+URL, never the cache. Every sync first sweeps the trees of tasks the ledger says are
+`done` (or never heard of), so a host keeps one tree per live task. The cache's fetch and
+clone-from-cache take a `flock` on `cache/<owner>__<name>.lock` for one git command's span
+— the kernel drops it if the holder dies. A pre-H3 `data/clones/<owner>__<name>/` is no
+longer read; delete it at leisure.
 Always HTTPS; for private repos the token travels as a per-invocation header, never
 written into config that gets mounted into the box.
 
