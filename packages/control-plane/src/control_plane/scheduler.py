@@ -188,15 +188,15 @@ class Scheduler:
         tester_login: str | None = None,
         secrets: SecretResolver | None = None,
         image: str = DEFAULT_IMAGE,
-        sync_clone: Callable[[], Path] | None = None,
-        sync_clone_ref: Callable[[str], Path] | None = None,
+        sync_clone: Callable[[TaskRecord], Path] | None = None,
+        sync_clone_ref: Callable[[TaskRecord, str], Path] | None = None,
         replica: str | None = None,
         halt: threading.Event | None = None,
         runner: Runner | None = None,
     ) -> None:
         self.stores = stores
         self.api = api
-        self.repo = repo  # the platform-owned clone (issue #4), never the operator's
+        self.repo = repo  # the platform-owned clone (issue #4), never the operator's; the fallback without sync_clone
         self.owner = owner  # the human whose changes-requested reviews trigger rounds
         self.rails = rails or Rails()
         self.review = review or ReviewPolicy()  # ships off (REVIEWERS.md)
@@ -216,8 +216,9 @@ class Scheduler:
         self.image = image
         # model, budget and turns are the role row's (D5) — execute_burst reads
         # them at spawn; the scheduler no longer carries a model at all
-        self.sync_clone = sync_clone  # re-syncs the platform clone; called before every burst
-        self.sync_clone_ref = sync_clone_ref  # same, to a PR head sha (assess bursts)
+        # re-syncs the task's own tree of the platform clone (H3); called before every burst
+        self.sync_clone = sync_clone
+        self.sync_clone_ref = sync_clone_ref  # same, to a PR head sha (assess and test bursts)
         self.replica = replica or default_replica()  # the name on this replica's leases (E1)
         # the process's shutdown flag (E3): `_serve` sets it on SIGTERM/SIGINT,
         # the tick reads it, the heartbeat fences on it. A fleet shares one across
@@ -624,7 +625,7 @@ class Scheduler:
         repo = self.repo
         if self.sync_clone is not None:
             try:
-                repo = self.sync_clone()
+                repo = self.sync_clone(task)
             except CloneError as exc:
                 self._register_failure(task, f"platform clone sync failed: {exc}")
                 return
@@ -755,7 +756,7 @@ class Scheduler:
         repo = self.repo
         if self.sync_clone_ref is not None:
             try:
-                repo = self.sync_clone_ref(pr.head_sha)
+                repo = self.sync_clone_ref(task, pr.head_sha)
             except CloneError as exc:
                 self._register_failure(task, f"platform clone sync failed: {exc}")
                 return
@@ -868,7 +869,7 @@ class Scheduler:
         repo = self.repo
         if self.sync_clone_ref is not None:
             try:
-                repo = self.sync_clone_ref(pr.head_sha)
+                repo = self.sync_clone_ref(task, pr.head_sha)
             except CloneError as exc:
                 self._register_failure(task, f"platform clone sync failed: {exc}")
                 return

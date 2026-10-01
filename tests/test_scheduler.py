@@ -649,7 +649,7 @@ def test_sync_clone_feeds_the_burst_and_failures_hit_the_rail(rig, tmp_path):
     api.issues[1] = _issue()
     api.open_prs = [_pr()]
     platform_clone = tmp_path / "data" / "clones" / "owner__product"
-    scheduler.sync_clone = lambda: platform_clone
+    scheduler.sync_clone = lambda task: platform_clone
     captured = []
     orig = sched_mod.execute_burst
 
@@ -664,7 +664,7 @@ def test_sync_clone_feeds_the_burst_and_failures_hit_the_rail(rig, tmp_path):
         sched_mod.execute_burst = orig
     assert captured == [platform_clone]  # the platform clone, not the operator's
 
-    def broken_clone():
+    def broken_clone(task):
         raise CloneError("origin unreachable")
 
     stores.ledger.upsert_task(_task(2, status=TaskStatus.CLAIMED))

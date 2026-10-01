@@ -657,6 +657,17 @@ to product memory with the burst that made it. The summary is structural — the
 the engine's `subtype` (now in the result file), the rail's reason — because the
 platform does not read transcripts. `tests/test_fork_rails.py` is the done-when.
 
+**One tree per task (H3)**: the platform clone is a bare cache per repository
+(`clones/cache/<owner>__<name>.git`) seeding one tree per task
+(`clones/tasks/<owner>__<name>/<issue>`), because replicas on one host share the
+data dir and a product's `concurrency` can put two of its bursts there at once.
+`sync_clone(task)` / `sync_clone_ref(task, ref)` take the task; cli's
+`_task_trees` sweeps the trees of `done` tasks before every sync (`prune_trees`). A
+tree is a plain local clone (hardlinks, no alternates, no worktree link) — the box
+mounts it at `/workspace`, where a pointer back to a host path would break git. The
+`.venv` stays warm across one task's bursts; a task's first burst syncs it cold.
+`tests/test_clone.py` is the done-when.
+
 With `LEDGER_DSN` and/or `ARCHIVE_URL` set, `uv run pytest` additionally runs that
 store's contract suite (`test_ledger_contract.py`, `test_archive_contract.py`)
 against the service backend as well as the single-node one. Everything else keeps

@@ -30,7 +30,7 @@ from opentelemetry import trace
 
 from control_plane.backfill import BackfillError, run_backfill
 from control_plane.bursts import PlatformStores, execute_burst
-from control_plane.clone import CloneError, prepare_clone
+from control_plane.clone import CloneError, cache_dir, prepare_cache, prepare_clone, prune_trees
 from control_plane.github_api import COPILOT_TOKEN_ENV, GitHubApi, GitHubApiError, slug_from_origin
 from control_plane.github_auth import (
     REVIEWER_APP_PREFIX,
@@ -52,6 +52,7 @@ from control_plane.models import (
     SubscriptionRecord,
     SubscriptionStatus,
     TaskRecord,
+    TaskStatus,
     task_id_for,
 )
 from control_plane.preflight import PreflightError, run_preflight
@@ -1018,6 +1019,26 @@ def _serve(engine, interval: int, once: bool) -> int:
     return 0
 
 
+def _task_trees(stores, clones_root: Path, slug: str, token_cache):
+    """The scheduler's two sync callables for one product (H3): each burst gets
+    its task's own tree, and every sync first sweeps the trees of tasks the
+    ledger says are done — so a host keeps one tree per live task."""
+
+    def finished(issue_number: int) -> bool:
+        task = stores.ledger.get_task(task_id_for(slug, issue_number))
+        return task is None or task.status == TaskStatus.DONE
+
+    def sync_clone(task: TaskRecord) -> Path:
+        prune_trees(clones_root, slug, finished)
+        return prepare_clone(clones_root, slug, task.issue_number, token_cache())
+
+    def sync_clone_ref(task: TaskRecord, ref: str) -> Path:
+        prune_trees(clones_root, slug, finished)
+        return prepare_clone(clones_root, slug, task.issue_number, token_cache(), ref=ref)
+
+    return sync_clone, sync_clone_ref
+
+
 def _run_fleet(
     args: argparse.Namespace,
     stores: PlatformStores,
@@ -1121,16 +1142,12 @@ def _run_fleet(
             GitHubApi(slug, tester_cache) if testing.enabled and tester_cache is not None else None
         )
 
-        def sync_clone() -> Path:
-            return prepare_clone(clones_root, slug, token_cache())
-
-        def sync_clone_ref(ref: str) -> Path:
-            return prepare_clone(clones_root, slug, token_cache(), ref=ref)
+        sync_clone, sync_clone_ref = _task_trees(stores, clones_root, slug, token_cache)
 
         return Scheduler(
             stores,
             api,
-            clones_root / slug.replace("/", "__"),  # synced before every burst
+            cache_dir(clones_root, slug),  # never mounted: every burst gets its task's tree
             args.owner or api.repo_owner(),
             # the row's quotas: its daily ceiling and, E2, its concurrency —
             # counted at admission across every replica of the fleet
@@ -1253,15 +1270,12 @@ def _run_scheduler(args: argparse.Namespace) -> int:
 
     clones_root = stores.data_dir / "clones"
 
-    def sync_clone() -> Path:
-        return prepare_clone(clones_root, slug, token_cache())
-
-    def sync_clone_ref(ref: str) -> Path:
-        return prepare_clone(clones_root, slug, token_cache(), ref=ref)
+    sync_clone, sync_clone_ref = _task_trees(stores, clones_root, slug, token_cache)
 
     try:
         owner = args.owner or api.repo_owner()
-        platform_clone = sync_clone()  # bursts mount this, never the operator's copy (#4)
+        # bursts mount their task's tree of this cache, never the operator's copy (#4, H3)
+        platform_clone = prepare_cache(clones_root, slug, token_cache())
     except (GitHubApiError, CloneError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

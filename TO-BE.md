@@ -407,7 +407,8 @@ per-task state machines, run bursts. What changes is where and how much at once.
 - **The clone** becomes a per-runner cache keyed by repo, synced before every mount —
   same invariant ("whatever a burst leaves behind is erased before the next look"),
   now safe under concurrency because a task's bursts are serialized and caches are
-  per-runner.
+  per-runner. *Built (H3):* the cache seeds one tree per task, so two bursts on one
+  runner never share a working tree (SCHEDULER.md, "The clone").
 
 ## 7. Task lifecycle at scale
 
