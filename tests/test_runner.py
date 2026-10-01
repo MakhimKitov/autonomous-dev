@@ -313,3 +313,11 @@ def test_alive_is_false_when_docker_lists_nothing(monkeypatch):
         subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")
     )
     assert DockerRunner().alive("gone") is False
+
+
+def test_a_runtime_is_docker_runs_own_flag_and_absent_by_default():
+    """G4: the golden replay's runtime under docker is `--runtime` (runsc, kata-runtime)."""
+    assert "--runtime" not in DockerRunner().build_command(_spec())
+    cmd = DockerRunner().build_command(_spec(runtime_class="runsc"))
+    assert cmd[cmd.index("--runtime") + 1] == "runsc"
+    assert cmd.index("--runtime") < cmd.index("autonomous-dev/dev-agent:latest")

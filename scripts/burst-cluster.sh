@@ -4,6 +4,7 @@
 # rehearsed against. Idempotent: run it again and it repairs what is missing.
 #
 #   ./scripts/burst-cluster.sh            # build it, print the exports
+#   ./scripts/burst-cluster.sh --gvisor   # ...and a second RuntimeClass, `gvisor` (G4)
 #   ./scripts/burst-cluster.sh --delete   # take it away
 #
 # Two things here are not obvious, and both are about a laptop rather than about
@@ -25,6 +26,11 @@ NAMESPACE="${BURST_NAMESPACE:-bursts}"
 BUCKET="${BURST_BUCKET:-burst-cluster}"
 PHASES_IMAGE="${BURST_PHASES_IMAGE:-autonomous-dev/burst-phases:latest}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The golden replay's second runtime (G4): gVisor, pinned and checksummed. It is
+# the candidate a kind node can carry — Kata wants nested virtualization, which
+# neither a laptop's VM nor a CI runner offers — so the harness is proven here
+# on two runtimes, and the bake-off proper (G5) runs it on hardware with all three.
+GVISOR_RELEASE="${BURST_GVISOR_RELEASE:-20260921.0}"
 
 if [[ "${1:-}" == "--delete" ]]; then
   kind delete cluster --name "$CLUSTER"
@@ -58,6 +64,37 @@ fi
 echo "==> building and loading the phases image"
 docker build -q -f "$ROOT/docker/burst-phases/Dockerfile" -t "$PHASES_IMAGE" "$ROOT" >/dev/null
 kind load docker-image --name "$CLUSTER" "$PHASES_IMAGE"
+if [[ -n "${BURST_AGENT_IMAGE:-}" ]]; then
+  # the golden replay's agent: the real dev-agent image, built beforehand
+  kind load docker-image --name "$CLUSTER" "$BURST_AGENT_IMAGE"
+fi
+
+if [[ "${1:-}" == "--gvisor" ]]; then
+  echo "==> gVisor $GVISOR_RELEASE in the node, as RuntimeClass gvisor"
+  node="$CLUSTER-control-plane"
+  if ! docker exec "$node" test -x /usr/local/bin/runsc; then
+    # unpacked here, not in the node: the node image has no bzip2
+    arch="$(docker exec "$node" uname -m)"
+    base="https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$arch"
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    curl -fsSL -o "$work/gvisor.tar.bz2" "$base/gvisor.tar.bz2"
+    curl -fsSL -o "$work/gvisor.tar.bz2.sha512" "$base/gvisor.tar.bz2.sha512"
+    (cd "$work" && shasum -a 512 -c gvisor.tar.bz2.sha512 >/dev/null)
+    mkdir "$work/bin" && tar -xjf "$work/gvisor.tar.bz2" -C "$work/bin"
+    docker cp "$work/bin/." "$node:/usr/local/bin/"
+  fi
+  if ! docker exec "$node" grep -q "runtimes.runsc" /etc/containerd/config.toml; then
+    docker exec "$node" sh -c 'cat >> /etc/containerd/config.toml <<TOML
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+TOML
+systemctl restart containerd'
+  fi
+  kubectl --context "$ctx" apply -f "$ROOT/examples/k8s/runtimeclass-gvisor.yaml" >/dev/null
+  kubectl --context "$ctx" wait --for=condition=Ready node --all --timeout=120s >/dev/null
+fi
 
 echo "==> the namespace and the runner's account"
 kubectl --context "$ctx" apply -f "$ROOT/examples/k8s/burst-runner.yaml" >/dev/null
@@ -71,7 +108,8 @@ The cluster is up. Point a shell at it:
   export BURST_NAMESPACE=$NAMESPACE
   export ARCHIVE_URL='s3://platform:platform-dev-secret@$host_ip:8333/$BUCKET?tls=false'
   export BURST_PHASES_IMAGE=$PHASES_IMAGE
+  export BURST_REPLAY_RUNTIMES=$([[ "${1:-}" == "--gvisor" ]] && echo default,gvisor || echo default)
 
-  uv run pytest tests/test_runner_contract.py tests/test_jobs_runner.py
+  uv run pytest tests/test_runner_contract.py tests/test_jobs_runner.py tests/test_replay.py
 
 EXPORTS

@@ -367,7 +367,9 @@ per-task state machines, run bursts. What changes is where and how much at once.
   same archived session node + task replayed as an identical burst under each
   `RuntimeClass` (the session tree's fixtures), emitting the criteria matrix;
   the decision lands as a DR with data attached, and the M4 red-team suite
-  replays through the same harness.
+  replays through the same harness. *Built (G4):* `control-plane replay`
+  (`control_plane/replay.py`); CI replays a golden `check` burst under the
+  default runtime and gVisor on kind and uploads the matrix.
 - **Session choreography — sessions become a tree *(DR)***: the archive keeps
   **one immutable snapshot per burst** (`sessions/<task>/<burst>`) instead of one
   mutable blob per task, and `bursts.resumed_from_burst_id` records which snapshot

@@ -243,3 +243,33 @@ def test_the_pod_really_holds_no_service_account_token(tmp_path):
         assert rig.runner.collect(spec).result["saw"] == "nothing-there"
     finally:
         rig.teardown()
+
+
+def test_the_runtime_class_is_the_pods_and_absent_by_default(runner):
+    """G4's one knob: the golden replay runs a node under a chosen RuntimeClass,
+    and a burst that names none gets the cluster's default — no field at all,
+    rather than an empty one an API server would reject."""
+    pod = manifest(runner, _spec())["spec"]["template"]["spec"]
+    assert "runtimeClassName" not in pod
+    pod = manifest(runner, _spec(burst_id="b2", runtime_class="gvisor"))["spec"]["template"]["spec"]
+    assert pod["runtimeClassName"] == "gvisor"
+
+
+def test_the_timings_are_read_off_the_pods_own_stamps(runner, monkeypatch):
+    pod = {
+        "metadata": {"creationTimestamp": "2026-10-01T10:00:00Z"},
+        "status": {
+            "initContainerStatuses": [{"name": "init", "state": {"terminated": {
+                "startedAt": "2026-10-01T10:00:02Z", "finishedAt": "2026-10-01T10:00:05Z"}}}],
+            "containerStatuses": [
+                {"name": "agent", "state": {"terminated": {
+                    "startedAt": "2026-10-01T10:00:06Z", "finishedAt": "2026-10-01T10:00:16Z"}}},
+                {"name": "harvest", "state": {"terminated": {
+                    "startedAt": "2026-10-01T10:00:06Z", "finishedAt": "2026-10-01T10:00:18Z"}}},
+            ],
+        },
+    }
+    monkeypatch.setattr(runner, "_pod", lambda burst_id: pod)
+    assert runner.timings(BURST) == {"boot_s": 6.0, "init_s": 3.0, "agent_s": 10.0, "harvest_s": 12.0}
+    monkeypatch.setattr(runner, "_pod", lambda burst_id: None)
+    assert runner.timings(BURST) is None

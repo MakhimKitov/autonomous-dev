@@ -1,7 +1,8 @@
 """Container entrypoint: ``dev-agent run`` (a burst) / ``dev-agent check`` (boot smoke).
 
 ``check`` verifies the box is viable — env contract satisfied, clone present,
-``claude`` CLI on PATH — without touching the network. It is the M0 exit
+``claude`` CLI on PATH, and, when told to resume, the session's transcript on
+the volume — without touching the network. It is the M0 exit
 criterion ("docker run boots an agent in a clone") and the first thing to run
 when debugging an image.
 """
@@ -32,6 +33,12 @@ def _check(env: BurstEnv) -> int:
         "session_dir": env.session_dir.is_dir(),
         "at": datetime.now(UTC).isoformat(),
     }
+    if env.resume_session_id:
+        # the restore half of the snapshot choreography, checked without the
+        # engine: the transcript the CLI would resume is on the volume (G4)
+        findings["resume_transcript"] = any(
+            env.session_dir.glob(f"projects/*/{env.resume_session_id}.jsonl")
+        )
     ok = all(v is True for k, v in findings.items() if k != "at")
     env.result_path.parent.mkdir(parents=True, exist_ok=True)
     env.result_path.write_text(

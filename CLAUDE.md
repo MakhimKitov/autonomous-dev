@@ -668,6 +668,22 @@ mounts it at `/workspace`, where a pointer back to a host path would break git. 
 `.venv` stays warm across one task's bursts; a task's first burst syncs it cold.
 `tests/test_clone.py` is the done-when.
 
+**Golden replay (G4)**: `control_plane/replay.py` runs one archived node + task as
+an identical burst under each runtime and emits the criteria matrix
+(`matrix.json` + `matrix.md`); `control-plane replay FIXTURE --runtime …` is the
+verb, `--node <burst id>` replays a ledger node. The one knob is
+`BurstSpec.runtime_class` — `runtimeClassName` on the pod, `--runtime` under
+docker, None (the default) everywhere the scheduler spawns. `JobsRunner.timings`
+reads boot/init/agent/harvest off the pod's own stamps (whole seconds). A replay
+writes no ledger row and holds no GitHub credential. `dev-agent check` now also
+reports `resume_transcript` when told to resume, which is how the restore row is
+measured without the engine. The CI `cluster` job builds kind + gVisor
+(`scripts/burst-cluster.sh --gvisor`, release pinned and sha512-checked), runs
+the runner contract and `tests/test_replay.py` there, replays
+`examples/golden/check.json` under `default` and `gvisor`, and uploads the matrix.
+Kata is not on that list because a kind node has no nested virtualization; the
+bake-off proper is G5's, on hardware.
+
 With `LEDGER_DSN` and/or `ARCHIVE_URL` set, `uv run pytest` additionally runs that
 store's contract suite (`test_ledger_contract.py`, `test_archive_contract.py`)
 against the service backend as well as the single-node one. Everything else keeps

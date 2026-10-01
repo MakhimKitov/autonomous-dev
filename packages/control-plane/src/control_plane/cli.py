@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import re
 import signal
@@ -89,6 +90,7 @@ from control_plane.store import (
     open_ledger,
 )
 from control_plane.telemetry import init_telemetry
+from control_plane.volume import Snapshot
 from control_plane.testing import E2E_ENV, E2EPolicy, E2EPolicyError
 from control_plane.wake import attach_wakes
 from dev_agent.log import configure_logging
@@ -172,6 +174,32 @@ def build_parser() -> argparse.ArgumentParser:
     backfill_cmd.add_argument("--data-dir", type=Path, default=Path("data"), help="the source root")
     backfill_cmd.add_argument(
         "--dry-run", action="store_true", help="print the plan and write nothing"
+    )
+
+    replay_cmd = sub.add_parser(
+        "replay",
+        help="golden replay (G4): run one archived node + task under each runtime, "
+        "and write the criteria matrix",
+    )
+    replay_cmd.add_argument("fixture", type=Path, help="the golden burst, as JSON (control_plane.replay)")
+    replay_cmd.add_argument(
+        "--runtime",
+        action="append",
+        required=True,
+        help="a RuntimeClass name (a docker runtime under docker), or 'default'; repeat per trial",
+    )
+    replay_cmd.add_argument(
+        "--node",
+        default=None,
+        help="a burst id: replay from that burst's own snapshot and session, as the ledger "
+        "recorded them, instead of the fixture's node",
+    )
+    replay_cmd.add_argument("--out", type=Path, required=True, help="where matrix.json and matrix.md go")
+    replay_cmd.add_argument("--data-dir", type=Path, default=Path("data"), help="platform store root")
+    replay_cmd.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 when the outcomes differ, not only when a trial did not run",
     )
 
     sub.add_parser(
@@ -1393,6 +1421,41 @@ def _migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _replay(args: argparse.Namespace) -> int:
+    """`control-plane replay` (G4). Writes no ledger row and hands the trials no
+    GitHub credential — a replay is a measurement, never a burst of the task."""
+    from control_plane import replay  # local: the harness is an operator's verb
+
+    try:
+        golden = replay.GoldenBurst.load(args.fixture)
+    except replay.ReplayError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.node:
+        burst = open_ledger(args.data_dir).get_burst(args.node)
+        node = Snapshot.of(burst)
+        if burst is None or node is None:
+            print(f"error: burst {args.node} has no archived snapshot to replay from", file=sys.stderr)
+            return 2
+        golden = replace(
+            golden, task_id=burst.task_id, node=node, seed=None,
+            resume_session_id=burst.session_id or golden.resume_session_id,
+        )
+    archive = open_archive(args.data_dir)
+    runner = open_runner(archive)
+    work = args.data_dir / "replays" / golden.name
+    trials = replay.replay(golden, args.runtime, runner, archive, work)
+    table = replay.matrix(golden, trials)
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "matrix.json").write_text(json.dumps(table, indent=2) + "\n", encoding="utf-8")
+    markdown = replay.render(table)
+    (args.out / "matrix.md").write_text(markdown, encoding="utf-8")
+    print(markdown)
+    if table["errors"] or (args.strict and not table["identical"]):
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()  # the platform's .env; real env vars win — bursts still get an explicit env
     configure_logging()  # console on a TTY, logfmt everywhere else (dev_agent.log)
@@ -1411,6 +1474,8 @@ def main(argv: list[str] | None = None) -> int:
         return _migrate(args)
     if args.command == "backfill":
         return _backfill(args)
+    if args.command == "replay":
+        return _replay(args)
     if args.command == "github-check":
         return _github_check()
     if args.command == "product":

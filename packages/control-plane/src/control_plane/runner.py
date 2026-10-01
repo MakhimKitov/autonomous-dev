@@ -149,6 +149,12 @@ class BurstSpec:
     # handed to the init container and to no other (TO-BE §6). It is a second
     # token on purpose — a reviewer or tester agent still holds none.
     clone_token: str | None = None
+    # The isolation runtime this burst runs under (G4, TO-BE §6): a k8s
+    # `RuntimeClass` name on a cluster, a `docker run --runtime` name under
+    # docker. None is the substrate's default. The scheduler never sets it — the
+    # deployment's default is the decision — and the golden-replay harness sets
+    # it per trial, so one archived node can be run under each candidate.
+    runtime_class: str | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -335,6 +341,8 @@ class DockerRunner(HostPhases):
         ]
         if spec.codex_auth_dir and spec.command == "run":
             cmd += ["-v", f"{spec.codex_auth_dir}:/home/agent/.codex"]
+        if spec.runtime_class:
+            cmd += ["--runtime", spec.runtime_class]
         for key, value in burst_env(spec).items():
             cmd += ["-e", f"{key}={value}"]
         cmd += [spec.image, spec.command]
