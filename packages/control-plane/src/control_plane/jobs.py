@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import structlog
@@ -225,6 +226,7 @@ class JobsRunner:
                 "template": {
                     "metadata": {"labels": {"app": "burst", "burst": spec.burst_id}},
                     "spec": {
+                        **({"runtimeClassName": spec.runtime_class} if spec.runtime_class else {}),
                         "restartPolicy": "Never",
                         # the burst holds no k8s credential at all
                         "automountServiceAccountToken": False,
@@ -374,6 +376,33 @@ class JobsRunner:
         state = self._agent_state(pod)
         return state is None or "terminated" not in state
 
+    def timings(self, burst_id: str) -> dict[str, float] | None:
+        """How long each part of the pod took, in seconds, read off its status —
+        what the golden-replay harness reports per runtime (G4). Asked after
+        `run`, while the finished pod is still kept (`TTL_AFTER_FINISHED_S`).
+
+        ``boot_s`` is the bake-off's first criterion: the pod's creation to the
+        agent container's start — scheduling, the sandbox's own boot, image
+        unpack and the init phase together, which is what a burst waits for.
+        ``init_s``, ``agent_s`` and ``harvest_s`` split it. The cluster stamps
+        whole seconds, so these are too. None: the pod is gone or never ran.
+        """
+        pod = self._pod(burst_id)
+        if pod is None:
+            return None
+        status = pod.get("status", {})
+        created = _stamp(pod.get("metadata", {}).get("creationTimestamp"))
+        init = _terminated(status.get("initContainerStatuses"), "init")
+        agent = _terminated(status.get("containerStatuses"), "agent")
+        harvest = _terminated(status.get("containerStatuses"), "harvest")
+        out: dict[str, float] = {}
+        if created is not None and agent:
+            out["boot_s"] = agent[0] - created
+        for name, span in (("init_s", init), ("agent_s", agent), ("harvest_s", harvest)):
+            if span:
+                out[name] = span[1] - span[0]
+        return out or None
+
     # --- phase three: what the harvester shipped ---
 
     def collect(self, spec: BurstSpec) -> BurstArtifacts:
@@ -469,6 +498,23 @@ class JobsRunner:
         if terminated is None or "exitCode" not in terminated:
             return FENCED_EXIT_CODE
         return int(terminated["exitCode"])
+
+
+def _stamp(value: str | None) -> float | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def _terminated(statuses: list[dict] | None, name: str) -> tuple[float, float] | None:
+    """``(started, finished)`` of a container that has ended, or None."""
+    for status in statuses or []:
+        if status.get("name") == name:
+            ended = (status.get("state") or {}).get("terminated") or {}
+            started, finished = _stamp(ended.get("startedAt")), _stamp(ended.get("finishedAt"))
+            if started is not None and finished is not None:
+                return started, finished
+    return None
 
 
 def job_name(burst_id: str) -> str:

@@ -1,5 +1,8 @@
 """The container entrypoint — what it binds before it does anything else."""
 
+import json
+
+import pytest
 import structlog
 from dev_agent import cli
 from dev_agent import env as agentenv
@@ -52,3 +55,24 @@ def test_an_untraced_burst_still_binds_what_it_knows(monkeypatch):
         structlog.contextvars.clear_contextvars()
 
     assert seen == {"task_id": "owner/product#42", "burst_id": "b9"}
+
+
+@pytest.mark.parametrize("restored", [True, False])
+def test_check_reports_whether_the_resumed_session_was_restored(tmp_path, monkeypatch, restored):
+    """The golden replay's restore criterion without the engine (G4): told to
+    resume a session, `check` looks for that session's transcript where the CLI
+    would — and a box missing it is not viable."""
+    session, repo = tmp_path / "session", tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    session.mkdir()
+    if restored:
+        (session / "projects" / "-workspace").mkdir(parents=True)
+        (session / "projects" / "-workspace" / "sess-1.jsonl").write_text("{}\n", encoding="utf-8")
+    env = agentenv.BurstEnv(
+        task_id="t", burst_id="b", repo_dir=repo, session_dir=session, resume_session_id="sess-1"
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/claude")
+    code = cli._check(env)
+    findings = json.loads(env.result_path.read_text())["check"]
+    assert findings["resume_transcript"] is restored
+    assert code == (0 if restored else 2)

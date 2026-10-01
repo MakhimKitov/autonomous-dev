@@ -110,6 +110,49 @@ jobs:
         # manifests are examples (TO-BE §5) and this is what keeps them from rotting.
         run: docker run --rm -v "$PWD/examples/k8s:/m:ro" ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary /m
 
+  # Bursts as Jobs, on a real cluster (G3/G4): the runner contract against
+  # JobsRunner, and the golden replay (#45) — one node under the cluster's
+  # default runtime and under gVisor — whose matrix is this job's artifact.
+  cluster:
+    runs-on: ubuntu-latest
+    env:
+      KIND_VERSION: v0.31.0
+      BURST_NAMESPACE: bursts
+      BURST_PHASES_IMAGE: autonomous-dev/burst-phases:latest
+      BURST_AGENT_IMAGE: autonomous-dev/dev-agent:latest
+      BURST_REPLAY_RUNTIMES: default,gvisor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: kind, pinned
+        run: |
+          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/$KIND_VERSION/kind-linux-amd64"
+          sudo install -m 0755 kind /usr/local/bin/kind
+      - name: the agent image the golden burst runs
+        run: docker build -q -f docker/dev-agent/Dockerfile -t "$BURST_AGENT_IMAGE" .
+      - name: the cluster, the archive, and gVisor as a second RuntimeClass
+        run: |
+          ./scripts/burst-cluster.sh --gvisor | tee cluster.txt
+          # the archive's address is the host's, which only the script knows
+          grep -o "ARCHIVE_URL='[^']*'" cluster.txt | tr -d "'" >> "$GITHUB_ENV"
+      - name: the runner contract and the harness, on the cluster
+        run: uv run pytest tests/test_runner_contract.py tests/test_jobs_runner.py tests/test_replay.py
+      - name: the golden replay
+        run: |
+          uv run control-plane replay examples/golden/check.json \
+            --runtime default --runtime gvisor --data-dir data --out replay --strict
+          cat replay/matrix.md >> "$GITHUB_STEP_SUMMARY"
+      - name: the criteria matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-replay-matrix
+          path: replay/
+          if-no-files-found: error
+
   # The state block's per-PR proof: the schema applies from nothing, twice, and
   # the suite then runs against the real service backends rather than the
   # single-node ones alone — a real Postgres and a real S3 bucket.

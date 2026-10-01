@@ -1,0 +1,9 @@
+# The gVisor RuntimeClass the golden replay (G4) runs its second trial under.
+# `handler` names the containerd runtime the node was configured with —
+# `scripts/burst-cluster.sh --gvisor` installs it on a kind node; on a real
+# cluster it is the node pool's, and the bake-off (G5) adds one per candidate.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
