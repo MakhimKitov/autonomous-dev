@@ -31,6 +31,7 @@ its prompt the way `CLAUDE.md` is baked for the dev:
 ---
 env: [DISCORD_TOKEN, GUILD_ID]   # names only — values live platform-side
 tools: []                         # from the platform's registry; [] = base image
+egress: [discord.com, gateway.discord.gg]  # the sandbox's hosts: the burst's egress declaration (G6)
 ---
 # E2E testing contract
 Boot: `uv run python -m bot`; online when the log says "commands synced …".
@@ -38,6 +39,11 @@ Drive: bots cannot invoke another bot's slash commands — invoke handlers
 in-process; verify registration via Discord REST. Scenarios: from the PRD,
 focused on the PR's diff.
 ```
+
+`egress` is optional and names hosts, never patterns or addresses: the tester burst's
+egress declaration (`control_plane/egress.py`, the `autonomous-dev/egress` annotation on
+its Job) carries them beside the platform's own, and an adopter's CNI policy is built
+from that declaration. A dev or reviewer burst never declares them.
 
 A product with no `TESTING.md` is not testable — that is a product property, not an
 error: the scheduler skips the test stage and logs it. A frontmatter that doesn't parse

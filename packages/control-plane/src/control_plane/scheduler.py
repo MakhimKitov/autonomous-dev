@@ -901,6 +901,7 @@ class Scheduler:
                 image=self.image,
                 burst_id=self.current_burst_id,
                 extra_env=sandbox_env,  # the resolved intersection — tester bursts only
+                egress=manifest.egress,  # its sandbox hosts, declared beside the refs (G6)
                 heartbeat=self._heartbeat(task),
                 runner=self.runner,
                 capacity=capacity,

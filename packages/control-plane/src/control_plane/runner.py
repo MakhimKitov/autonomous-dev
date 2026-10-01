@@ -155,6 +155,11 @@ class BurstSpec:
     # deployment's default is the decision — and the golden-replay harness sets
     # it per trial, so one archived node can be run under each candidate.
     runtime_class: str | None = None
+    # The hosts the product declared for this burst on top of the platform's own
+    # (G6): a tester's sandbox endpoints, from `TESTING.md`'s `egress:` — the
+    # same manifest its sandbox credentials come from. Data for the egress
+    # declaration (`control_plane.egress`); nothing in the box reads it.
+    egress: tuple[str, ...] = ()
     extra_env: dict[str, str] = field(default_factory=dict)
 
 

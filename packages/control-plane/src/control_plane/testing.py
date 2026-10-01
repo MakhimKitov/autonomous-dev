@@ -29,6 +29,7 @@ MANIFEST_FILENAME = "TESTING.md"
 RECOGNIZED_TOOLS: tuple[str, ...] = ()  # slice 2 adds "playwright"
 
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")  # boring env names only — no smuggling
+_HOST = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")  # a name, not a pattern
 
 
 class E2EPolicyError(ValueError):
@@ -105,11 +106,15 @@ class TestManifest:
 
     env: tuple[str, ...] = ()
     tools: tuple[str, ...] = ()
+    # the sandbox's hosts, for the burst's egress declaration (G6) — names only:
+    # the declaration is data an adopter's policy is built from, so a pattern
+    # would be a policy decision made in a product's frontmatter
+    egress: tuple[str, ...] = ()
     prose: str = ""  # the tester agent's operating contract, verbatim
 
 
 def parse_manifest(text: str) -> TestManifest:
-    """Frontmatter between ``---`` fences: ``env``/``tools`` flow lists only.
+    """Frontmatter between ``---`` fences: ``env``/``tools``/``egress`` flow lists only.
 
     Deliberately strict and deliberately not a YAML parser — two keys, one
     shape. Unknown keys refuse: a manifest asking for more than the socket
@@ -129,7 +134,7 @@ def parse_manifest(text: str) -> TestManifest:
             continue
         key, sep, value = bare.partition(":")
         key, value = key.strip(), value.strip()
-        if not sep or key not in ("env", "tools"):
+        if not sep or key not in ("env", "tools", "egress"):
             raise ManifestError(f"{MANIFEST_FILENAME} frontmatter: unknown line {line.strip()!r}")
         if not (value.startswith("[") and value.endswith("]")):
             raise ManifestError(f"{MANIFEST_FILENAME} frontmatter: {key} must be a [flow, list]")
@@ -146,7 +151,11 @@ def parse_manifest(text: str) -> TestManifest:
                 f"{MANIFEST_FILENAME}: tool {tool!r} is not shipped (TESTER.md slices) — "
                 f"available today: {', '.join(RECOGNIZED_TOOLS) or 'none'}"
             )
-    return TestManifest(env=env, tools=tools, prose="\n".join(lines[end + 1 :]).strip())
+    egress = fields.get("egress", ())
+    for host in egress:
+        if not _HOST.match(host):
+            raise ManifestError(f"{MANIFEST_FILENAME} frontmatter: egress {host!r} is not a host name")
+    return TestManifest(env=env, tools=tools, egress=egress, prose="\n".join(lines[end + 1 :]).strip())
 
 
 def resolve_test_env(

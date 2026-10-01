@@ -46,6 +46,7 @@ import structlog
 from dev_agent import env as agentenv
 
 from control_plane import runner as runner_mod
+from control_plane.egress import EGRESS_ANNOTATION, as_json, declaration
 from control_plane.phases import (
     PHASE_URL_TTL_S,
     PhaseEnv,
@@ -205,6 +206,10 @@ class JobsRunner:
         cluster (`tests/test_jobs_runner.py`)."""
         session = {"name": "session", "mountPath": agentenv.CONTAINER_SESSION_DIR}
         repo = {"name": "repo", "mountPath": CLONE_PARENT}
+        # what this pod may reach, declared as data (G6): enforcement is the
+        # adopter's CNI, and this is what its policy is generated from
+        urls = [v for v in (*phase_env.init.values(), *phase_env.harvest.values()) if v.startswith("http")]
+        egress_annotation = {EGRESS_ANNOTATION: json.dumps(as_json(declaration(spec, urls)))}
         signal = {"name": "signal", "mountPath": SIGNAL_DIR}
         return {
             "apiVersion": "batch/v1",
@@ -215,7 +220,7 @@ class JobsRunner:
                 "labels": {"app": "burst", "burst": spec.burst_id, "role": spec.role},
                 # the task id carries '/' and '#', which no label value may — and
                 # it is the one thing a human looking at a stuck pod wants
-                "annotations": {"autonomous-dev/task": spec.task_id},
+                "annotations": {"autonomous-dev/task": spec.task_id, **egress_annotation},
             },
             "spec": {
                 # one burst, one attempt: a retry is the scheduler's decision,
@@ -224,7 +229,11 @@ class JobsRunner:
                 "activeDeadlineSeconds": int(self.deadline_s),
                 "ttlSecondsAfterFinished": TTL_AFTER_FINISHED_S,
                 "template": {
-                    "metadata": {"labels": {"app": "burst", "burst": spec.burst_id}},
+                    # on the pod too: a policy engine admits pods, not Jobs
+                    "metadata": {
+                        "labels": {"app": "burst", "burst": spec.burst_id, "role": spec.role},
+                        "annotations": egress_annotation,
+                    },
                     "spec": {
                         **({"runtimeClassName": spec.runtime_class} if spec.runtime_class else {}),
                         "restartPolicy": "Never",

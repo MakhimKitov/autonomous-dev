@@ -5,6 +5,8 @@
 #
 #   ./scripts/burst-cluster.sh            # build it, print the exports
 #   ./scripts/burst-cluster.sh --gvisor   # ...and a second RuntimeClass, `gvisor` (G4)
+#   ./scripts/burst-cluster.sh --cilium   # ...on Cilium, bursts' egress walled to the declaration (G6)
+#                                         #    (at creation only: delete a kindnet cluster first)
 #   ./scripts/burst-cluster.sh --delete   # take it away
 #
 # Two things here are not obvious, and both are about a laptop rather than about
@@ -31,12 +33,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # neither a laptop's VM nor a CI runner offers — so the harness is proven here
 # on two runtimes, and the bake-off proper (G5) runs it on hardware with all three.
 GVISOR_RELEASE="${BURST_GVISOR_RELEASE:-20260921.0}"
+# The M4 rig's CNI (G6): an FQDN-capable one, because the declaration names hosts.
+# A testing rig's instrument, never the platform's — the reference policy it
+# enforces is in examples/egress/, and an adopter's CNI is theirs.
+CILIUM_VERSION="${BURST_CILIUM_VERSION:-1.19.8}"
 
-if [[ "${1:-}" == "--delete" ]]; then
-  kind delete cluster --name "$CLUSTER"
-  docker rm -f burst-archive >/dev/null 2>&1 || true
-  exit 0
-fi
+gvisor=0 cilium=0
+for arg in "$@"; do
+  case "$arg" in
+    --delete)
+      kind delete cluster --name "$CLUSTER"
+      docker rm -f burst-archive >/dev/null 2>&1 || true
+      exit 0 ;;
+    --gvisor) gvisor=1 ;;
+    --cilium) cilium=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 
 for tool in kind kubectl docker; do
   command -v "$tool" >/dev/null || { echo "$tool is not on PATH" >&2; exit 1; }
@@ -47,9 +60,27 @@ host_ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/n
 
 if ! kind get clusters | grep -qx "$CLUSTER"; then
   echo "==> creating the cluster"
-  kind create cluster --name "$CLUSTER"
+  if (( cilium )); then
+    printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  disableDefaultCNI: true\n' \
+      | kind create cluster --name "$CLUSTER" --config=-
+  else
+    kind create cluster --name "$CLUSTER"
+  fi
 fi
 ctx="kind-$CLUSTER"
+
+if (( cilium )); then
+  echo "==> Cilium $CILIUM_VERSION as the CNI"
+  command -v helm >/dev/null || { echo "helm is not on PATH" >&2; exit 1; }
+  helm repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true
+  helm repo update cilium >/dev/null
+  helm upgrade --install cilium cilium/cilium --version "$CILIUM_VERSION" \
+    --kube-context "$ctx" --namespace kube-system \
+    --set image.pullPolicy=IfNotPresent --set ipam.mode=kubernetes --set operator.replicas=1 \
+    --wait >/dev/null
+  kubectl --context "$ctx" -n kube-system rollout status ds/cilium --timeout=300s >/dev/null
+  kubectl --context "$ctx" wait --for=condition=Ready node --all --timeout=300s >/dev/null
+fi
 
 echo "==> the archive, published where both sides can reach it"
 if ! docker ps --format '{{.Names}}' | grep -qx burst-archive; then
@@ -69,7 +100,7 @@ if [[ -n "${BURST_AGENT_IMAGE:-}" ]]; then
   kind load docker-image --name "$CLUSTER" "$BURST_AGENT_IMAGE"
 fi
 
-if [[ "${1:-}" == "--gvisor" ]]; then
+if (( gvisor )); then
   echo "==> gVisor $GVISOR_RELEASE in the node, as RuntimeClass gvisor"
   node="$CLUSTER-control-plane"
   if ! docker exec "$node" test -x /usr/local/bin/runsc; then
@@ -99,6 +130,30 @@ fi
 echo "==> the namespace and the runner's account"
 kubectl --context "$ctx" apply -f "$ROOT/examples/k8s/burst-runner.yaml" >/dev/null
 
+if (( cilium )); then
+  echo "==> bursts' egress: the reference policy, and this rig's archive"
+  kubectl --context "$ctx" apply -f "$ROOT/examples/egress/cilium-burst-egress.yaml" >/dev/null
+  # the deployment-specific half of the declaration: where this rig's archive is
+  kubectl --context "$ctx" apply -f - >/dev/null <<POLICY
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: burst-egress-archive
+  namespace: $NAMESPACE
+spec:
+  endpointSelector:
+    matchLabels:
+      app: burst
+  egress:
+    - toCIDR:
+        - $host_ip/32
+      toPorts:
+        - ports:
+            - port: "8333"
+              protocol: TCP
+POLICY
+fi
+
 cat <<EXPORTS
 
 The cluster is up. Point a shell at it:
@@ -108,7 +163,7 @@ The cluster is up. Point a shell at it:
   export BURST_NAMESPACE=$NAMESPACE
   export ARCHIVE_URL='s3://platform:platform-dev-secret@$host_ip:8333/$BUCKET?tls=false'
   export BURST_PHASES_IMAGE=$PHASES_IMAGE
-  export BURST_REPLAY_RUNTIMES=$([[ "${1:-}" == "--gvisor" ]] && echo default,gvisor || echo default)
+  export BURST_REPLAY_RUNTIMES=$( (( gvisor )) && echo default,gvisor || echo default)
 
   uv run pytest tests/test_runner_contract.py tests/test_jobs_runner.py tests/test_replay.py
 

@@ -1,0 +1,11 @@
+{
+  "name": "walls",
+  "task_id": "MakhimKitov/discord-bot#0",
+  "image": "autonomous-dev/dev-agent:latest",
+  "command": "walls",
+  "role": "tester",
+  "clone": {
+    "url": "https://github.com/MakhimKitov/discord-bot.git",
+    "ref": "b4c346bc51de581394a2dd8a1e378d500c1876c2"
+  }
+}
