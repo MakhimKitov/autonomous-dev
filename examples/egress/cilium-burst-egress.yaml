@@ -1,0 +1,49 @@
+# Reference egress policy for burst pods (G6, TO-BE §6 "Network walls").
+#
+# The platform declares every burst's egress as data — the `autonomous-dev/egress`
+# annotation on the Job and its pod (control_plane/egress.py) — and enforcement
+# is the adopter's CNI. This is that declaration's platform-wide half written for
+# one FQDN-capable CNI, as an example: the M4 rig (`scripts/burst-cluster.sh
+# --cilium`) runs on it, and the M4 probes (`dev-agent walls`) prove a burst
+# under it reaches what it declares and nothing else.
+#
+# Deployment-specific entries are not here, because they are not the platform's
+# to know: the archive's host, the OTLP endpoint, a tester's sandbox hosts. Each
+# is in the pod's annotation; add a policy per entry, or generate them from it.
+#
+# Once any egress policy selects a pod, everything it does not allow is denied —
+# the cluster API, the cloud metadata endpoint, every other pod, every other host.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: burst-egress
+  namespace: bursts
+spec:
+  endpointSelector:
+    matchLabels:
+      app: burst
+  egress:
+    # name resolution, through the CNI's DNS proxy: what makes toFQDNs work
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    # GitHub (the clone; a dev burst's push and PR), the inference API, and the
+    # dev-agent image's toolchain index — the declaration's fixed entries
+    - toFQDNs:
+        - matchName: github.com
+        - matchName: api.github.com
+        - matchName: api.anthropic.com
+        - matchName: pypi.org
+        - matchName: files.pythonhosted.org
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

@@ -37,7 +37,7 @@ class RecordingShell(ShellDocker):
     """The docker rig, scripted for every trial id, remembering each spec."""
 
     def __init__(self, tmp_path, archive, refuse: set[str] = frozenset()):
-        (tmp_path / "pids").mkdir(parents=True)
+        (tmp_path / "pids").mkdir(parents=True, exist_ok=True)
         super().__init__(tmp_path / "pids", archive=archive)
         self.specs = []
         self.refuse = refuse
@@ -140,7 +140,7 @@ def test_a_fixture_says_what_it_replays_or_is_refused(tmp_path):
 
     for bad, says in [
         ({"image": ""}, "missing image"),
-        ({"command": "deploy"}, "run or check"),
+        ({"command": "deploy"}, "must be one of run, check, walls"),
         ({"node": {}}, "a seed, or a key"),
         ({"node": {"seed": "nowhere"}}, "not a directory"),
         ({"clone": {"url": "https://example/p.git"}}, "a url and a ref"),
@@ -222,3 +222,50 @@ def test_the_golden_burst_runs_under_each_runtime_class(tmp_path):
     assert table["errors"] == {} and table["identical"] is True
     assert set(table["rows"]["restored"].values()) == {True}
     assert all(value is not None for value in table["rows"]["boot_s"].values())
+
+
+# --- M4 (G6): a walls burst's result carries the breach rate ---
+
+
+def _walls(breaches: int) -> str:
+    probes_ = [
+        {"name": "egress-undeclared-host", "kind": "attack", "succeeded": bool(breaches), "breached": bool(breaches)},
+        {"name": "k8s-service-account-token", "kind": "attack", "succeeded": False, "breached": False},
+        {"name": "egress-declared-host", "kind": "control", "succeeded": True, "breached": False},
+    ]
+    result = {"walls": probes_, "attempted": 2, "breaches": breaches, "controls_held": True, "ok": not breaches}
+    return f"printf '%s' '{json.dumps(result)}' > \"$CLAUDE_CONFIG_DIR/{BURST_RESULT_FILENAME}\""
+
+
+class WallsShell(RecordingShell):
+    def __init__(self, tmp_path, archive, breaches_on: set[str] = frozenset()):
+        super().__init__(tmp_path, archive)
+        self.breaches_on = breaches_on
+
+    def run(self, spec, log_path=None, heartbeat=None):
+        self.specs.append(spec)
+        self.scripts[spec.burst_id] = _walls(1 if spec.runtime_class in self.breaches_on else 0)
+        return ShellDocker.run(self, spec, log_path, heartbeat)
+
+
+def test_the_matrix_carries_the_breach_rate_and_each_probe(tmp_path):
+    archive = LocalSessionArchive(tmp_path / "archive")
+    runner = WallsShell(tmp_path, archive, breaches_on={"weak"})
+    golden = GoldenBurst(name="walls", task_id=TASK, image="i", command="walls")
+    trials = replay(golden, [DEFAULT_RUNTIME, "weak"], runner, archive, tmp_path / "work", run_id=RUN)
+    table = matrix(golden, trials)
+    assert table["rows"]["outcome"] == {"default": "held", "weak": "breached"}
+    assert table["rows"]["breaches"] == {"default": "0/2", "weak": "1/2"}
+    assert table["breaches"] == 1
+    assert table["probes"]["egress-undeclared-host"] == {"default": "held", "weak": "BREACH"}
+    assert table["probes"]["egress-declared-host"] == {"default": "ok", "weak": "ok"}
+    assert "| egress-undeclared-host | held | BREACH |" in render(table)
+
+
+def test_a_breach_fails_the_verb_whatever_the_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "open_runner", lambda archive: WallsShell(tmp_path / "rig", archive, {"weak"}))
+    fixture = tmp_path / "walls.json"
+    fixture.write_text(json.dumps({"name": "walls", "task_id": TASK, "image": "i", "command": "walls"}))
+    base = ["replay", str(fixture), "--data-dir", str(tmp_path / "data"), "--out", str(tmp_path / "out")]
+    assert cli.main([*base, "--runtime", "default"]) == 0
+    assert cli.main([*base, "--runtime", "weak"]) == 1

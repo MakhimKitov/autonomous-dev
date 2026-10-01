@@ -684,6 +684,22 @@ the runner contract and `tests/test_replay.py` there, replays
 Kata is not on that list because a kind node has no nested virtualization; the
 bake-off proper is G5's, on hardware.
 
+**Egress as data, M4 as a number (G6)**: every Job and its pod carry
+`autonomous-dev/egress` — JSON entries `{host, port, why}` from
+`control_plane/egress.py`: GitHub; on `run` the inference API and the uv
+toolchain's index; the archive's host (from the minted URLs); the OTLP endpoint;
+and for a tester only, `TESTING.md`'s new `egress:` hosts (`BurstSpec.egress`).
+The platform enforces none of it — `examples/egress/cilium-burst-egress.yaml` is
+the reference policy, and `test_egress.py` keeps it equal to the declaration's
+fixed hosts. `dev-agent walls` is the M4 probe set: attacks that must fail (each
+failure is a violations-feed entry, so on a real burst it reaches the ledger via
+`fold_artifacts`) and one control that must succeed (a box that reaches nothing
+proves no allowlist). Replayed through the G4 harness, the matrix gets a
+`breaches` row and a per-probe table, and any breach makes `control-plane replay`
+exit 1. The rig is `scripts/burst-cluster.sh --gvisor --cilium` (Cilium pinned,
+operator at one replica on a one-node kind); without the policy the probes find
+2/7 (the undeclared host, the cluster API), with it 0/7 on both runtimes.
+
 With `LEDGER_DSN` and/or `ARCHIVE_URL` set, `uv run pytest` additionally runs that
 store's contract suite (`test_ledger_contract.py`, `test_archive_contract.py`)
 against the service backend as well as the single-node one. Everything else keeps

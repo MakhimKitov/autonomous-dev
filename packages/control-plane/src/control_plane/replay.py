@@ -21,7 +21,9 @@ What a fixture is (`GoldenBurst.load`) — a JSON file:
     what is replayed and in which agent image;
 ``command``
     ``run`` (the engine, on this machine's credential — it costs what the burst
-    costs) or ``check`` (the image's boot smoke: no network, no key, no spend);
+    costs), ``check`` (the image's boot smoke: no network, no key, no spend) or
+    ``walls`` (the M4 probes, G6: the box tries its own walls, and the matrix
+    carries the breach rate);
 ``node``
     the archived snapshot to start from: ``{"key", "checksum"}`` as the ledger
     recorded them, or ``{"seed": "<dir>"}`` — a directory next to the fixture,
@@ -60,6 +62,7 @@ CRITERIA: tuple[tuple[str, str], ...] = (
     ("exit_code", "the agent container's exit code"),
     ("restored", "the node's session was on the volume (snapshot restore)"),
     ("archived", "the harvest archived the trial's volume (snapshot save)"),
+    ("breaches", "walls bursts: probes that got out, over probes attempted (M4, target 0)"),
     ("boot_s", "pod created → agent started: scheduling, sandbox boot, init (whole seconds)"),
     ("init_s", "the init phase: the node's GET and the clone"),
     ("agent_s", "the agent container's own run"),
@@ -73,6 +76,9 @@ NOT_MEASURED = {
     "egress policy enforcement": "the M4 suite's (G6), replayed through this harness",
     "ops burden on our cluster": "a judgment, recorded in the bake-off DR (G5)",
 }
+
+
+COMMANDS = ("run", "check", "walls")
 
 
 class ReplayError(RuntimeError):
@@ -107,8 +113,8 @@ class GoldenBurst:
         missing = [name for name in ("name", "task_id", "image") if not raw.get(name)]
         if missing:
             raise ReplayError(f"{path}: missing {', '.join(missing)}")
-        if raw.get("command", "run") not in ("run", "check"):
-            raise ReplayError(f"{path}: command must be run or check")
+        if raw.get("command", "run") not in COMMANDS:
+            raise ReplayError(f"{path}: command must be one of {', '.join(COMMANDS)}")
         node = seed = None
         spec = raw.get("node")
         if spec is not None:
@@ -163,6 +169,10 @@ class Trial:
             return "no result"
         if "check" in self.result:  # the boot smoke's own shape
             return "succeeded" if self.result.get("ok") else "failed (check)"
+        if "walls" in self.result:  # the M4 probes' own shape
+            if self.result.get("breaches"):
+                return "breached"
+            return "held" if self.result.get("controls_held") else "failed (a control did not hold)"
         if self.result.get("is_error"):
             return f"failed ({self.result.get('subtype') or 'no subtype'})"
         return "succeeded"
@@ -188,6 +198,10 @@ class Trial:
             return self.restored
         if criterion == "archived":
             return self.archived if self.error is None else None
+        if criterion == "breaches":
+            if self.result is None or "walls" not in self.result:
+                return None
+            return f"{self.result.get('breaches', 0)}/{self.result.get('attempted', 0)}"
         return self.timings.get(criterion)
 
 
@@ -283,6 +297,13 @@ def _checkout(clone: tuple[str, str], dest: Path) -> None:
 def matrix(golden: GoldenBurst, trials: list[Trial]) -> dict:
     """The criteria matrix: one row per criterion, one column per runtime."""
     outcomes = {trial.outcome for trial in trials}
+    probes: dict[str, dict[str, str]] = {}
+    for trial in trials:
+        for probe in (trial.result or {}).get("walls") or []:
+            verdict = "BREACH" if probe.get("breached") else (
+                "held" if probe.get("kind") == "attack" else ("ok" if probe.get("succeeded") else "FAILED")
+            )
+            probes.setdefault(probe.get("name", "?"), {})[trial.runtime] = verdict
     return {
         "golden": golden.name,
         "task_id": golden.task_id,
@@ -292,6 +313,8 @@ def matrix(golden: GoldenBurst, trials: list[Trial]) -> dict:
         "rows": {name: {t.runtime: t.row(name) for t in trials} for name, _ in CRITERIA},
         "identical": len(outcomes) == 1 and "did not run" not in outcomes,
         "errors": {t.runtime: t.error for t in trials if t.error is not None},
+        "breaches": sum(int((t.result or {}).get("breaches") or 0) for t in trials),
+        "probes": probes,
         "not_measured": dict(NOT_MEASURED),
     }
 
@@ -311,6 +334,10 @@ def render(table: dict) -> str:
     for name, _ in CRITERIA:
         cells = [_cell(table["rows"][name].get(runtime)) for runtime in runtimes]
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
+    if table.get("probes"):
+        lines += ["", "| probe | " + " | ".join(runtimes) + " |", "|---|" + "---|" * len(runtimes)]
+        for name, verdicts in table["probes"].items():
+            lines.append(f"| {name} | " + " | ".join(verdicts.get(r, "—") for r in runtimes) + " |")
     lines += ["", "What the rows measure:", ""]
     lines += [f"- `{name}` — {meaning}" for name, meaning in CRITERIA]
     if table["errors"]:

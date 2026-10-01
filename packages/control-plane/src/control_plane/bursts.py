@@ -274,6 +274,7 @@ def execute_burst(
     with_github: bool = False,
     mount_codex: bool = False,
     extra_env: dict[str, str] | None = None,
+    egress: tuple[str, ...] = (),
     runner: Runner | None = None,
     heartbeat: Heartbeat | None = None,
     capacity: Capacity | None = None,
@@ -432,6 +433,7 @@ def execute_burst(
             # needs the working tree it is smoking against
             clone_token=mint_clone_token(task) if runner.pod_side else None,
             extra_env=dict(extra_env or {}),
+            egress=tuple(egress),
         )
         log_path = stores.data_dir / "logs" / f"{burst_id}.log"
         fenced = False

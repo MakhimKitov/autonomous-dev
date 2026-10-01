@@ -1451,7 +1451,8 @@ def _replay(args: argparse.Namespace) -> int:
     markdown = replay.render(table)
     (args.out / "matrix.md").write_text(markdown, encoding="utf-8")
     print(markdown)
-    if table["errors"] or (args.strict and not table["identical"]):
+    # a breach fails the run whatever the flags say: the M4 target is zero
+    if table["errors"] or table["breaches"] or (args.strict and not table["identical"]):
         return 1
     return 0
 

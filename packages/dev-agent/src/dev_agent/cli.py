@@ -1,4 +1,4 @@
-"""Container entrypoint: ``dev-agent run`` (a burst) / ``dev-agent check`` (boot smoke).
+"""Container entrypoint: ``dev-agent run`` (a burst) / ``check`` (boot smoke) / ``walls`` (M4 probes).
 
 ``check`` verifies the box is viable — env contract satisfied, clone present,
 ``claude`` CLI on PATH, and, when told to resume, the session's transcript on
@@ -20,6 +20,7 @@ import structlog
 from dev_agent.burst import run_burst_sync
 from dev_agent.env import BurstEnv, EnvError
 from dev_agent.log import configure_logging
+from dev_agent.probes import walls
 
 log = structlog.get_logger()
 
@@ -54,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="dev-agent",
         description="Burst worker — configured entirely by environment (see dev_agent.env).",
     )
-    parser.add_argument("command", nargs="?", default="run", choices=["run", "check"])
+    parser.add_argument("command", nargs="?", default="run", choices=["run", "check", "walls"])
     args = parser.parse_args(argv)
     configure_logging()
 
@@ -76,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "check":
         return _check(env)
+    if args.command == "walls":
+        return walls(env)  # the box tries its own walls (G6); no engine, no key
 
     result = run_burst_sync(env)
     log.info(

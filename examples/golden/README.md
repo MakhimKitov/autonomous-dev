@@ -12,6 +12,14 @@ criteria matrix.
   restore, the harvest — and nothing a model does. CI replays it under
   `default` and `gvisor` on a kind cluster and uploads the matrix.
 
+- **`walls.json`** — the M4 probes (G6): `dev-agent walls` as a tester-role burst
+  tries its own walls from inside the box — an undeclared host, the metadata
+  endpoint, the cluster API, a service-account token, a store credential, a
+  sibling container's presigned URL, a GitHub token — and reaches the declared
+  GitHub host as the control. The matrix carries the breach rate (`breaches`)
+  and each probe's verdict; any breach fails the verb. CI replays it on Cilium
+  with `examples/egress/` applied.
+
 A fixture for a real node needs no seed: `--node <burst id>` replays from that
 burst's snapshot and session as the ledger recorded them, and `"command": "run"`
 runs the engine on this machine's credential — it costs what the burst cost.
